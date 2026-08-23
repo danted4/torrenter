@@ -2,6 +2,7 @@ import { SingleBar, Presets } from "cli-progress";
 import WebTorrent from "webtorrent";
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
 
 import { LOGGER , LOADERS, FORMATTERS, VALIDATORS } from '../utils/index.js';
 
@@ -11,6 +12,7 @@ const { formatETA, formatSize, formatSpeed, getDisplayFormat } = FORMATTERS;
 const { isValidMagnetURL, isValidDownloadURL } = VALIDATORS;
 
 const DOWNLOAD_DIRECTORY = './downloads';
+const RESUME_DIRECTORY = path.join(DOWNLOAD_DIRECTORY, '.nodewt');
 const PART_COUNT = 4;
 
 const getFilename = (downloadURL, headers) => {
@@ -44,6 +46,51 @@ const streamResponse = async (response, fileHandle, position, state, progressBar
     }
 };
 
+const getResumeKey = (downloadURL) => createHash('sha256').update(downloadURL).digest('hex').slice(0, 16);
+
+const getResumeManifest = async (resumeKey) => {
+    try {
+        return JSON.parse(await fs.promises.readFile(path.join(RESUME_DIRECTORY, `${resumeKey}.json`), 'utf8'));
+    } catch {
+        return null;
+    }
+};
+
+const saveResumeManifest = (resumeKey, manifest) => fs.promises.writeFile(
+    path.join(RESUME_DIRECTORY, `${resumeKey}.json`),
+    JSON.stringify(manifest)
+);
+
+const removeResumeFiles = async (resumeKey) => {
+    await Promise.all([
+        fs.promises.rm(path.join(RESUME_DIRECTORY, `${resumeKey}.json`), { force: true }),
+        ...Array.from({ length: PART_COUNT }, (_, partIndex) => fs.promises.rm(
+            path.join(RESUME_DIRECTORY, `${resumeKey}.part-${partIndex}`),
+            { force: true }
+        ))
+    ]);
+};
+
+const mergeParts = async (partPaths, outputHandle, progressBar, state, total) => {
+    for (const partPath of partPaths) {
+        const partHandle = await fs.promises.open(partPath, 'r');
+        try {
+            let position = 0;
+            while (true) {
+                const buffer = Buffer.allocUnsafe(1024 * 1024);
+                const { bytesRead } = await partHandle.read(buffer, 0, buffer.length, position);
+                if (!bytesRead) break;
+                await outputHandle.write(buffer, 0, bytesRead, state.merged);
+                position += bytesRead;
+                state.merged += bytesRead;
+                updateURLProgress(progressBar, { downloaded: state.merged, startedAt: state.startedAt }, total);
+            }
+        } finally {
+            await partHandle.close();
+        }
+    }
+};
+
 const getRemoteMetadata = async (downloadURL) => {
     try {
         const response = await fetch(downloadURL, { method: 'HEAD' });
@@ -66,7 +113,7 @@ export const startURLDownload = async (downloadURL) => {
     try {
         log('\nPreparing direct download...\n');
         const metadata = await getRemoteMetadata(downloadURL);
-        const response = metadata?.supportsRanges && Number.isFinite(metadata.size) && metadata.size > 0
+        const response = Number.isFinite(metadata?.size) && metadata.size > 0
             ? null
             : await fetch(downloadURL);
 
@@ -75,25 +122,78 @@ export const startURLDownload = async (downloadURL) => {
         const total = metadata?.size > 0 ? metadata.size : Number(response?.headers.get('content-length')) || 0;
         const filename = metadata?.filename || getFilename(downloadURL, response.headers);
         await fs.promises.mkdir(DOWNLOAD_DIRECTORY, { recursive: true });
-        fileHandle = await fs.promises.open(path.join(DOWNLOAD_DIRECTORY, filename), 'w');
         progressBar = new SingleBar({ format: getDisplayFormat() }, Presets.shades_classic);
-        const state = { downloaded: 0, startedAt: Date.now() };
+        const state = { downloaded: 0, merged: 0, startedAt: Date.now() };
 
-        if (metadata?.supportsRanges && total > 0) {
-            await fileHandle.truncate(total);
-            progressBar.start(total, 0);
+        if (total > 0) {
+            const resumeKey = getResumeKey(downloadURL);
             const partSize = Math.ceil(total / PART_COUNT);
-            await Promise.all(Array.from({ length: PART_COUNT }, async (_, partIndex) => {
-                const start = partIndex * partSize;
-                const end = Math.min(total - 1, start + partSize - 1);
-                if (start > end) return;
-                const partResponse = await fetch(downloadURL, { headers: { Range: `bytes=${start}-${end}` } });
-                if (partResponse.status !== 206) throw new Error('The server did not honor ranged requests');
-                await streamResponse(partResponse, fileHandle, start, state, progressBar, total);
+            const manifest = await getResumeManifest(resumeKey);
+            const canResume = manifest?.url === downloadURL
+                && manifest.size === total
+                && manifest.partCount === PART_COUNT;
+            if (!canResume) await removeResumeFiles(resumeKey);
+            const nextManifest = { url: downloadURL, size: total, partCount: PART_COUNT, filename };
+            await saveResumeManifest(resumeKey, nextManifest);
+            const partPaths = Array.from({ length: PART_COUNT }, (_, partIndex) =>
+                path.join(RESUME_DIRECTORY, `${resumeKey}.part-${partIndex}`)
+            );
+            const existingSizes = await Promise.all(partPaths.map(async (partPath, partIndex) => {
+                try {
+                    const size = (await fs.promises.stat(partPath)).size;
+                    const partEnd = Math.min(total, (partIndex + 1) * partSize);
+                    return Math.min(size, Math.max(0, partEnd - partIndex * partSize));
+                } catch {
+                    return 0;
+                }
             }));
+            state.downloaded = existingSizes.reduce((sum, size) => sum + size, 0);
+            progressBar.start(total, state.downloaded);
+            let multipartCompleted = true;
+            try {
+                await Promise.all(partPaths.map(async (partPath, partIndex) => {
+                    const start = partIndex * partSize;
+                    const end = Math.min(total - 1, start + partSize - 1);
+                    if (start > end) return;
+                    const existingSize = existingSizes[partIndex];
+                    if (existingSize === end - start + 1) return;
+                    const rangeStart = start + existingSize;
+                    const partResponse = await fetch(downloadURL, { headers: { Range: `bytes=${rangeStart}-${end}` } });
+                    if (partResponse.status !== 206) throw new Error('The server did not honor ranged requests');
+                    const partHandle = await fs.promises.open(partPath, existingSize ? 'r+' : 'w');
+                    try {
+                        await streamResponse(partResponse, partHandle, existingSize, state, progressBar, total);
+                    } finally {
+                        await partHandle.close();
+                    }
+                    const completedSize = (await fs.promises.stat(partPath)).size;
+                    if (completedSize !== end - start + 1) throw new Error('A download part was incomplete');
+                }));
+            } catch (rangeError) {
+                if (rangeError.message !== 'The server did not honor ranged requests') throw rangeError;
+                multipartCompleted = false;
+                await removeResumeFiles(resumeKey);
+                state.downloaded = 0;
+                const fallbackResponse = await fetch(downloadURL);
+                if (!fallbackResponse.ok) throw rangeError;
+                fileHandle = await fs.promises.open(path.join(DOWNLOAD_DIRECTORY, filename), 'w');
+                await streamResponse(fallbackResponse, fileHandle, 0, state, progressBar, total);
+                await fileHandle.close();
+                fileHandle = null;
+            }
+            if (multipartCompleted) {
+                fileHandle = await fs.promises.open(path.join(DOWNLOAD_DIRECTORY, filename), 'w');
+                await mergeParts(partPaths, fileHandle, progressBar, state, total);
+                await fileHandle.close();
+                fileHandle = null;
+            }
+            await removeResumeFiles(resumeKey);
         } else {
+            fileHandle = await fs.promises.open(path.join(DOWNLOAD_DIRECTORY, filename), 'w');
             progressBar.start(total || 1, 0);
             await streamResponse(response, fileHandle, 0, state, progressBar, total || state.downloaded);
+            await fileHandle.close();
+            fileHandle = null;
         }
 
         progressBar.update(total || state.downloaded);
