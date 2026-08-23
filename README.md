@@ -45,6 +45,7 @@ A powerful, feature-rich Node.js CLI wrapper for WebTorrent with real-time progr
 - ⏱️ **ETA Calculation**: Smart time estimation with human-readable format
 - 🎨 **Animated Spinner**: Visual feedback during torrent initialization
 - ✅ **Magnet URL Validation**: Built-in validation for magnet links
+- 📦 **Direct URL Downloads**: Download HTTP(S) files with four parallel byte-range parts when supported
 - 🔄 **Auto-formatting**: Intelligent size and speed formatting
 - 🌐 **Node.js 22 LTS**: Built for the latest Node.js LTS version
 
@@ -225,11 +226,11 @@ nodeWT/
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
 | **server.js** | Entry point & user interaction | `promptUser()` |
-| **client/index.js** | Torrent management | `startDownload()` |
+| **client/index.js** | Torrent and direct URL management | `startDownload()`, `startURLDownload()` |
 | **formatters** | Data presentation | `formatETA()`, `formatSize()`, `formatSpeed()` |
 | **loaders** | Visual feedback | `updateSpinner()` |
 | **logger** | Console output | `log()`, `error()`, `info()` |
-| **validators** | Input validation | `isValidMagnetURL()` |
+| **validators** | Input validation | `isValidMagnetURL()`, `isValidDownloadURL()` |
 
 ---
 
@@ -270,17 +271,26 @@ nodeWT/
    npm start
    ```
 
-2. **Enter Magnet URL**
+2. **Choose a download type**
    ```
-   Please paste your magnetURI:
-
-   magnet:?xt=urn:btih:...
+   Choose download type:
+   1. Magnet URL
+   2. Direct URL (multi-part)
    ```
 
-3. **Monitor Progress**
+3. **Enter the URL**
+   ```
+   Please paste the direct download URL:
+
+   https://example.com/file.zip
+   ```
+
+4. **Monitor Progress**
    ```
    [████████████████░░░░] 75% | Peers: 12 | D: 750.45 MB @ 2.5 MB/s | T: 1.0 GB | ETA: 2 minutes
    ```
+
+Direct URL downloads are saved to `./downloads`. If the server returns `Accept-Ranges: bytes` and a file size, four parts download concurrently. Servers without range support use a regular streamed download.
 
 ### Example Session
 
