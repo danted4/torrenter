@@ -1,7 +1,7 @@
 {
-  "name": "webtorrent",
-  "version": "1.0.0",
-  "description": "",
+  "name": "webtorrent-cli-client",
+  "version": "2.1.0",
+  "description": "Node.js terminal client for WebTorrent magnet downloads and multipart HTTP(S) direct downloads with progress bar, peers, and resume.",
   "main": "server.js",
   "type": "module",
   "engines": {
@@ -11,6 +11,29 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "cross-env NODE_NO_WARNINGS=1 node server.js"
   },
+  "keywords": [
+    "webtorrent",
+    "torrent",
+    "magnet-link",
+    "magnet-uri",
+    "bittorrent",
+    "p2p",
+    "cli",
+    "terminal",
+    "nodejs",
+    "download",
+    "multipart",
+    "resume-download",
+    "progress-bar"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danted4/webtorrent-cli-client.git"
+  },
+  "bugs": {
+    "url": "https://github.com/danted4/webtorrent-cli-client/issues"
+  },
+  "homepage": "https://github.com/danted4/webtorrent-cli-client#readme",
   "author": "kanav",
   "license": "MIT",
   "dependencies": {
