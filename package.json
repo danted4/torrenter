@@ -1,7 +1,7 @@
 {
-  "name": "webtorrent-cli-client",
-  "version": "2.1.0",
-  "description": "Node.js terminal client for WebTorrent magnet downloads and multipart HTTP(S) direct downloads with progress bar, peers, and resume.",
+  "name": "torrent-http-download-cli",
+  "version": "2.2.0",
+  "description": "Node.js CLI with two download modes: WebTorrent magnet/torrent downloads and parallel multipart HTTP(S) direct downloads with byte-range resume.",
   "main": "server.js",
   "type": "module",
   "engines": {
@@ -12,28 +12,30 @@
     "start": "cross-env NODE_NO_WARNINGS=1 node server.js"
   },
   "keywords": [
-    "webtorrent",
     "torrent",
+    "webtorrent",
     "magnet-link",
-    "magnet-uri",
     "bittorrent",
     "p2p",
+    "http-download",
+    "direct-download",
+    "multipart-download",
+    "parallel-download",
+    "byte-range",
+    "resume-download",
     "cli",
     "terminal",
     "nodejs",
-    "download",
-    "multipart",
-    "resume-download",
     "progress-bar"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/danted4/webtorrent-cli-client.git"
+    "url": "git+https://github.com/danted4/torrent-http-download-cli.git"
   },
   "bugs": {
-    "url": "https://github.com/danted4/webtorrent-cli-client/issues"
+    "url": "https://github.com/danted4/torrent-http-download-cli/issues"
   },
-  "homepage": "https://github.com/danted4/webtorrent-cli-client#readme",
+  "homepage": "https://github.com/danted4/torrent-http-download-cli#readme",
   "author": "kanav",
   "license": "MIT",
   "dependencies": {

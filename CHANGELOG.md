@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [2.2.0] - 2026-08-29
+
+### Changed
+
+- Renamed repository to **torrent-http-download-cli** to reflect **both** download modes equally (torrent + multipart HTTP)
+- README repositioned: dual-mode tool, not WebTorrent-only; added "Two download modes" comparison table
+- Updated `package.json` description and keywords (`http-download`, `direct-download`, `parallel-download`, `byte-range`)
+
 ## [2.1.0] - 2026-08-29
 
 ### Changed
@@ -37,8 +45,9 @@ All notable changes to this project are documented here.
 
 - Initial WebTorrent magnet-link CLI with progress bar, peer count, speed, and ETA
 
-[2.1.0]: https://github.com/danted4/webtorrent-cli-client/releases/tag/v2.1.0
-[2.0.0]: https://github.com/danted4/webtorrent-cli-client/releases/tag/v2.0.0
-[1.0.2]: https://github.com/danted4/webtorrent-cli-client/releases/tag/v1.0.2
-[1.0.1]: https://github.com/danted4/webtorrent-cli-client/releases/tag/v1.0.1
-[1.0.0]: https://github.com/danted4/webtorrent-cli-client/releases/tag/1.0.0
+[2.2.0]: https://github.com/danted4/torrent-http-download-cli/releases/tag/v2.2.0
+[2.1.0]: https://github.com/danted4/torrent-http-download-cli/releases/tag/v2.1.0
+[2.0.0]: https://github.com/danted4/torrent-http-download-cli/releases/tag/v2.0.0
+[1.0.2]: https://github.com/danted4/torrent-http-download-cli/releases/tag/v1.0.2
+[1.0.1]: https://github.com/danted4/torrent-http-download-cli/releases/tag/v1.0.1
+[1.0.0]: https://github.com/danted4/torrent-http-download-cli/releases/tag/1.0.0

@@ -1,10 +1,15 @@
-# WebTorrent CLI Client
+# Torrent & HTTP Download CLI
 
-**Node.js terminal downloader for WebTorrent magnet links and multipart HTTP(S) direct URLs** — live progress bar, peer stats, speed, ETA, and resume.
+**Two download modes in one Node.js terminal app:**
 
-> **Keywords:** WebTorrent, torrent, magnet link, magnet URI, BitTorrent, P2P, Node.js CLI, terminal downloader, HTTP range requests, multipart download, resume download, progress bar, peer tracking.
+1. **Magnet / torrent** — WebTorrent P2P with peers, speed, and ETA  
+2. **Direct HTTP(S)** — **4-part parallel multipart download** with byte-range resume  
 
-Formerly **[nodeWT](https://github.com/danted4/nodeWT)** — renamed for searchability.
+Shared **progress bar**, validation, and `./downloads/` output. Not just a torrent client.
+
+> **Keywords:** torrent downloader, magnet link, WebTorrent, BitTorrent, P2P, HTTP download, direct download, multipart download, parallel download, byte-range, resume download, Node.js CLI, terminal downloader, progress bar.
+
+Formerly **nodeWT** / **webtorrent-cli-client**.
 
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -13,11 +18,12 @@ Formerly **[nodeWT](https://github.com/danted4/nodeWT)** — renamed for searcha
 ## Table of contents
 
 - [Why this exists](#why-this-exists)
+- [Two download modes](#two-download-modes)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Usage](#usage)
-  - [Option 1 — Magnet URL (WebTorrent)](#option-1--magnet-url-webtorrent)
-  - [Option 2 — Direct URL (multipart)](#option-2--direct-url-multipart)
+  - [Mode 1 — Magnet URL (torrent)](#mode-1--magnet-url-torrent)
+  - [Mode 2 — Direct URL (multipart HTTP)](#mode-2--direct-url-multipart-http)
 - [Progress bar](#progress-bar)
 - [How it works](#how-it-works)
 - [Configuration](#configuration)
@@ -31,27 +37,40 @@ Formerly **[nodeWT](https://github.com/danted4/nodeWT)** — renamed for searcha
 
 ## Why this exists
 
-Most GUI torrent clients are heavy. This project is a **small Node.js CLI** that wraps [WebTorrent](https://webtorrent.io/) for magnet-link downloads with a clean terminal UI — progress bar, peers, speed, and ETA.
+You often need a **terminal downloader** without installing a full GUI — whether the source is a **magnet link** or a **plain HTTPS file URL**.
 
-Since v2.0 it also supports **direct HTTP(S) downloads** using parallel byte-range parts (with resume) when the server allows it — useful for large files without a torrent.
+This CLI handles **both**:
+
+- **Torrents** via [WebTorrent](https://webtorrent.io/) — magnet links, peer discovery, live peer count  
+- **Direct files** via native `fetch` — **4 concurrent HTTP range parts**, automatic merge, and **resume** after interruption  
+
+One progress bar, one `./downloads/` folder, one `npm start` menu.
+
+---
+
+## Two download modes
+
+| | **1. Magnet / torrent** | **2. Direct HTTP(S)** |
+|---|---------------------------|------------------------|
+| **When to use** | `.torrent` / magnet P2P sources | CDN, mirror, or any direct file link |
+| **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
+| **Engine** | WebTorrent (BitTorrent P2P) | `fetch` + `Range: bytes=` |
+| **Parallelism** | WebTorrent piece picker | **4 parallel byte-range parts** |
+| **Resume** | WebTorrent built-in | Part files in `.downloads/.nodewt/` |
+| **Peers** | Shown in progress bar | N/A (`Peers: 0`) |
+| **Fallback** | — | Single-stream if server has no ranges |
 
 ---
 
 ## Features
 
-| | Magnet (WebTorrent) | Direct URL |
-|---|---------------------|------------|
-| **Input** | `magnet:?xt=urn:btih:…` | `https://…` |
-| **Protocol** | BitTorrent / WebTorrent P2P | HTTP(S) with optional ranges |
-| **Parallelism** | WebTorrent piece picker | 4 concurrent range parts |
-| **Resume** | WebTorrent built-in | Part files in `.downloads/.nodewt/` |
-| **Progress** | Peers, speed, ETA | Speed, ETA (peers shown as `0`) |
-
-- Real-time **cli-progress** bar with formatted size and speed
-- **Magnet URL** and **HTTP(S) URL** validation
-- Spinner during torrent client initialization
-- **Node.js 22+** (uses native `fetch` for direct downloads)
-- Files saved to `./downloads/`
+- **Dual-mode menu** — pick torrent or direct URL at startup  
+- **Multipart HTTP** — 4-part parallel download when `Accept-Ranges: bytes` is supported  
+- **Resume** — interrupted direct downloads continue from saved parts  
+- **WebTorrent** — magnet validation, DHT, peer stats  
+- **cli-progress** bar — size, speed, ETA, percentage  
+- **Node.js 22+** — native `fetch` for HTTP; no extra HTTP client  
+- **Cross-platform** — macOS, Linux, Windows  
 
 ---
 
@@ -61,13 +80,12 @@ Since v2.0 it also supports **direct HTTP(S) downloads** using parallel byte-ran
 
 - **Node.js 22+** ([nodejs.org](https://nodejs.org/) or `nvm install 22`)
 - **npm** or **yarn**
-- macOS, Linux, or Windows
 
 ### Install
 
 ```bash
-git clone https://github.com/danted4/webtorrent-cli-client.git
-cd webtorrent-cli-client
+git clone https://github.com/danted4/torrent-http-download-cli.git
+cd torrent-http-download-cli
 npm install
 ```
 
@@ -77,23 +95,19 @@ npm install
 npm start
 ```
 
-You will be prompted to choose a download type (magnet or direct URL).
+```
+Choose download type:
+1. Magnet URL
+2. Direct URL (multi-part)
+```
 
 ---
 
 ## Usage
 
-### Option 1 — Magnet URL (WebTorrent)
-
-```bash
-npm start
-```
+### Mode 1 — Magnet URL (torrent)
 
 ```
-Choose download type:
-1. Magnet URL
-2. Direct URL (multi-part)
-
 1
 
 Please paste your magnetURI:
@@ -101,19 +115,11 @@ Please paste your magnetURI:
 magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10
 ```
 
-The client connects to peers via WebTorrent, downloads to `./downloads/`, and exits when complete.
+WebTorrent connects to peers, downloads to `./downloads/`, and exits at 100%.
 
-### Option 2 — Direct URL (multipart)
-
-```bash
-npm start
-```
+### Mode 2 — Direct URL (multipart HTTP)
 
 ```
-Choose download type:
-1. Magnet URL
-2. Direct URL (multi-part)
-
 2
 
 Please paste the direct download URL:
@@ -121,15 +127,16 @@ Please paste the direct download URL:
 https://example.com/large-file.iso
 ```
 
-**When the server returns `Content-Length` and `Accept-Ranges: bytes`:**
+**Server supports byte ranges** (`Content-Length` + `Accept-Ranges: bytes`):
 
-- Downloads **4 parts in parallel**
-- **Resumes** interrupted parts from `.downloads/.nodewt/`
-- Merges parts into the final file in `./downloads/`
+1. Splits the file into **4 parts**  
+2. Downloads parts **in parallel**  
+3. **Resumes** from `.downloads/.nodewt/` if interrupted  
+4. **Merges** into the final file in `./downloads/`  
 
-**When ranges are not supported:** falls back to a single streamed download.
+**No range support:** automatically falls back to a single streamed download.
 
-Filename is taken from `Content-Disposition` or the URL path.
+Filename from `Content-Disposition` header or URL path.
 
 ---
 
@@ -139,14 +146,11 @@ Filename is taken from `Content-Disposition` or the URL path.
 [████████████████░░░░] 75% | Peers: 12 | D: 750.45 MB @ 2.5 MB/s | T: 1.0 GB | ETA: 2 minutes
 ```
 
-| Field | Meaning |
-|-------|---------|
-| Bar / `%` | Download progress |
-| `Peers` | Connected peers (magnet mode only) |
-| `D` | Downloaded so far |
-| `@ speed` | Current throughput |
-| `T` | Total size |
-| `ETA` | Estimated time remaining |
+| Field | Magnet mode | Direct HTTP mode |
+|-------|-------------|------------------|
+| Bar / `%` | Torrent progress | Bytes received / total |
+| `Peers` | Live peer count | `0` |
+| `D` / `@` / `T` / `ETA` | Downloaded, speed, total, time left | Same |
 
 ---
 
@@ -154,23 +158,18 @@ Filename is taken from `Content-Disposition` or the URL path.
 
 ```mermaid
 flowchart TD
-  A[npm start] --> B{Download type?}
-  B -->|1 Magnet| C[Validate magnet URI]
-  C --> D[WebTorrent client]
-  D --> E[Peer discovery + download]
-  E --> F[./downloads/]
-  B -->|2 Direct URL| G[Validate HTTP(S) URL]
-  G --> H{Server supports ranges?}
-  H -->|Yes| I[4 parallel range parts + resume]
-  H -->|No| J[Single stream]
-  I --> K[Merge parts]
-  J --> F
-  K --> F
+  A[npm start] --> B{1 or 2?}
+  B -->|Magnet| C[WebTorrent P2P]
+  C --> F[./downloads/]
+  B -->|Direct URL| D{Byte ranges?}
+  D -->|Yes| E[4 parallel parts + resume + merge]
+  D -->|No| G[Single HTTP stream]
+  E --> F
+  G --> F
 ```
 
-**Magnet path:** `server.js` → `startDownload()` → WebTorrent → progress events → `./downloads/`
-
-**Direct path:** `server.js` → `startURLDownload()` → `fetch` with `Range` headers → merge → `./downloads/`
+- **Torrent:** `server.js` → `startDownload()` → WebTorrent  
+- **Direct:** `server.js` → `startURLDownload()` → `fetch` with `Range` headers → merge  
 
 ---
 
@@ -178,40 +177,33 @@ flowchart TD
 
 ### Download folder
 
-Default: `./downloads`. Change in `src/client/index.js`:
+Default: `./downloads`. In `src/client/index.js`:
 
 ```javascript
 const DOWNLOAD_DIRECTORY = './downloads';
 ```
 
-For magnet downloads, also update the `path` in `client.add(…)`.
+For magnet mode, also update `path` in `client.add(…)`.
+
+### Parallel part count
+
+Direct multipart uses `PART_COUNT = 4` in `src/client/index.js`.
 
 ### Progress bar format
 
 Edit `getDisplayFormat()` in `src/utils/formatters/index.js`.
-
-### Node version
-
-Enforced in `package.json` (`>=22.0.0`). Use `.nvmrc` with nvm:
-
-```bash
-nvm use
-```
 
 ---
 
 ## Project layout
 
 ```
-webtorrent-cli-client/
-├── server.js              # CLI prompts (magnet or direct URL)
-├── src/
-│   ├── client/index.js    # startDownload(), startURLDownload()
-│   └── utils/               # formatters, loaders, logger, validators
-├── downloads/             # Output directory (gitignored contents)
-├── package.json
-├── CHANGELOG.md
-└── LICENSE
+torrent-http-download-cli/
+├── server.js              # Mode menu: magnet vs direct URL
+├── src/client/index.js    # startDownload() + startURLDownload()
+├── src/utils/             # formatters, loaders, logger, validators
+├── downloads/             # Output (gitignored)
+└── package.json
 ```
 
 ---
@@ -220,41 +212,24 @@ webtorrent-cli-client/
 
 | Problem | Fix |
 |---------|-----|
-| `Invalid magnet URL` | Link must start with `magnet:?xt=urn:` and include a valid info hash |
-| No peers / slow torrent | Wait for DHT discovery; try a well-seeded magnet; check firewall |
-| `Invalid HTTP(S) URL` | Use a full `http://` or `https://` URL |
-| Direct download fails on ranges | Server may block ranges — tool falls back to single stream automatically |
-| `node: command not found` / version error | Install Node 22+: `node --version` should show `v22.x` |
-| Resume not working | Do not change the URL between runs; resume state lives in `.downloads/.nodewt/` |
-
-### Debug mode (show Node warnings)
-
-```bash
-# macOS / Linux
-NODE_NO_WARNINGS=0 node server.js
-
-# Windows
-set NODE_NO_WARNINGS=0 && node server.js
-```
+| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and include a valid info hash |
+| No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall |
+| `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
+| Multipart not used | Server may not send `Accept-Ranges: bytes` — single stream is used instead |
+| Resume not working (HTTP) | Keep the same URL; state is in `.downloads/.nodewt/` |
+| Node version error | Need Node 22+: `node --version` |
 
 ---
 
 ## Responsible use
 
-- Download only **content you have the legal right to access**
-- This tool is a **generic downloader** — not affiliated with WebTorrent beyond using their open-source library
-- Authors are not responsible for misuse
+Download only **content you have the legal right to access**. Generic tool — not affiliated with WebTorrent beyond using their OSS library.
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome. Please do not open issues with copyrighted material or magnet links to illegal content.
-
-1. Fork the repo
-2. Create a branch: `git checkout -b feature/your-feature`
-3. Commit and push
-4. Open a Pull Request
+Issues and PRs welcome. No copyrighted files or illegal magnet links in issues.
 
 ---
 
@@ -264,4 +239,4 @@ Issues and PRs welcome. Please do not open issues with copyrighted material or m
 
 ---
 
-**Made by [danted4](https://github.com/danted4)** · Formerly **nodeWT**
+**Made by [danted4](https://github.com/danted4)**
