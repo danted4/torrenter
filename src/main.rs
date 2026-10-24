@@ -3,10 +3,11 @@ mod progress;
 mod torrent;
 mod validate;
 
-use std::io::{self, Write};
+use std::io::Write;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::http::start_url_download;
 use crate::torrent::start_download;
@@ -49,18 +50,18 @@ async fn main() -> Result<()> {
 }
 
 async fn prompt_user() -> Result<()> {
-    let stdin = io::stdin();
+    let mut stdin = BufReader::new(tokio::io::stdin());
     loop {
         print!("\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n\n");
-        io::stdout().flush()?;
+        std::io::stdout().flush()?;
         let mut choice = String::new();
-        stdin.read_line(&mut choice)?;
+        stdin.read_line(&mut choice).await?;
 
         if choice.trim() == "2" {
             print!("\nPlease paste the direct download URL:\n\n");
-            io::stdout().flush()?;
+            std::io::stdout().flush()?;
             let mut url = String::new();
-            stdin.read_line(&mut url)?;
+            stdin.read_line(&mut url).await?;
             let url = url.trim().to_string();
             if !is_valid_download_url(&url) {
                 eprintln!("\nInvalid HTTP(S) URL! Try again ...");
@@ -70,9 +71,9 @@ async fn prompt_user() -> Result<()> {
         }
 
         print!("\nPlease paste your magnetURI:\n\n");
-        io::stdout().flush()?;
+        std::io::stdout().flush()?;
         let mut magnet = String::new();
-        stdin.read_line(&mut magnet)?;
+        stdin.read_line(&mut magnet).await?;
         let magnet = magnet.trim().to_string();
         if !is_valid_magnet_url(&magnet) {
             eprintln!("\nInvalid magnet URL! Try again ...");

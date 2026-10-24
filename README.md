@@ -76,9 +76,11 @@ nodewt http "https://example.com/large-file.iso"
 
 **HTTP with byte ranges:** splits into 4 parts, downloads in parallel, resumes from `downloads/.nodewt/` if interrupted, then merges into `./downloads/`.
 
-**No range support:** single streamed download.
+**No range support:** single streamed download. This fallback **does not resume**; it truncates the destination and starts over.
 
-Filename comes from `Content-Disposition` or the URL path.
+Filename comes from `Content-Disposition` or the URL path (a single path component only; `.` / `..` become `download.bin`).
+
+Torrent mode enables DHT in memory only (no DHT state written outside `./downloads`) and stops the session when the download finishes.
 
 ## Progress bar
 

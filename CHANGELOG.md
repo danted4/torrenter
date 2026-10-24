@@ -10,6 +10,8 @@ All notable changes to this project are documented here.
 - Magnet downloads now use **librqbit**; HTTP still uses 4-part Range resume
 - Added `nodewt http <url>` and `nodewt magnet <uri>` subcommands
 - TLS via rustls for Linux, macOS, and Windows without OpenSSL
+- HTTP resume truncates oversized parts, caps Range bodies, and merges exact byte counts
+- Filenames cannot escape `./downloads`; torrent sessions stop cleanly with in-memory DHT only
 
 ### Added
 

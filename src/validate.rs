@@ -1,10 +1,19 @@
+use std::sync::OnceLock;
+
+use regex::Regex;
 use url::Url;
+
+fn magnet_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r"(?i)^magnet:\?xt=urn:[a-z0-9-]+:(?:[a-z2-7]{32}|[a-f0-9]{40})(?:&|$)")
+            .expect("valid regex")
+    })
+}
 
 /// Accepts classic 32-char base32 info hashes and 40-char hex btih hashes.
 pub fn is_valid_magnet_url(magnet_uri: &str) -> bool {
-    let magnet_pattern =
-        regex::Regex::new(r"(?i)^magnet:\?xt=urn:[a-z0-9-]+:[a-z0-9]{32}").expect("valid regex");
-    magnet_pattern.is_match(magnet_uri.trim())
+    magnet_pattern().is_match(magnet_uri.trim())
 }
 
 pub fn is_valid_download_url(download_url: &str) -> bool {
@@ -31,6 +40,9 @@ mod tests {
         ));
         assert!(!is_valid_magnet_url("https://example.com/file.bin"));
         assert!(!is_valid_magnet_url("magnet:?xt=urn:btih:short"));
+        assert!(!is_valid_magnet_url(
+            "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a1"
+        ));
         assert!(!is_valid_magnet_url(""));
     }
 

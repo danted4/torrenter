@@ -1,17 +1,19 @@
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use indicatif::ProgressBar;
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, RANGE};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::task::JoinSet;
 use url::Url;
 
 use crate::progress::new_bar;
@@ -76,6 +78,8 @@ pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -
     let client = Client::builder()
         .user_agent(concat!("nodewt/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(60))
         .gzip(false)
         .brotli(false)
         .build()
@@ -116,6 +120,7 @@ pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -
             Err(error) if error.downcast_ref::<RangesNotHonored>().is_some() => {
                 downloaded.store(0, Ordering::Relaxed);
                 progress.set_position(0);
+                // Single-stream fallback does not resume; it truncates the destination.
                 stream_single(&client, download_url, &output_path, &progress, &downloaded).await
             }
             Err(error) => Err(error),
@@ -154,15 +159,39 @@ async fn get_remote_metadata(client: &Client, download_url: &str) -> Option<Remo
         return None;
     }
     let headers = response.headers();
-    let size = headers
+    let head_size = headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|size| *size > 0);
-    Some(RemoteMetadata {
-        size,
-        filename: filename_from_url(download_url, headers.get(CONTENT_DISPOSITION)),
-    })
+    let filename = filename_from_url(download_url, headers.get(CONTENT_DISPOSITION));
+    let size = match probe_range_total(client, download_url).await {
+        Some(range_total) => Some(range_total),
+        None => head_size,
+    };
+    Some(RemoteMetadata { size, filename })
+}
+
+async fn probe_range_total(client: &Client, download_url: &str) -> Option<u64> {
+    let response = client
+        .get(download_url)
+        .header(RANGE, "bytes=0-0")
+        .send()
+        .await
+        .ok()?;
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    parse_content_range_total(response.headers().get(CONTENT_RANGE)?)
+}
+
+fn parse_content_range_total(value: &reqwest::header::HeaderValue) -> Option<u64> {
+    let text = value.to_str().ok()?;
+    let total = text.rsplit('/').next()?;
+    if total == "*" {
+        return None;
+    }
+    total.parse().ok().filter(|size| *size > 0)
 }
 
 fn filename_from_url(
@@ -188,8 +217,10 @@ fn filename_from_url(
 }
 
 fn parse_content_disposition(header: &str) -> Option<String> {
-    let pattern =
-        regex::Regex::new(r#"(?i)filename\*?=(?:UTF-8''|"?)([^";]+)"#).expect("valid regex");
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r#"(?i)filename\*?=(?:UTF-8''|"?)([^";]+)"#).expect("valid regex")
+    });
     pattern
         .captures(header)
         .and_then(|caps| caps.get(1))
@@ -204,12 +235,35 @@ fn decode_filename(value: &str) -> String {
 }
 
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let without_nuls = name.replace('\0', "");
+    let component = Path::new(&without_nuls)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let cleaned: String = component
+        .chars()
+        .filter(|ch| !ch.is_control())
         .map(|ch| match ch {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             _ => ch,
         })
-        .collect()
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        "download.bin".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn part_range(index: usize, part_size: u64, total: u64) -> Option<(u64, u64, u64)> {
+    let start = index as u64 * part_size;
+    if start >= total {
+        return None;
+    }
+    let end = (total - 1).min(start + part_size - 1);
+    Some((start, end, end - start + 1))
 }
 
 fn resume_key(download_url: &str) -> String {
@@ -291,32 +345,26 @@ async fn download_multipart(
 
     let mut existing_sizes = Vec::with_capacity(layout.part_count);
     for index in 0..layout.part_count {
-        let path = part_path(layout, &key, index);
-        let existing = match fs::metadata(&path).await {
-            Ok(meta) => {
-                let start = index as u64 * part_size;
-                let part_end = total.min((index as u64 + 1) * part_size);
-                let max_len = part_end.saturating_sub(start);
-                meta.len().min(max_len)
-            }
-            Err(_) => 0,
-        };
-        existing_sizes.push(existing);
+        let expected = part_range(index, part_size, total)
+            .map(|range| range.2)
+            .unwrap_or(0);
+        existing_sizes
+            .push(truncate_part_to_valid_len(&part_path(layout, &key, index), expected).await?);
     }
 
     let already = existing_sizes.iter().sum::<u64>();
     downloaded.store(already, Ordering::Relaxed);
     progress.set_position(already);
 
-    let results = futures_util::future::join_all((0..layout.part_count).map(|index| {
+    let mut tasks = JoinSet::new();
+    for (index, existing) in existing_sizes.iter().copied().enumerate() {
         let client = client.clone();
         let download_url = download_url.to_string();
         let key = key.clone();
-        let existing = existing_sizes[index];
         let progress = progress.clone();
         let downloaded = Arc::clone(downloaded);
         let layout = layout.clone();
-        async move {
+        tasks.spawn(async move {
             download_part(
                 &client,
                 &download_url,
@@ -330,18 +378,26 @@ async fn download_multipart(
                 &downloaded,
             )
             .await
-        }
-    }))
-    .await;
+        });
+    }
 
     let mut range_failure = false;
-    for result in results {
-        match result {
-            Ok(()) => {}
-            Err(error) if error.downcast_ref::<RangesNotHonored>().is_some() => {
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.downcast_ref::<RangesNotHonored>().is_some() => {
                 range_failure = true;
+                tasks.abort_all();
             }
-            Err(error) => return Err(error),
+            Ok(Err(error)) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Err(error);
+            }
+            Err(join_error) if join_error.is_cancelled() => {}
+            Err(join_error) => {
+                return Err(join_error).context("download part task failed");
+            }
         }
     }
     if range_failure {
@@ -349,18 +405,23 @@ async fn download_multipart(
         return Err(RangesNotHonored.into());
     }
 
-    let output_path = layout.directory.join(filename);
-    let mut output = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&output_path)
-        .await
-        .with_context(|| format!("failed to create {}", output_path.display()))?;
-    merge_parts(layout, &key, &mut output, progress, downloaded, total).await?;
-    output.flush().await?;
+    merge_parts(layout, &key, filename, progress, downloaded, total).await?;
     remove_resume_files(layout, &key).await?;
     Ok(())
+}
+
+async fn truncate_part_to_valid_len(path: &Path, expected: u64) -> Result<u64> {
+    let Ok(meta) = fs::metadata(path).await else {
+        return Ok(0);
+    };
+    let len = meta.len();
+    if len > expected {
+        let file = OpenOptions::new().write(true).open(path).await?;
+        file.set_len(expected).await?;
+        file.sync_all().await?;
+        return Ok(expected);
+    }
+    Ok(len)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -376,12 +437,9 @@ async fn download_part(
     progress: &ProgressBar,
     downloaded: &Arc<AtomicU64>,
 ) -> Result<()> {
-    let start = index as u64 * part_size;
-    let end = (total - 1).min(start + part_size - 1);
-    if start > end {
+    let Some((start, end, expected)) = part_range(index, part_size, total) else {
         return Ok(());
-    }
-    let expected = end - start + 1;
+    };
     if existing_size == expected {
         return Ok(());
     }
@@ -396,27 +454,38 @@ async fn download_part(
     if response.status() != StatusCode::PARTIAL_CONTENT {
         bail!(RangesNotHonored);
     }
+    if let Some(range_total) = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(parse_content_range_total)
+    {
+        if range_total != total {
+            bail!(RangesNotHonored);
+        }
+    }
 
     let path = part_path(layout, key, index);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let mut file = if existing_size > 0 {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .await?
-    } else {
-        OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .await?
-    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .truncate(existing_size == 0)
+        .open(&path)
+        .await?;
+    file.set_len(existing_size).await?;
     file.seek(SeekFrom::Start(existing_size)).await?;
-    stream_into_file(response, &mut file, progress, downloaded).await?;
+    stream_into_file(
+        response,
+        &mut file,
+        progress,
+        downloaded,
+        Some(expected - existing_size),
+    )
+    .await?;
+    file.set_len(expected).await?;
     file.flush().await?;
 
     let completed = fs::metadata(&path).await?.len();
@@ -451,7 +520,7 @@ async fn stream_single(
         .open(output_path)
         .await
         .with_context(|| format!("failed to create {}", output_path.display()))?;
-    stream_into_file(response, &mut file, progress, downloaded).await?;
+    stream_into_file(response, &mut file, progress, downloaded, None).await?;
     file.flush().await?;
     Ok(())
 }
@@ -461,16 +530,34 @@ async fn stream_into_file(
     file: &mut File,
     progress: &ProgressBar,
     downloaded: &Arc<AtomicU64>,
+    max_bytes: Option<u64>,
 ) -> Result<()> {
+    let mut remaining = max_bytes;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("failed to read download stream")?;
+        let mut chunk = chunk.context("failed to read download stream")?;
+        if let Some(left) = remaining {
+            if left == 0 {
+                break;
+            }
+            if chunk.len() as u64 > left {
+                chunk.truncate(left as usize);
+            }
+            remaining = Some(left - chunk.len() as u64);
+        }
+        if chunk.is_empty() {
+            continue;
+        }
         file.write_all(&chunk).await?;
-        let next = downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64;
+        downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        let next = downloaded.load(Ordering::Relaxed);
         if next > progress.length().unwrap_or(0) {
             progress.set_length(next);
         }
         progress.set_position(next);
+        if remaining == Some(0) {
+            break;
+        }
     }
     Ok(())
 }
@@ -478,29 +565,52 @@ async fn stream_into_file(
 async fn merge_parts(
     layout: &DownloadLayout,
     key: &str,
-    output: &mut File,
+    filename: &str,
     progress: &ProgressBar,
     downloaded: &Arc<AtomicU64>,
     total: u64,
 ) -> Result<()> {
+    let part_size = total.div_ceil(layout.part_count as u64);
+    let output_path = layout.directory.join(filename);
+    let tmp_path = layout.directory.join(format!(".{filename}.nodewt.tmp"));
+    let mut output = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp_path)
+        .await
+        .with_context(|| format!("failed to create {}", tmp_path.display()))?;
+
     let mut merged = 0u64;
     let mut buffer = vec![0u8; MERGE_CHUNK];
     for index in 0..layout.part_count {
+        let Some((_, _, expected)) = part_range(index, part_size, total) else {
+            continue;
+        };
         let path = part_path(layout, key, index);
         let mut part = File::open(&path)
             .await
             .with_context(|| format!("failed to open part {}", path.display()))?;
-        loop {
-            let bytes_read = part.read(&mut buffer).await?;
+        let mut remaining = expected;
+        while remaining > 0 {
+            let want = remaining.min(buffer.len() as u64) as usize;
+            let bytes_read = part.read(&mut buffer[..want]).await?;
             if bytes_read == 0 {
-                break;
+                bail!("A download part was truncated during merge");
             }
             output.write_all(&buffer[..bytes_read]).await?;
+            remaining -= bytes_read as u64;
             merged += bytes_read as u64;
             downloaded.store(merged, Ordering::Relaxed);
             progress.set_position(merged.min(total));
         }
     }
+    output.flush().await?;
+    drop(output);
+    let _ = fs::remove_file(&output_path).await;
+    fs::rename(&tmp_path, &output_path)
+        .await
+        .with_context(|| format!("failed to replace {}", output_path.display()))?;
     Ok(())
 }
 
@@ -525,10 +635,21 @@ mod tests {
         head_count: Arc<AtomicUsize>,
     }
 
-    async fn spawn_server(config: ServerConfig) -> String {
+    struct TestServer {
+        url: String,
+        accept: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.accept.abort();
+        }
+    }
+
+    async fn spawn_server(config: ServerConfig) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        let accept = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -539,7 +660,10 @@ mod tests {
                 });
             }
         });
-        format!("http://{addr}/payload.bin")
+        TestServer {
+            url: format!("http://{addr}/payload.bin"),
+            accept,
+        }
     }
 
     async fn handle_connection(mut stream: TcpStream, config: ServerConfig) -> io::Result<()> {
@@ -710,7 +834,15 @@ mod tests {
             parse_content_disposition("attachment; filename*=UTF-8''big%20file.bin").as_deref(),
             Some("big%20file.bin")
         );
-        assert_eq!(sanitize_filename(r"a/b:c*.bin"), "a_b_c_.bin");
+        assert_eq!(sanitize_filename("dir/file*.bin"), "file_.bin");
+        assert_eq!(sanitize_filename(".."), "download.bin");
+        assert_eq!(sanitize_filename("."), "download.bin");
+        assert_eq!(sanitize_filename(""), "download.bin");
+        assert_eq!(sanitize_filename("../etc/passwd"), "passwd");
+        assert_eq!(
+            filename_from_url("https://cdn.example/%2e%2e", None),
+            "download.bin"
+        );
         assert_eq!(decode_filename("big%20file.bin"), "big file.bin");
         assert_eq!(
             filename_from_url("https://cdn.example/from-url.bin", None),
@@ -737,17 +869,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = config(body.clone(), true, true);
         let ranges = Arc::clone(&server.range_starts);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
 
         start_url_download_in(&url, layout(&dir)).await.unwrap();
 
         let saved = fs::read(dir.path().join("payload.bin")).await.unwrap();
         assert_eq!(saved, body);
         let starts = ranges.lock().await.clone();
-        assert_eq!(starts.len(), 4);
-        let mut starts = starts;
-        starts.sort_unstable();
-        assert_eq!(starts, vec![0, 64, 128, 192]);
+        for start in [0_u64, 64, 128, 192] {
+            assert!(
+                starts.contains(&start),
+                "missing range start {start}, got {starts:?}"
+            );
+        }
         assert!(resume_dir_clean(&dir, &url));
     }
 
@@ -757,7 +892,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut server = config(body.clone(), true, true);
         server.disposition = Some("from-header.bin".into());
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
 
         start_url_download_in(&url, layout(&dir)).await.unwrap();
         assert!(dir.path().join("from-header.bin").exists());
@@ -774,7 +910,8 @@ mod tests {
         let download_layout = layout(&dir);
         let server = config(body.clone(), true, true);
         let ranges = Arc::clone(&server.range_starts);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
         let key = resume_key(&url);
 
         fs::create_dir_all(resume_directory(&download_layout))
@@ -816,7 +953,8 @@ mod tests {
         let download_layout = layout(&dir);
         let server = config(body.clone(), true, true);
         let ranges = Arc::clone(&server.range_starts);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
         let key = resume_key(&url);
         let part_size = 64usize;
 
@@ -851,7 +989,11 @@ mod tests {
             body
         );
         let starts = ranges.lock().await.clone();
-        assert_eq!(starts, vec![192]);
+        assert!(
+            starts.contains(&192),
+            "expected remaining part start 192, got {starts:?}"
+        );
+        assert!(!starts.contains(&64) && !starts.contains(&128));
         assert!(resume_dir_clean(&dir, &url));
     }
 
@@ -860,7 +1002,8 @@ mod tests {
         let body = pattern_body(200);
         let dir = tempfile::tempdir().unwrap();
         let server = config(body.clone(), false, true);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
 
         start_url_download_in(&url, layout(&dir)).await.unwrap();
         assert_eq!(
@@ -876,7 +1019,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let server = config(body.clone(), true, false);
         let ranges = Arc::clone(&server.range_starts);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
 
         start_url_download_in(&url, layout(&dir)).await.unwrap();
         assert_eq!(
@@ -892,7 +1036,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let download_layout = layout(&dir);
         let server = config(body.clone(), true, true);
-        let url = spawn_server(server).await;
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
         let key = resume_key(&url);
 
         fs::create_dir_all(resume_directory(&download_layout))
@@ -911,6 +1056,44 @@ mod tests {
         .await
         .unwrap();
         fs::write(part_path(&download_layout, &key, 0), b"stale")
+            .await
+            .unwrap();
+
+        start_url_download_in(&url, download_layout).await.unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("payload.bin")).await.unwrap(),
+            body
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_part_is_truncated_before_merge() {
+        let body = pattern_body(256);
+        let dir = tempfile::tempdir().unwrap();
+        let download_layout = layout(&dir);
+        let server = config(body.clone(), true, true);
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
+        let key = resume_key(&url);
+
+        fs::create_dir_all(resume_directory(&download_layout))
+            .await
+            .unwrap();
+        save_resume_manifest(
+            &download_layout,
+            &key,
+            &ResumeManifest {
+                url: url.clone(),
+                size: body.len() as u64,
+                part_count: PART_COUNT,
+                filename: "payload.bin".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut oversized = body[..64].to_vec();
+        oversized.extend_from_slice(&[0xFF; 32]);
+        fs::write(part_path(&download_layout, &key, 0), oversized)
             .await
             .unwrap();
 

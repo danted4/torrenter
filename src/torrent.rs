@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
-use librqbit::{AddTorrent, Session};
+use librqbit::{AddTorrent, DhtSessionConfig, Session, SessionOptions};
 
 use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::new_bar;
@@ -17,10 +17,30 @@ pub async fn start_download(magnet_uri: &str) -> Result<()> {
     spinner.set_message("Initializing torrent client & verifying data...");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let session = Session::new(DOWNLOAD_DIRECTORY.into())
-        .await
-        .context("failed to start torrent session")?;
+    let session = Session::new_with_opts(
+        DOWNLOAD_DIRECTORY.into(),
+        SessionOptions {
+            dht: Some(DhtSessionConfig {
+                persistence: None,
+                ..Default::default()
+            }),
+            persistence: None,
+            ..Default::default()
+        },
+    )
+    .await
+    .context("failed to start torrent session")?;
 
+    let result = run_torrent(&session, magnet_uri, spinner).await;
+    session.stop().await;
+    result
+}
+
+async fn run_torrent(
+    session: &std::sync::Arc<Session>,
+    magnet_uri: &str,
+    spinner: ProgressBar,
+) -> Result<()> {
     let handle = session
         .add_torrent(AddTorrent::from_url(magnet_uri), None)
         .await
@@ -35,33 +55,43 @@ pub async fn start_download(magnet_uri: &str) -> Result<()> {
     let progress = new_bar(1);
     progress.set_message("0");
 
+    let completed = handle.wait_until_completed();
+    tokio::pin!(completed);
+
     loop {
-        let stats = handle.stats();
-        if let Some(error) = stats.error {
-            progress.finish_and_clear();
-            bail!("{error}");
+        tokio::select! {
+            result = &mut completed => {
+                if let Err(error) = result {
+                    progress.finish_and_clear();
+                    return Err(error).context("torrent failed");
+                }
+                let stats = handle.stats();
+                let total = stats.total_bytes.max(1);
+                progress.set_length(total);
+                progress.set_position(total);
+                progress.finish();
+                println!("\nTorrent download finished!");
+                return Ok(());
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                let stats = handle.stats();
+                if let Some(error) = stats.error {
+                    progress.finish_and_clear();
+                    bail!("{error}");
+                }
+                if !stats.finished {
+                    let total = stats.total_bytes.max(1);
+                    progress.set_length(total);
+                    progress.set_position(stats.progress_bytes.min(total));
+                    let peers = stats
+                        .live
+                        .as_ref()
+                        .map(|live| live.snapshot.peer_stats.live)
+                        .unwrap_or(0);
+                    progress.set_message(format!("{peers}"));
+                }
+            }
         }
-
-        let total = stats.total_bytes.max(1);
-        progress.set_length(total);
-        progress.set_position(stats.progress_bytes.min(total));
-
-        let peers = stats
-            .live
-            .as_ref()
-            .map(|live| live.snapshot.peer_stats.live)
-            .unwrap_or(0);
-        progress.set_message(format!("{peers}"));
-
-        if stats.finished || (stats.progress_bytes > 0 && stats.progress_bytes == stats.total_bytes)
-        {
-            progress.set_position(total);
-            progress.finish();
-            println!("\nTorrent download finished!");
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -78,10 +108,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn torrent_session_starts() {
+    async fn torrent_session_starts_without_dht_persistence() {
         let dir = tempfile::tempdir().unwrap();
-        Session::new(dir.path().to_path_buf())
-            .await
-            .expect("librqbit session should start");
+        let session = Session::new_with_opts(
+            dir.path().to_path_buf(),
+            SessionOptions {
+                dht: Some(DhtSessionConfig {
+                    persistence: None,
+                    ..Default::default()
+                }),
+                persistence: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("librqbit session should start");
+        session.stop().await;
     }
 }
