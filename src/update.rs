@@ -134,11 +134,7 @@ fn update_client() -> Result<reqwest::Client> {
         .context("failed to build update client")
 }
 
-pub fn is_github_asset_url(url: &str) -> bool {
-    is_repo_release_asset_url(url, None)
-}
-
-pub fn is_repo_release_asset_url(url: &str, asset_name: Option<&str>) -> bool {
+pub fn is_repo_release_asset_url(url: &str, tag: &str, asset_name: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
     };
@@ -164,7 +160,7 @@ pub fn is_repo_release_asset_url(url: &str, asset_name: Option<&str>) -> bool {
     let Some(download) = segments.next() else {
         return false;
     };
-    let Some(tag) = segments.next() else {
+    let Some(path_tag) = segments.next() else {
         return false;
     };
     let Some(file) = segments.next() else {
@@ -174,10 +170,11 @@ pub fn is_repo_release_asset_url(url: &str, asset_name: Option<&str>) -> bool {
         && path_repo == repo
         && releases == "releases"
         && download == "download"
-        && !tag.is_empty()
-        && !tag.contains("..")
+        && path_tag == tag
+        && !path_tag.is_empty()
+        && !path_tag.contains("..")
+        && file == asset_name
         && segments.next().is_none()
-        && asset_name.is_none_or(|expected| file == expected)
 }
 
 pub fn hash_for_asset(sums: &str, asset_name: &str) -> Option<String> {
@@ -221,8 +218,8 @@ fn cached_update(config: &AppConfig) -> Option<AvailableUpdate> {
 }
 
 fn is_pinned_update(update: &AvailableUpdate) -> bool {
-    is_repo_release_asset_url(&update.url, Some(&update.asset_name))
-        && is_repo_release_asset_url(&update.checksums_url, Some(CHECKSUMS_NAME))
+    is_repo_release_asset_url(&update.url, &update.tag, &update.asset_name)
+        && is_repo_release_asset_url(&update.checksums_url, &update.tag, CHECKSUMS_NAME)
 }
 
 fn remember_release(
@@ -315,8 +312,12 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         .iter()
         .find(|asset| asset.name == asset_name)
         .with_context(|| format!("release {} has no asset {asset_name}", release.tag_name))?;
-    if !is_repo_release_asset_url(&asset.browser_download_url, Some(&asset.name))
-        || !is_repo_release_asset_url(&checksums.browser_download_url, Some(CHECKSUMS_NAME))
+    if !is_repo_release_asset_url(&asset.browser_download_url, &release.tag_name, &asset.name)
+        || !is_repo_release_asset_url(
+            &checksums.browser_download_url,
+            &release.tag_name,
+            CHECKSUMS_NAME,
+        )
     {
         bail!("release asset URL is not a danted4/torrenter GitHub download");
     }
@@ -355,6 +356,7 @@ pub async fn install_update(update: &AvailableUpdate) -> Result<PathBuf> {
             &update.checksums_url,
             &sums_path,
             MAX_CHECKSUMS_BYTES,
+            &update.tag,
             CHECKSUMS_NAME,
         )
         .await?;
@@ -362,7 +364,14 @@ pub async fn install_update(update: &AvailableUpdate) -> Result<PathBuf> {
         let expected = hash_for_asset(&sums, &update.asset_name).with_context(|| {
             format!("{CHECKSUMS_NAME} has no SHA-256 for {}", update.asset_name)
         })?;
-        download_to_file(&update.url, &tmp, MAX_UPDATE_BYTES, &update.asset_name).await?;
+        download_to_file(
+            &update.url,
+            &tmp,
+            MAX_UPDATE_BYTES,
+            &update.tag,
+            &update.asset_name,
+        )
+        .await?;
         let actual = sha256_file(&tmp).await?;
         if !hashes_match(&expected, &actual) {
             bail!(
@@ -388,12 +397,20 @@ pub async fn install_update(update: &AvailableUpdate) -> Result<PathBuf> {
     install
 }
 
-async fn download_to_file(url: &str, dest: &Path, max_bytes: u64, asset_name: &str) -> Result<()> {
+async fn download_to_file(
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+    tag: &str,
+    asset_name: &str,
+) -> Result<()> {
     use futures_util::StreamExt;
 
-    if !is_repo_release_asset_url(url, Some(asset_name)) {
+    if !is_repo_release_asset_url(url, tag, asset_name) {
         bail!("refusing to download update from {url}");
     }
+    // GitHub 302s this pinned github.com URL to objects.githubusercontent.com.
+    // Following that redirect is required; the first hop is what we pin.
     let client = update_client()?;
     let response = client
         .get(url)
@@ -544,45 +561,71 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *torrenter-gui-
     }
 
     #[test]
-    fn pins_asset_urls_to_this_repo() {
+    fn pins_asset_urls_to_this_repo_and_tag() {
         let sums = "https://github.com/danted4/torrenter/releases/download/v3.0.2/SHA256SUMS";
         let cli = "https://github.com/danted4/torrenter/releases/download/v3.0.2/torrenter-x86_64-unknown-linux-gnu";
-        assert!(is_repo_release_asset_url(sums, Some("SHA256SUMS")));
+        assert!(is_repo_release_asset_url(sums, "v3.0.2", "SHA256SUMS"));
         assert!(is_repo_release_asset_url(
             cli,
-            Some("torrenter-x86_64-unknown-linux-gnu")
+            "v3.0.2",
+            "torrenter-x86_64-unknown-linux-gnu"
         ));
+        assert!(!is_repo_release_asset_url(sums, "v9.9.9", "SHA256SUMS"));
         assert!(!is_repo_release_asset_url(
             sums,
-            Some("torrenter-x86_64-unknown-linux-gnu")
+            "v3.0.2",
+            "torrenter-x86_64-unknown-linux-gnu"
         ));
-        assert!(!is_github_asset_url(
-            "https://github.com/other/repo/releases/download/v3.0.2/SHA256SUMS"
+        assert!(!is_repo_release_asset_url(
+            "https://github.com/other/repo/releases/download/v3.0.2/SHA256SUMS",
+            "v3.0.2",
+            "SHA256SUMS"
         ));
-        assert!(!is_github_asset_url(
-            "https://objects.githubusercontent.com/github-production-release-asset-2e65be/foo"
+        assert!(!is_repo_release_asset_url(
+            "https://objects.githubusercontent.com/github-production-release-asset-2e65be/foo",
+            "v3.0.2",
+            "foo"
         ));
-        assert!(!is_github_asset_url(
-            "http://github.com/danted4/torrenter/releases/download/v3.0.2/SHA256SUMS"
+        assert!(!is_repo_release_asset_url(
+            "http://github.com/danted4/torrenter/releases/download/v3.0.2/SHA256SUMS",
+            "v3.0.2",
+            "SHA256SUMS"
         ));
-        assert!(!is_github_asset_url("https://evil.example/payload"));
+        assert!(!is_repo_release_asset_url(
+            "https://evil.example/payload",
+            "v3.0.2",
+            "payload"
+        ));
     }
 
     #[test]
-    fn cached_foreign_urls_are_dropped() {
-        let config = AppConfig {
+    fn cached_foreign_or_mismatched_tag_urls_are_dropped() {
+        let name = "torrenter-x86_64-unknown-linux-gnu";
+        let foreign = AppConfig {
             cached_tag: Some("v9.9.9".into()),
-            cached_asset_name: Some("torrenter-x86_64-unknown-linux-gnu".into()),
-            cached_asset_url: Some(
-                "https://github.com/evil/repo/releases/download/v9.9.9/torrenter-x86_64-unknown-linux-gnu"
-                    .into(),
-            ),
+            cached_asset_name: Some(name.into()),
+            cached_asset_url: Some(format!(
+                "https://github.com/evil/repo/releases/download/v9.9.9/{name}"
+            )),
             cached_checksums_url: Some(
                 "https://github.com/evil/repo/releases/download/v9.9.9/SHA256SUMS".into(),
             ),
             ..AppConfig::default()
         };
-        assert!(cached_update(&config).is_none());
+        assert!(cached_update(&foreign).is_none());
+
+        let wrong_tag = AppConfig {
+            cached_tag: Some("v9.9.9".into()),
+            cached_asset_name: Some(name.into()),
+            cached_asset_url: Some(format!(
+                "https://github.com/danted4/torrenter/releases/download/v3.0.0/{name}"
+            )),
+            cached_checksums_url: Some(
+                "https://github.com/danted4/torrenter/releases/download/v3.0.0/SHA256SUMS".into(),
+            ),
+            ..AppConfig::default()
+        };
+        assert!(cached_update(&wrong_tag).is_none());
     }
 
     #[test]

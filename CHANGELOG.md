@@ -18,7 +18,7 @@ All notable changes to this project are documented here.
 - HTTP pause now drops the Range body instead of sleeping on a live connection
 - Stop is honored during HTTP metadata and merge
 - Magnets isolate output under `./downloads/<info-hash>/` instead of overwriting a shared tree
-- Update asset URLs must be `github.com/danted4/torrenter/releases/download/…`; cached foreign URLs are ignored
+- Update asset URLs must be `github.com/danted4/torrenter/releases/download/<tag>/<name>` with tag matching the release; cached foreign or mismatched-tag URLs are ignored
 - Same magnet cannot run twice at once (GUI refuse + in-process folder lock)
 - CLI startup auto-update is gated to an interactive TTY
 - GitHub API 429 / cached ETag skip instead of failing the GUI

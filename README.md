@@ -81,7 +81,7 @@ HTTP **pause** aborts the live Range body and continues from `downloads/.resume/
 
 The GUI runs at most four downloads at once; further rows stay queued. The same magnet (or HTTP URL) cannot start twice while it is already active. A second copy of the same info hash also waits on an in-process folder lock so two sessions cannot overwrite `./downloads/<info-hash>/` at once.
 
-Self-update downloads only `https://github.com/danted4/torrenter/releases/download/…` assets (cached config URLs are re-checked). It requires `SHA256SUMS`, caps size, and times out. That hash is **same-publisher integrity**, not a signature: a stolen GitHub token can still ship a binary and a matching sums file. CLI auto-update on startup runs only on an interactive TTY.
+Self-update downloads only `https://github.com/danted4/torrenter/releases/download/<tag>/<name>` (tag in the path must match the release). Cached config URLs are re-checked. GitHub then 302s to `objects.githubusercontent.com`; that redirect is followed because the first hop is pinned. It requires `SHA256SUMS`, caps size, and times out. That hash is **same-publisher integrity**, not a signature: a stolen GitHub token can still ship a binary and a matching sums file. CLI auto-update on startup runs only on an interactive TTY.
 
 ## Progress bar
 
