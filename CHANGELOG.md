@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [3.0.0] - 2026-10-24
+
+### Changed
+
+- Rewrote the CLI in **Rust** (replaces Node.js / WebTorrent)
+- Magnet downloads now use **librqbit**; HTTP still uses 4-part Range resume
+- Added `nodewt http <url>` and `nodewt magnet <uri>` subcommands
+- TLS via rustls for Linux, macOS, and Windows without OpenSSL
+
+### Added
+
+- Unit and integration tests for validation, formatters, CLI parsing, HTTP multipart/resume/fallback
+- GitHub Actions CI on pushes and PRs to `main` (fmt, clippy, tests on Linux/macOS/Windows)
+
 ## [2.2.0] - 2026-08-29
 
 ### Changed

@@ -1,52 +1,15 @@
 # Torrent & HTTP Download CLI
 
-**Two download modes in one Node.js terminal app:**
+Terminal downloader with two modes. No GUI, no HTML, no CSS.
 
-1. **Magnet / torrent** — WebTorrent P2P with peers, speed, and ETA  
-2. **Direct HTTP(S)** — **4-part parallel multipart download** with byte-range resume  
+1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit) (peers, speed, ETA)
+2. **Direct HTTP(S)** — **4-part parallel multipart download** with byte-range resume
 
-Shared **progress bar**, validation, and `./downloads/` output. Not just a torrent client.
-
-> **Keywords:** torrent downloader, magnet link, WebTorrent, BitTorrent, P2P, HTTP download, direct download, multipart download, parallel download, byte-range, resume download, Node.js CLI, terminal downloader, progress bar.
-
-Formerly **nodeWT** / **webtorrent-cli-client**.
-
-[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![WebTorrent](https://img.shields.io/badge/WebTorrent-2.1.27-orange)](https://webtorrent.io/)
-
-## Table of contents
-
-- [Why this exists](#why-this-exists)
-- [Two download modes](#two-download-modes)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Usage](#usage)
-  - [Mode 1 — Magnet URL (torrent)](#mode-1--magnet-url-torrent)
-  - [Mode 2 — Direct URL (multipart HTTP)](#mode-2--direct-url-multipart-http)
-- [Progress bar](#progress-bar)
-- [How it works](#how-it-works)
-- [Configuration](#configuration)
-- [Project layout](#project-layout)
-- [Troubleshooting](#troubleshooting)
-- [Responsible use](#responsible-use)
-- [Contributing](#contributing)
-- [License](#license)
-
----
+Shared progress bar and `./downloads/` output. Cross-platform: Linux, macOS, Windows.
 
 ## Why this exists
 
-You often need a **terminal downloader** without installing a full GUI — whether the source is a **magnet link** or a **plain HTTPS file URL**.
-
-This CLI handles **both**:
-
-- **Torrents** via [WebTorrent](https://webtorrent.io/) — magnet links, peer discovery, live peer count  
-- **Direct files** via native `fetch` — **4 concurrent HTTP range parts**, automatic merge, and **resume** after interruption  
-
-One progress bar, one `./downloads/` folder, one `npm start` menu.
-
----
+You often need a **terminal downloader** without a GUI — whether the source is a **magnet link** or a **plain HTTPS file URL**.
 
 ## Two download modes
 
@@ -54,46 +17,47 @@ One progress bar, one `./downloads/` folder, one `npm start` menu.
 |---|---------------------------|------------------------|
 | **When to use** | `.torrent` / magnet P2P sources | CDN, mirror, or any direct file link |
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
-| **Engine** | WebTorrent (BitTorrent P2P) | `fetch` + `Range: bytes=` |
-| **Parallelism** | WebTorrent piece picker | **4 parallel byte-range parts** |
-| **Resume** | WebTorrent built-in | Part files in `.downloads/.nodewt/` |
-| **Peers** | Shown in progress bar | N/A (`Peers: 0`) |
-| **Fallback** | — | Single-stream if server has no ranges |
-
----
+| **Engine** | librqbit (BitTorrent P2P) | `reqwest` + `Range: bytes=` |
+| **Parallelism** | Piece picker | **4 parallel byte-range parts** |
+| **Resume** | librqbit built-in | Part files in `downloads/.nodewt/` |
+| **Peers** | Shown in progress bar | `Peers: 0` |
+| **Fallback** | — | Single-stream if the server has no ranges |
 
 ## Features
 
-- **Dual-mode menu** — pick torrent or direct URL at startup  
-- **Multipart HTTP** — 4-part parallel download when `Accept-Ranges: bytes` is supported  
-- **Resume** — interrupted direct downloads continue from saved parts  
-- **WebTorrent** — magnet validation, DHT, peer stats  
-- **cli-progress** bar — size, speed, ETA, percentage  
-- **Node.js 22+** — native `fetch` for HTTP; no extra HTTP client  
-- **Cross-platform** — macOS, Linux, Windows  
+- Interactive menu or CLI subcommands
+- Multipart HTTP when the server honors `Range`
+- Resume interrupted direct downloads
+- Magnet validation (32-char base32 and 40-char hex info hashes)
+- Progress: size, speed, ETA, percentage, peers
+- rustls TLS (no OpenSSL required)
 
----
+## Prerequisites
 
-## Quick start
+- [Rust](https://rustup.rs/) 1.85+ (stable) with Cargo
+- Network access; torrents need UDP allowed for DHT where possible
 
-### Prerequisites
-
-- **Node.js 22+** ([nodejs.org](https://nodejs.org/) or `nvm install 22`)
-- **npm** or **yarn**
-
-### Install
+## Build
 
 ```bash
 git clone https://github.com/danted4/torrent-http-download-cli.git
 cd torrent-http-download-cli
-npm install
+cargo build --release
 ```
 
-### Run
+The binary is `target/release/nodewt` (`.exe` on Windows).
 
 ```bash
-npm start
+# Linux / macOS
+./target/release/nodewt
+
+# Windows
+.\target\release\nodewt.exe
 ```
+
+## Usage
+
+### Interactive (same menu as the old Node app)
 
 ```
 Choose download type:
@@ -101,44 +65,20 @@ Choose download type:
 2. Direct URL (multi-part)
 ```
 
----
+### Commands
 
-## Usage
-
-### Mode 1 — Magnet URL (torrent)
-
-```
-1
-
-Please paste your magnetURI:
-
-magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10
+```bash
+nodewt magnet "magnet:?xt=urn:btih:…"
+nodewt http "https://example.com/large-file.iso"
 ```
 
-WebTorrent connects to peers, downloads to `./downloads/`, and exits at 100%.
+**Magnet:** connects to peers, writes to `./downloads/`, exits at 100%.
 
-### Mode 2 — Direct URL (multipart HTTP)
+**HTTP with byte ranges:** splits into 4 parts, downloads in parallel, resumes from `downloads/.nodewt/` if interrupted, then merges into `./downloads/`.
 
-```
-2
+**No range support:** single streamed download.
 
-Please paste the direct download URL:
-
-https://example.com/large-file.iso
-```
-
-**Server supports byte ranges** (`Content-Length` + `Accept-Ranges: bytes`):
-
-1. Splits the file into **4 parts**  
-2. Downloads parts **in parallel**  
-3. **Resumes** from `.downloads/.nodewt/` if interrupted  
-4. **Merges** into the final file in `./downloads/`  
-
-**No range support:** automatically falls back to a single streamed download.
-
-Filename from `Content-Disposition` header or URL path.
-
----
+Filename comes from `Content-Disposition` or the URL path.
 
 ## Progress bar
 
@@ -146,97 +86,65 @@ Filename from `Content-Disposition` header or URL path.
 [████████████████░░░░] 75% | Peers: 12 | D: 750.45 MB @ 2.5 MB/s | T: 1.0 GB | ETA: 2 minutes
 ```
 
-| Field | Magnet mode | Direct HTTP mode |
-|-------|-------------|------------------|
-| Bar / `%` | Torrent progress | Bytes received / total |
-| `Peers` | Live peer count | `0` |
-| `D` / `@` / `T` / `ETA` | Downloaded, speed, total, time left | Same |
-
----
-
 ## How it works
 
 ```mermaid
 flowchart TD
-  A[npm start] --> B{1 or 2?}
-  B -->|Magnet| C[WebTorrent P2P]
-  C --> F[./downloads/]
-  B -->|Direct URL| D{Byte ranges?}
+  A[nodewt] --> B{1 or 2?}
+  B -->|Magnet| C[librqbit Session]
+  C --> F[./downloads]
+  B -->|Direct URL| D{Known size?}
   D -->|Yes| E[4 parallel parts + resume + merge]
   D -->|No| G[Single HTTP stream]
+  E -->|Server rejects 206| G
   E --> F
   G --> F
 ```
 
-- **Torrent:** `server.js` → `startDownload()` → WebTorrent  
-- **Direct:** `server.js` → `startURLDownload()` → `fetch` with `Range` headers → merge  
-
----
-
 ## Configuration
 
-### Download folder
+- Download folder: `./downloads` (`DOWNLOAD_DIRECTORY` in `src/http.rs`)
+- Parallel parts: `PART_COUNT = 4` in `src/http.rs`
+- Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 
-Default: `./downloads`. In `src/client/index.js`:
+## Development
 
-```javascript
-const DOWNLOAD_DIRECTORY = './downloads';
+```bash
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 ```
 
-For magnet mode, also update `path` in `client.add(…)`.
+GitHub Actions runs fmt, clippy (`-D warnings`), and tests on **Linux, macOS, and Windows** for every push and pull request to `main`.
 
-### Parallel part count
+## Cross-platform builds
 
-Direct multipart uses `PART_COUNT = 4` in `src/client/index.js`.
+TLS uses rustls. Typical release targets:
 
-### Progress bar format
-
-Edit `getDisplayFormat()` in `src/utils/formatters/index.js`.
-
----
-
-## Project layout
-
-```
-torrent-http-download-cli/
-├── server.js              # Mode menu: magnet vs direct URL
-├── src/client/index.js    # startDownload() + startURLDownload()
-├── src/utils/             # formatters, loaders, logger, validators
-├── downloads/             # Output (gitignored)
-└── package.json
+```bash
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target x86_64-unknown-linux-gnu
+cargo build --release --target x86_64-pc-windows-msvc
 ```
 
----
+Install the target first: `rustup target add <triple>`. Windows GNU/MSVC toolchains must be available on the build machine.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and include a valid info hash |
-| No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall |
+| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and include a 32+ character info hash |
+| No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
-| Multipart not used | Server may not send `Accept-Ranges: bytes` — single stream is used instead |
-| Resume not working (HTTP) | Keep the same URL; state is in `.downloads/.nodewt/` |
-| Node version error | Need Node 22+: `node --version` |
-
----
+| Multipart not used | Server did not return HTTP 206 — single stream is used instead |
+| Resume not working (HTTP) | Keep the same URL; state is in `downloads/.nodewt/` |
+| Rust version error | Need a recent stable toolchain (`rustup update`) |
 
 ## Responsible use
 
-Download only **content you have the legal right to access**. Generic tool — not affiliated with WebTorrent beyond using their OSS library.
-
----
-
-## Contributing
-
-Issues and PRs welcome. No copyrighted files or illegal magnet links in issues.
-
----
+Download only **content you have the legal right to access**. Generic tool — not affiliated with rqbit beyond using their OSS library.
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-**Made by [danted4](https://github.com/danted4)**
