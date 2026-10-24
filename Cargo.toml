@@ -15,6 +15,7 @@ gui = ["dep:eframe"]
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", optional = true }
 futures-util = "0.3"

@@ -5323,6 +5323,7 @@ name = "torrenter"
 version = "3.0.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "eframe",
  "futures-util",

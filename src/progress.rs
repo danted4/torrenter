@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -16,6 +16,23 @@ impl std::fmt::Display for DownloadStopped {
 }
 
 impl std::error::Error for DownloadStopped {}
+
+#[derive(Debug)]
+pub struct DownloadPaused;
+
+impl std::fmt::Display for DownloadPaused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("download paused")
+    }
+}
+
+impl std::error::Error for DownloadPaused {}
+
+fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub const BAR_TEMPLATE: &str =
     "[{bar:20}] {percent}% | Peers: {msg} | D: {have} @ {speed_txt} | T: {full_size} | ETA: {estimate}";
@@ -97,26 +114,19 @@ impl Default for JobSnapshot {
 
 impl JobSnapshot {
     pub fn status(&self) -> String {
-        self.status
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_else(|_| "unknown".into())
+        mutex_lock(&self.status).clone()
     }
 
     pub fn set_status(&self, value: impl Into<String>) {
-        if let Ok(mut status) = self.status.lock() {
-            *status = value.into();
-        }
+        *mutex_lock(&self.status) = value.into();
     }
 
     pub fn error(&self) -> Option<String> {
-        self.error.lock().ok().and_then(|value| value.clone())
+        mutex_lock(&self.error).clone()
     }
 
     pub fn set_error(&self, value: impl Into<String>) {
-        if let Ok(mut error) = self.error.lock() {
-            *error = Some(value.into());
-        }
+        *mutex_lock(&self.error) = Some(value.into());
         self.finished.store(true, Ordering::Relaxed);
         self.set_status("failed");
     }
@@ -134,16 +144,11 @@ impl JobSnapshot {
     }
 
     pub fn title(&self) -> String {
-        self.title
-            .lock()
-            .map(|value| value.clone())
-            .unwrap_or_default()
+        mutex_lock(&self.title).clone()
     }
 
     pub fn set_title(&self, value: impl Into<String>) {
-        if let Ok(mut title) = self.title.lock() {
-            *title = value.into();
-        }
+        *mutex_lock(&self.title) = value.into();
     }
 
     pub fn is_paused(&self) -> bool {
@@ -162,9 +167,8 @@ impl JobSnapshot {
         if !self.is_active() {
             return;
         }
-        let paused = !self.paused.load(Ordering::Relaxed);
-        self.paused.store(paused, Ordering::Relaxed);
-        self.set_status(if paused { "paused" } else { "downloading" });
+        let was_paused = self.paused.fetch_xor(true, Ordering::Relaxed);
+        self.set_status(if was_paused { "downloading" } else { "paused" });
     }
 
     pub fn request_stop(&self) {
@@ -183,7 +187,26 @@ pub fn is_stopped(error: &anyhow::Error) -> bool {
     error.downcast_ref::<DownloadStopped>().is_some()
 }
 
-pub async fn honor_control(snapshot: Option<&JobSnapshot>) -> Result<()> {
+pub fn is_pause_abort(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<DownloadPaused>().is_some()
+}
+
+pub fn check_stop(snapshot: Option<&JobSnapshot>) -> Result<()> {
+    if snapshot.is_some_and(JobSnapshot::should_stop) {
+        anyhow::bail!(DownloadStopped);
+    }
+    Ok(())
+}
+
+pub fn abort_if_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
+    check_stop(snapshot)?;
+    if snapshot.is_some_and(JobSnapshot::is_paused) {
+        anyhow::bail!(DownloadPaused);
+    }
+    Ok(())
+}
+
+pub async fn wait_while_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
     let Some(snapshot) = snapshot else {
         return Ok(());
     };
@@ -197,6 +220,23 @@ pub async fn honor_control(snapshot: Option<&JobSnapshot>) -> Result<()> {
         }
         return Ok(());
     }
+}
+
+pub async fn until_stop(snapshot: Option<&JobSnapshot>) {
+    let Some(snapshot) = snapshot else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if snapshot.should_stop() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub async fn honor_control(snapshot: Option<&JobSnapshot>) -> Result<()> {
+    wait_while_paused(snapshot).await
 }
 
 pub async fn watch_cli_controls(snapshot: Arc<JobSnapshot>) {
@@ -458,5 +498,13 @@ mod tests {
         assert!(snapshot.should_stop());
         snapshot.set_title("Sintel");
         assert_eq!(snapshot.title(), "Sintel");
+    }
+
+    #[test]
+    fn pause_abort_does_not_sleep() {
+        let snapshot = JobSnapshot::default();
+        snapshot.toggle_pause();
+        let err = abort_if_paused(Some(&snapshot)).unwrap_err();
+        assert!(is_pause_abort(&err));
     }
 }

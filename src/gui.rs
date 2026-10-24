@@ -7,7 +7,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, TextEdit
 
 use crate::http::{filename_from_url, start_url_download_reported};
 use crate::identity::{self, AppKind, VERSION_TAG};
-use crate::progress::{format_eta, format_size, format_speed, JobSnapshot};
+use crate::progress::{format_eta, format_size, format_speed, is_stopped, JobSnapshot};
 use crate::torrent::{magnet_display_name, start_download_reported};
 use crate::update::{self, AvailableUpdate};
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
@@ -75,6 +75,7 @@ impl Mode {
 
 enum WorkerCmd {
     Download {
+        id: u64,
         mode: Mode,
         source: String,
         snapshot: Arc<JobSnapshot>,
@@ -88,10 +89,11 @@ enum WorkerEvent {
     UpToDate,
     UpdateFailed(String),
     Installed(String),
-    DownloadFailed { source: String, error: String },
+    DownloadFailed { id: u64, error: String },
 }
 
 struct Job {
+    id: u64,
     kind: Mode,
     source: String,
     snapshot: Arc<JobSnapshot>,
@@ -103,9 +105,11 @@ struct Job {
 
 struct GuiApp {
     theme: ThemeId,
+    applied_theme: ThemeId,
     mode: Mode,
     input: String,
     jobs: Vec<Job>,
+    next_id: u64,
     tx: Sender<WorkerCmd>,
     events: Receiver<WorkerEvent>,
     auto_update: bool,
@@ -141,9 +145,11 @@ impl GuiApp {
         let _ = cmd_tx.send(WorkerCmd::Check);
         let app = Self {
             theme: ThemeId::Phosphor,
+            applied_theme: ThemeId::Phosphor,
             mode: Mode::Magnet,
             input: String::new(),
             jobs: Vec::new(),
+            next_id: 1,
             tx: cmd_tx,
             events: event_rx,
             auto_update,
@@ -201,7 +207,10 @@ impl GuiApp {
             }
             Mode::Http => snapshot.set_title(filename_from_url(&source, None)),
         }
+        let id = self.next_id;
+        self.next_id += 1;
         let job = Job {
+            id,
             kind: self.mode,
             source: source.clone(),
             snapshot: Arc::clone(&snapshot),
@@ -211,6 +220,7 @@ impl GuiApp {
             speed: 0.0,
         };
         let _ = self.tx.send(WorkerCmd::Download {
+            id,
             mode: self.mode,
             source,
             snapshot,
@@ -231,12 +241,16 @@ impl GuiApp {
         if !title.is_empty() {
             snapshot.set_title(title);
         }
+        let id = self.next_id;
+        self.next_id += 1;
         let _ = self.tx.send(WorkerCmd::Download {
+            id,
             mode: kind,
             source: source.clone(),
             snapshot: Arc::clone(&snapshot),
         });
         self.jobs[index] = Job {
+            id,
             kind,
             source,
             snapshot,
@@ -274,9 +288,11 @@ impl GuiApp {
                     self.update_note.clear();
                     self.installed_tag = Some(tag);
                 }
-                WorkerEvent::DownloadFailed { source, error } => {
-                    if let Some(job) = self.jobs.iter().find(|job| job.source == source) {
-                        job.snapshot.set_error(error);
+                WorkerEvent::DownloadFailed { id, error } => {
+                    if let Some(job) = self.jobs.iter().find(|job| job.id == id) {
+                        if !job.snapshot.is_stopped() {
+                            job.snapshot.set_error(error);
+                        }
                     }
                 }
             }
@@ -287,7 +303,10 @@ impl GuiApp {
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
-        self.apply_theme(ctx);
+        if self.applied_theme != self.theme {
+            self.apply_theme(ctx);
+            self.applied_theme = self.theme;
+        }
         let palette = theme(self.theme);
         ctx.request_repaint_after(Duration::from_millis(200));
 
@@ -457,7 +476,9 @@ impl eframe::App for GuiApp {
                                         if ui.button(mono("later", 12.0, palette.dim)).clicked() {
                                             self.installed_tag = None;
                                         }
-                                        if ui.button(mono("restart now", 12.0, palette.fg)).clicked()
+                                        if ui
+                                            .button(mono("restart now", 12.0, palette.fg))
+                                            .clicked()
                                         {
                                             let _ = update::relaunch();
                                         }
@@ -744,24 +765,7 @@ fn mono(text: impl Into<String>, size: f32, color: Color32) -> RichText {
 }
 
 fn today() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86_400;
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    if month <= 2 {
-        year += 1;
-    }
-    format!("{year:04}-{month:02}-{day:02}")
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -775,47 +779,55 @@ fn truncate(value: &str, max: usize) -> String {
 
 fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let handle = runtime.handle().clone();
+    let _keep_alive = thread::spawn(move || {
+        runtime.block_on(std::future::pending::<()>());
+    });
     while let Ok(cmd) = rx.recv() {
-        match cmd {
-            WorkerCmd::Download {
-                mode,
-                source,
-                snapshot,
-            } => {
-                snapshot.set_status("starting");
-                let result = runtime.block_on(async {
-                    match mode {
+        let tx = tx.clone();
+        handle.spawn(async move {
+            match cmd {
+                WorkerCmd::Download {
+                    id,
+                    mode,
+                    source,
+                    snapshot,
+                } => {
+                    snapshot.set_status("starting");
+                    let result = match mode {
                         Mode::Magnet => start_download_reported(&source, snapshot).await,
                         Mode::Http => start_url_download_reported(&source, snapshot).await,
+                    };
+                    if let Err(error) = result {
+                        if !is_stopped(&error) {
+                            let _ = tx.send(WorkerEvent::DownloadFailed {
+                                id,
+                                error: format!("{error:#}"),
+                            });
+                        }
                     }
-                });
-                if let Err(error) = result {
-                    let _ = tx.send(WorkerEvent::DownloadFailed {
-                        source,
-                        error: format!("{error:#}"),
-                    });
                 }
+                WorkerCmd::Check => match update::check_latest(AppKind::Gui).await {
+                    Ok(Some(update)) => {
+                        let _ = tx.send(WorkerEvent::UpdateAvailable(update));
+                    }
+                    Ok(None) => {
+                        let _ = tx.send(WorkerEvent::UpToDate);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(WorkerEvent::UpdateFailed(format!("{error:#}")));
+                    }
+                },
+                WorkerCmd::Install(update) => match update::install_update(&update).await {
+                    Ok(_) => {
+                        let _ = tx.send(WorkerEvent::Installed(update.tag));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(WorkerEvent::UpdateFailed(format!("{error:#}")));
+                    }
+                },
             }
-            WorkerCmd::Check => match runtime.block_on(update::check_latest(AppKind::Gui)) {
-                Ok(Some(update)) => {
-                    let _ = tx.send(WorkerEvent::UpdateAvailable(update));
-                }
-                Ok(None) => {
-                    let _ = tx.send(WorkerEvent::UpToDate);
-                }
-                Err(error) => {
-                    let _ = tx.send(WorkerEvent::UpdateFailed(format!("{error:#}")));
-                }
-            },
-            WorkerCmd::Install(update) => match runtime.block_on(update::install_update(&update)) {
-                Ok(_) => {
-                    let _ = tx.send(WorkerEvent::Installed(update.tag));
-                }
-                Err(error) => {
-                    let _ = tx.send(WorkerEvent::UpdateFailed(format!("{error:#}")));
-                }
-            },
-        }
+        });
     }
 }
 

@@ -8,6 +8,19 @@ use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
 use crate::validate::is_valid_magnet_url;
 
+pub fn magnet_info_hash(magnet_uri: &str) -> Option<String> {
+    magnet_uri.split(['?', '&']).find_map(|part| {
+        let value = part.strip_prefix("xt=")?;
+        let hash = value.rsplit(':').next()?;
+        let trimmed = hash.trim();
+        if trimmed.len() == 32 || trimmed.len() == 40 {
+            Some(trimmed.to_ascii_lowercase())
+        } else {
+            None
+        }
+    })
+}
+
 pub fn magnet_display_name(magnet_uri: &str) -> Option<String> {
     magnet_uri.split(['?', '&']).find_map(|part| {
         let value = part.strip_prefix("dn=")?;
@@ -74,6 +87,7 @@ async fn run_torrent(
             AddTorrent::from_url(magnet_uri),
             Some(AddTorrentOptions {
                 overwrite: true,
+                sub_folder: magnet_info_hash(magnet_uri),
                 ..Default::default()
             }),
         )
@@ -201,6 +215,17 @@ mod tests {
     fn reads_magnet_display_name() {
         let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel";
         assert_eq!(magnet_display_name(uri).as_deref(), Some("Sintel"));
+    }
+
+    #[test]
+    fn reads_magnet_info_hash() {
+        assert_eq!(
+            magnet_info_hash(
+                "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel"
+            )
+            .as_deref(),
+            Some("08ada5a7a6183aae1e09d831df6748d566095a10")
+        );
     }
 
     #[tokio::test]

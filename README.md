@@ -75,7 +75,13 @@ GUI: same engines, phosphor / amber / ice themes, checkbox for auto-update. The 
 
 Magnet links need a 32-character base32 or 40-character hex info hash. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
-Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes.
+Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes. Each magnet writes into `./downloads/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume.
+
+HTTP **pause** aborts the live Range body and continues from `downloads/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
+
+The GUI runs jobs concurrently. Each row has its own job id; errors attach to that row, not the first matching URL.
+
+Self-update downloads only `danted4/torrenter` GitHub Release assets, requires `SHA256SUMS`, caps size, and times out. CLI auto-update on startup runs only on an interactive TTY.
 
 ## Progress bar
 
@@ -152,6 +158,7 @@ Release: `git tag v3.0.2 && git push origin v3.0.2` (commit must already be on `
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
 | Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
 | Incomplete part | Server closed a Range early; retry the same URL |
+| Linux GUI missing GTK/xcb | `torrenter-gui-*-linux-gnu` is dynamically linked; install GTK 3 and xcb (`libgtk-3-0 libxkbcommon0 libxcb-render0 libxcb-shape0 libxcb-xfixes0` on Debian/Ubuntu) |
 | Rust version error | Recent stable toolchain if building from source (`rustup update`) |
 
 ## Responsible use

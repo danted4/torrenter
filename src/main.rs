@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
 
 async fn maybe_auto_update() -> Result<()> {
     update::cleanup_replaced_binary();
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
     let Ok(found) = update::check_latest(AppKind::Cli).await else {
         return Ok(());
     };
