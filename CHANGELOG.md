@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.0.1] - 2026-10-24
+
+### Fixed
+
+- Magnet downloads raise the process file-descriptor limit and allow overwrite so large torrents can resume instead of failing with "too many open files"
+
 ## [3.0.0] - 2026-10-24
 
 ### Changed
