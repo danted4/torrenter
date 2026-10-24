@@ -15,7 +15,7 @@ use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
 #[derive(Parser)]
 #[command(
-    name = "nodewt",
+    name = "torrenter",
     about = "Magnet/torrent and multipart HTTP(S) downloader",
     version
 )]
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn parses_http_subcommand() {
-        let cli = Cli::try_parse_from(["nodewt", "http", "https://example.com/a.bin"]).unwrap();
+        let cli = Cli::try_parse_from(["torrenter", "http", "https://example.com/a.bin"]).unwrap();
         match cli.command {
             Some(Command::Http { url }) => assert_eq!(url, "https://example.com/a.bin"),
             other => panic!("unexpected {other:?}"),
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn parses_magnet_subcommand() {
         let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
-        let cli = Cli::try_parse_from(["nodewt", "magnet", magnet]).unwrap();
+        let cli = Cli::try_parse_from(["torrenter", "magnet", magnet]).unwrap();
         match cli.command {
             Some(Command::Magnet { uri }) => assert_eq!(uri, magnet),
             other => panic!("unexpected {other:?}"),
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn default_is_interactive() {
-        let cli = Cli::try_parse_from(["nodewt"]).unwrap();
+        let cli = Cli::try_parse_from(["torrenter"]).unwrap();
         assert!(cli.command.is_none());
     }
 }

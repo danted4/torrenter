@@ -2058,27 +2058,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nodewt"
-version = "3.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures-util",
- "indicatif",
- "librqbit",
- "percent-encoding",
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "nonzero_ext"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3288,6 +3267,27 @@ dependencies = [
  "libc",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "torrenter"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "indicatif",
+ "librqbit",
+ "percent-encoding",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -21,7 +21,7 @@ use crate::validate::is_valid_download_url;
 
 pub const DOWNLOAD_DIRECTORY: &str = "./downloads";
 pub const PART_COUNT: usize = 4;
-const RESUME_DIR_NAME: &str = ".nodewt";
+const RESUME_DIR_NAME: &str = ".resume";
 const MERGE_CHUNK: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -76,7 +76,11 @@ pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -
     println!("\nPreparing direct download...\n");
 
     let client = Client::builder()
-        .user_agent(concat!("nodewt/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
         .redirect(reqwest::redirect::Policy::limited(10))
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(60))
@@ -579,7 +583,7 @@ async fn merge_parts(
 ) -> Result<()> {
     let part_size = total.div_ceil(layout.part_count as u64);
     let output_path = layout.directory.join(filename);
-    let tmp_path = layout.directory.join(format!(".{filename}.nodewt.tmp"));
+    let tmp_path = layout.directory.join(format!(".{filename}.merge.tmp"));
     let mut output = OpenOptions::new()
         .create(true)
         .write(true)

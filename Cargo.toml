@@ -1,10 +1,10 @@
 [package]
-name = "nodewt"
+name = "torrenter"
 version = "3.0.0"
 edition = "2021"
 description = "CLI with two download modes: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
 license = "MIT"
-repository = "https://github.com/danted4/torrent-http-download-cli"
+repository = "https://github.com/danted4/torrenter"
 readme = "README.md"
 keywords = ["torrent", "magnet", "download", "http", "cli"]
 rust-version = "1.85"
@@ -29,5 +29,5 @@ url = "2"
 tempfile = "3"
 
 [[bin]]
-name = "nodewt"
+name = "torrenter"
 path = "src/main.rs"

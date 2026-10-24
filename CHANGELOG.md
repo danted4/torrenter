@@ -8,8 +8,10 @@ All notable changes to this project are documented here.
 
 - Rewrote the CLI in **Rust** (replaces Node.js / WebTorrent)
 - Magnet downloads now use **librqbit**; HTTP still uses 4-part Range resume
-- Added `nodewt http <url>` and `nodewt magnet <uri>` subcommands
+- Added `torrenter http <url>` and `torrenter magnet <uri>` subcommands
+- Renamed the project from nodeWT / torrent-http-download-cli to **torrenter**
 - TLS via rustls for Linux, macOS, and Windows without OpenSSL
+- HTTP resume state lives in `downloads/.resume/` (not `.nodewt`)
 - HTTP resume truncates oversized parts, caps Range bodies, and merges exact byte counts
 - Filenames cannot escape `./downloads`; torrent sessions stop cleanly with in-memory DHT only
 
@@ -17,6 +19,7 @@ All notable changes to this project are documented here.
 
 - Unit and integration tests for validation, formatters, CLI parsing, HTTP multipart/resume/fallback
 - GitHub Actions CI on pushes and PRs to `main` (fmt, clippy, tests on Linux/macOS/Windows)
+- Release workflow: `v*.*.*` tags on `main` publish Linux, macOS, and Windows binaries
 
 ## [2.2.0] - 2026-08-29
 

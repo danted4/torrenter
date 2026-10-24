@@ -1,4 +1,4 @@
-# Torrent & HTTP Download CLI
+# torrenter
 
 Terminal downloader with two modes. No GUI, no HTML, no CSS.
 
@@ -19,7 +19,7 @@ You often need a **terminal downloader** without a GUI — whether the source is
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
 | **Engine** | librqbit (BitTorrent P2P) | `reqwest` + `Range: bytes=` |
 | **Parallelism** | Piece picker | **4 parallel byte-range parts** |
-| **Resume** | librqbit built-in | Part files in `downloads/.nodewt/` |
+| **Resume** | librqbit built-in | Part files in `downloads/.resume/` |
 | **Peers** | Shown in progress bar | `Peers: 0` |
 | **Fallback** | — | Single-stream if the server has no ranges |
 
@@ -32,32 +32,33 @@ You often need a **terminal downloader** without a GUI — whether the source is
 - Progress: size, speed, ETA, percentage, peers
 - rustls TLS (no OpenSSL required)
 
-## Prerequisites
+## Install
 
-- [Rust](https://rustup.rs/) 1.85+ (stable) with Cargo
-- Network access; torrents need UDP allowed for DHT where possible
+Pre-built binaries are attached to [GitHub Releases](https://github.com/danted4/torrenter/releases) (Linux, macOS, Windows). Download the asset for your OS, make it executable on Unix, and put it on your `PATH`.
 
-## Build
+A tag `vX.Y.Z` on `main` builds those assets automatically.
+
+From source:
 
 ```bash
-git clone https://github.com/danted4/torrent-http-download-cli.git
-cd torrent-http-download-cli
+git clone https://github.com/danted4/torrenter.git
+cd torrenter
 cargo build --release
 ```
 
-The binary is `target/release/nodewt` (`.exe` on Windows).
+The binary is `target/release/torrenter` (`.exe` on Windows).
 
 ```bash
 # Linux / macOS
-./target/release/nodewt
+./target/release/torrenter
 
 # Windows
-.\target\release\nodewt.exe
+.\target\release\torrenter.exe
 ```
 
 ## Usage
 
-### Interactive (same menu as the old Node app)
+### Interactive
 
 ```
 Choose download type:
@@ -68,13 +69,13 @@ Choose download type:
 ### Commands
 
 ```bash
-nodewt magnet "magnet:?xt=urn:btih:…"
-nodewt http "https://example.com/large-file.iso"
+torrenter magnet "magnet:?xt=urn:btih:…"
+torrenter http "https://example.com/large-file.iso"
 ```
 
 **Magnet:** connects to peers, writes to `./downloads/`, exits at 100%.
 
-**HTTP with byte ranges:** splits into 4 parts, downloads in parallel, resumes from `downloads/.nodewt/` if interrupted, then merges into `./downloads/`.
+**HTTP with byte ranges:** splits into 4 parts, downloads in parallel, resumes from `downloads/.resume/` if interrupted, then merges into `./downloads/`.
 
 **No range support:** single streamed download. This fallback **does not resume**; it truncates the destination and starts over.
 
@@ -92,7 +93,7 @@ Torrent mode enables DHT in memory only (no DHT state written outside `./downloa
 
 ```mermaid
 flowchart TD
-  A[nodewt] --> B{1 or 2?}
+  A[torrenter] --> B{1 or 2?}
   B -->|Magnet| C[librqbit Session]
   C --> F[./downloads]
   B -->|Direct URL| D{Known size?}
@@ -119,18 +120,7 @@ cargo clippy --all-targets -- -D warnings
 
 GitHub Actions runs fmt, clippy (`-D warnings`), and tests on **Linux, macOS, and Windows** for every push and pull request to `main`.
 
-## Cross-platform builds
-
-TLS uses rustls. Typical release targets:
-
-```bash
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-cargo build --release --target x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-pc-windows-msvc
-```
-
-Install the target first: `rustup target add <triple>`. Windows GNU/MSVC toolchains must be available on the build machine.
+Pushing a `v*.*.*` tag whose commit is on `main` builds release binaries for Linux, macOS (Intel + Apple Silicon), and Windows.
 
 ## Troubleshooting
 
@@ -140,7 +130,7 @@ Install the target first: `rustup target add <triple>`. Windows GNU/MSVC toolcha
 | No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
-| Resume not working (HTTP) | Keep the same URL; state is in `downloads/.nodewt/` |
+| Resume not working (HTTP) | Keep the same URL; state is in `downloads/.resume/` |
 | Rust version error | Need a recent stable toolchain (`rustup update`) |
 
 ## Responsible use
