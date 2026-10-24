@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, TextEdit
 use crate::http::{filename_from_url, start_url_download_reported};
 use crate::identity::{self, AppKind, VERSION_TAG};
 use crate::progress::{format_eta, format_size, format_speed, is_stopped, JobSnapshot};
-use crate::torrent::{magnet_display_name, start_download_reported};
+use crate::torrent::{magnet_display_name, magnet_info_hash, start_download_reported};
 use crate::update::{self, AvailableUpdate};
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -72,6 +72,8 @@ impl Mode {
         }
     }
 }
+
+const MAX_ACTIVE_DOWNLOADS: usize = 4;
 
 enum WorkerCmd {
     Download {
@@ -197,6 +199,10 @@ impl GuiApp {
             self.update_note = format!("invalid {} URL", self.mode.label().to_lowercase());
             return;
         }
+        if let Some(note) = self.duplicate_active_note(self.mode, &source) {
+            self.update_note = note;
+            return;
+        }
         let snapshot = Arc::new(JobSnapshot::default());
         snapshot.set_status("queued");
         match self.mode {
@@ -235,6 +241,10 @@ impl GuiApp {
         };
         let kind = job.kind;
         let source = job.source.clone();
+        if let Some(note) = self.duplicate_active_note(kind, &source) {
+            self.update_note = note;
+            return;
+        }
         let title = job.snapshot.title();
         let snapshot = Arc::new(JobSnapshot::default());
         snapshot.set_status("queued");
@@ -259,6 +269,24 @@ impl GuiApp {
             last_check: Instant::now(),
             speed: 0.0,
         };
+    }
+
+    fn duplicate_active_note(&self, kind: Mode, source: &str) -> Option<String> {
+        let conflict = self.jobs.iter().any(|job| {
+            if !job.snapshot.is_active() || job.kind != kind {
+                return false;
+            }
+            match kind {
+                Mode::Magnet => magnet_info_hash(source).is_some_and(|hash| {
+                    magnet_info_hash(&job.source).as_deref() == Some(hash.as_str())
+                }),
+                Mode::Http => job.source == source,
+            }
+        });
+        conflict.then(|| match kind {
+            Mode::Magnet => "that magnet is already downloading".into(),
+            Mode::Http => "that URL is already downloading".into(),
+        })
     }
 
     fn drain_events(&mut self) {
@@ -780,11 +808,13 @@ fn truncate(value: &str, max: usize) -> String {
 fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
+    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_ACTIVE_DOWNLOADS));
     let _keep_alive = thread::spawn(move || {
         runtime.block_on(std::future::pending::<()>());
     });
     while let Ok(cmd) = rx.recv() {
         let tx = tx.clone();
+        let limiter = Arc::clone(&limiter);
         handle.spawn(async move {
             match cmd {
                 WorkerCmd::Download {
@@ -793,6 +823,14 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     source,
                     snapshot,
                 } => {
+                    snapshot.set_status("queued");
+                    let Ok(_permit) = limiter.acquire_owned().await else {
+                        return;
+                    };
+                    if snapshot.should_stop() {
+                        snapshot.mark_stopped();
+                        return;
+                    }
                     snapshot.set_status("starting");
                     let result = match mode {
                         Mode::Magnet => start_download_reported(&source, snapshot).await,
@@ -850,5 +888,10 @@ mod tests {
         assert_eq!(value.len(), 10);
         assert_eq!(&value[4..5], "-");
         assert_eq!(&value[7..8], "-");
+    }
+
+    #[test]
+    fn caps_active_downloads() {
+        assert_eq!(MAX_ACTIVE_DOWNLOADS, 4);
     }
 }

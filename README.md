@@ -79,9 +79,9 @@ Torrent mode uses DHT in memory only and calls `session.stop()` when the downloa
 
 HTTP **pause** aborts the live Range body and continues from `downloads/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
 
-The GUI runs jobs concurrently. Each row has its own job id; errors attach to that row, not the first matching URL.
+The GUI runs at most four downloads at once; further rows stay queued. The same magnet (or HTTP URL) cannot start twice while it is already active. A second copy of the same info hash also waits on an in-process folder lock so two sessions cannot overwrite `./downloads/<info-hash>/` at once.
 
-Self-update downloads only `danted4/torrenter` GitHub Release assets, requires `SHA256SUMS`, caps size, and times out. CLI auto-update on startup runs only on an interactive TTY.
+Self-update downloads only `https://github.com/danted4/torrenter/releases/download/…` assets (cached config URLs are re-checked). It requires `SHA256SUMS`, caps size, and times out. That hash is **same-publisher integrity**, not a signature: a stolen GitHub token can still ship a binary and a matching sums file. CLI auto-update on startup runs only on an interactive TTY.
 
 ## Progress bar
 

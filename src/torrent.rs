@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -7,6 +8,17 @@ use librqbit::{AddTorrent, AddTorrentOptions, DhtSessionConfig, Session, Session
 use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
 use crate::validate::is_valid_magnet_url;
+
+fn magnet_folder_lock(hash: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut map = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.entry(hash.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
 
 pub fn magnet_info_hash(magnet_uri: &str) -> Option<String> {
     magnet_uri.split(['?', '&']).find_map(|part| {
@@ -53,6 +65,9 @@ pub async fn start_download_with(magnet_uri: &str, progress: ProgressHandle) -> 
     if let Some(name) = magnet_display_name(magnet_uri) {
         progress.set_title(name);
     }
+    let info_hash = magnet_info_hash(magnet_uri).context("magnet has no info hash")?;
+    let folder_lock = magnet_folder_lock(&info_hash);
+    let _folder = folder_lock.lock().await;
     progress.set_message("Initializing torrent client & verifying data...");
 
     // Compilation torrents open many files at once; macOS defaults are often 256.
