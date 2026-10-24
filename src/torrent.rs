@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
-use librqbit::{AddTorrent, DhtSessionConfig, Session, SessionOptions};
+use librqbit::{AddTorrent, AddTorrentOptions, DhtSessionConfig, Session, SessionOptions};
 
 use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::new_bar;
@@ -16,6 +16,9 @@ pub async fn start_download(magnet_uri: &str) -> Result<()> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("Initializing torrent client & verifying data...");
     spinner.enable_steady_tick(Duration::from_millis(80));
+
+    // Compilation torrents open many files at once; macOS defaults are often 256.
+    let _ = librqbit::try_increase_nofile_limit();
 
     let session = Session::new_with_opts(
         DOWNLOAD_DIRECTORY.into(),
@@ -42,7 +45,13 @@ async fn run_torrent(
     spinner: ProgressBar,
 ) -> Result<()> {
     let handle = session
-        .add_torrent(AddTorrent::from_url(magnet_uri), None)
+        .add_torrent(
+            AddTorrent::from_url(magnet_uri),
+            Some(AddTorrentOptions {
+                overwrite: true,
+                ..Default::default()
+            }),
+        )
         .await
         .context("failed to add magnet")?
         .into_handle()

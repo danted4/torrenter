@@ -135,6 +135,7 @@ Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `
 |---------|-----|
 | `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and a 32-char base32 or 40-char hex hash |
 | No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
+| `Too many open files` | torrenter raises the process limit when it can; otherwise `ulimit -n 10240` and retry |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
 | Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
