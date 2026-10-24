@@ -485,9 +485,12 @@ async fn download_part(
         Some(expected - existing_size),
     )
     .await?;
-    file.set_len(expected).await?;
     file.flush().await?;
-
+    let completed = file.metadata().await?.len();
+    if completed > expected {
+        file.set_len(expected).await?;
+        file.flush().await?;
+    }
     let completed = fs::metadata(&path).await?.len();
     if completed != expected {
         bail!("A download part was incomplete");
@@ -549,15 +552,19 @@ async fn stream_into_file(
             continue;
         }
         file.write_all(&chunk).await?;
-        downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        let n = chunk.len() as u64;
+        downloaded.fetch_add(n, Ordering::Relaxed);
+        progress.inc(n);
         let next = downloaded.load(Ordering::Relaxed);
         if next > progress.length().unwrap_or(0) {
             progress.set_length(next);
         }
-        progress.set_position(next);
         if remaining == Some(0) {
             break;
         }
+    }
+    if remaining.is_some_and(|left| left != 0) {
+        bail!("A download part was incomplete");
     }
     Ok(())
 }
@@ -630,6 +637,7 @@ mod tests {
         honor_ranges: bool,
         send_head_length: bool,
         disposition: Option<String>,
+        shorten_range_to: Option<usize>,
         range_starts: Arc<tokio::sync::Mutex<Vec<u64>>>,
         get_count: Arc<AtomicUsize>,
         head_count: Arc<AtomicUsize>,
@@ -722,18 +730,22 @@ mod tests {
                 let end = end.min(config.body.len().saturating_sub(1) as u64);
                 let start = start.min(end);
                 let slice = &config.body[start as usize..=end as usize];
+                let sent = match config.shorten_range_to {
+                    Some(max) if slice.len() > max => &slice[..max],
+                    _ => slice,
+                };
                 return write_http(
                     &mut stream,
                     "HTTP/1.1 206 Partial Content",
                     vec![
-                        ("Content-Length", slice.len().to_string()),
+                        ("Content-Length", sent.len().to_string()),
                         (
                             "Content-Range",
                             format!("bytes {start}-{end}/{}", config.body.len()),
                         ),
                         ("Accept-Ranges", "bytes".into()),
                     ],
-                    slice,
+                    sent,
                 )
                 .await;
             }
@@ -818,6 +830,7 @@ mod tests {
             honor_ranges,
             send_head_length,
             disposition: None,
+            shorten_range_to: None,
             range_starts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             get_count: Arc::new(AtomicUsize::new(0)),
             head_count: Arc::new(AtomicUsize::new(0)),
@@ -1101,6 +1114,36 @@ mod tests {
         assert_eq!(
             fs::read(dir.path().join("payload.bin")).await.unwrap(),
             body
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_range_body_fails_instead_of_zero_filling() {
+        let body = pattern_body(256);
+        let dir = tempfile::tempdir().unwrap();
+        let download_layout = layout(&dir);
+        let mut server = config(body, true, true);
+        server.shorten_range_to = Some(8);
+        let test_server = spawn_server(server).await;
+        let url = test_server.url.clone();
+
+        let err = start_url_download_in(&url, download_layout.clone())
+            .await
+            .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("incomplete"),
+            "expected incomplete part, got {message}"
+        );
+
+        let key = resume_key(&url);
+        let part0 = fs::metadata(part_path(&download_layout, &key, 0))
+            .await
+            .unwrap()
+            .len();
+        assert!(
+            part0 < 64,
+            "part should not be zero-padded to expected size, len={part0}"
         );
     }
 
