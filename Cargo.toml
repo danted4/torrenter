@@ -1,0 +1,33 @@
+[package]
+name = "torrenter"
+version = "3.0.0"
+edition = "2021"
+description = "CLI with two download modes: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
+license = "MIT"
+repository = "https://github.com/danted4/torrenter"
+readme = "README.md"
+keywords = ["torrent", "magnet", "download", "http", "cli"]
+rust-version = "1.85"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+indicatif = "0.17"
+librqbit = { version = "9", default-features = false, features = ["rust-tls"] }
+percent-encoding = "2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "torrenter"
+path = "src/main.rs"

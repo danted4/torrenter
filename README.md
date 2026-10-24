@@ -1,99 +1,53 @@
-# Torrent & HTTP Download CLI
+# torrenter
 
-**Two download modes in one Node.js terminal app:**
+Terminal downloader with two modes. No GUI.
 
-1. **Magnet / torrent** — WebTorrent P2P with peers, speed, and ETA  
-2. **Direct HTTP(S)** — **4-part parallel multipart download** with byte-range resume  
+1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
+2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
 
-Shared **progress bar**, validation, and `./downloads/` output. Not just a torrent client.
-
-> **Keywords:** torrent downloader, magnet link, WebTorrent, BitTorrent, P2P, HTTP download, direct download, multipart download, parallel download, byte-range, resume download, Node.js CLI, terminal downloader, progress bar.
-
-Formerly **nodeWT** / **webtorrent-cli-client**.
-
-[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![WebTorrent](https://img.shields.io/badge/WebTorrent-2.1.27-orange)](https://webtorrent.io/)
-
-## Table of contents
-
-- [Why this exists](#why-this-exists)
-- [Two download modes](#two-download-modes)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Usage](#usage)
-  - [Mode 1 — Magnet URL (torrent)](#mode-1--magnet-url-torrent)
-  - [Mode 2 — Direct URL (multipart HTTP)](#mode-2--direct-url-multipart-http)
-- [Progress bar](#progress-bar)
-- [How it works](#how-it-works)
-- [Configuration](#configuration)
-- [Project layout](#project-layout)
-- [Troubleshooting](#troubleshooting)
-- [Responsible use](#responsible-use)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Why this exists
-
-You often need a **terminal downloader** without installing a full GUI — whether the source is a **magnet link** or a **plain HTTPS file URL**.
-
-This CLI handles **both**:
-
-- **Torrents** via [WebTorrent](https://webtorrent.io/) — magnet links, peer discovery, live peer count  
-- **Direct files** via native `fetch` — **4 concurrent HTTP range parts**, automatic merge, and **resume** after interruption  
-
-One progress bar, one `./downloads/` folder, one `npm start` menu.
-
----
+Output goes to `./downloads/`. Runs on Linux, macOS, and Windows.
 
 ## Two download modes
 
-| | **1. Magnet / torrent** | **2. Direct HTTP(S)** |
-|---|---------------------------|------------------------|
-| **When to use** | `.torrent` / magnet P2P sources | CDN, mirror, or any direct file link |
+| | **Magnet / torrent** | **Direct HTTP(S)** |
+|---|----------------------|---------------------|
+| **Use when** | magnet / `.torrent` P2P | CDN, mirror, or any direct file URL |
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
-| **Engine** | WebTorrent (BitTorrent P2P) | `fetch` + `Range: bytes=` |
-| **Parallelism** | WebTorrent piece picker | **4 parallel byte-range parts** |
-| **Resume** | WebTorrent built-in | Part files in `.downloads/.nodewt/` |
-| **Peers** | Shown in progress bar | N/A (`Peers: 0`) |
-| **Fallback** | — | Single-stream if server has no ranges |
+| **Engine** | librqbit | `reqwest` + `Range: bytes=` |
+| **Parallelism** | piece picker | 4 byte-range parts |
+| **Resume** | librqbit on disk | `downloads/.resume/` part files |
+| **Peers** | live count in the bar | `Peers: 0` |
+| **Fallback** | — | single stream if the server ignores ranges |
 
----
+Single-stream HTTP **does not resume**. It truncates the destination and starts over.
 
-## Features
+## Install
 
-- **Dual-mode menu** — pick torrent or direct URL at startup  
-- **Multipart HTTP** — 4-part parallel download when `Accept-Ranges: bytes` is supported  
-- **Resume** — interrupted direct downloads continue from saved parts  
-- **WebTorrent** — magnet validation, DHT, peer stats  
-- **cli-progress** bar — size, speed, ETA, percentage  
-- **Node.js 22+** — native `fetch` for HTTP; no extra HTTP client  
-- **Cross-platform** — macOS, Linux, Windows  
+Pre-built binaries are on [GitHub Releases](https://github.com/danted4/torrenter/releases):
 
----
+| OS | Asset |
+|----|--------|
+| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` |
+| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` |
+| macOS Intel | `torrenter-x86_64-apple-darwin` |
+| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` |
 
-## Quick start
+On Unix: `chmod +x` the file and put it on your `PATH`. No Rust/Cargo needed at runtime.
 
-### Prerequisites
+A `vX.Y.Z` tag whose commit is on `main` builds those assets.
 
-- **Node.js 22+** ([nodejs.org](https://nodejs.org/) or `nvm install 22`)
-- **npm** or **yarn**
-
-### Install
+From source (Rust 1.85+):
 
 ```bash
-git clone https://github.com/danted4/torrent-http-download-cli.git
-cd torrent-http-download-cli
-npm install
+git clone https://github.com/danted4/torrenter.git
+cd torrenter
+cargo build --release
+./target/release/torrenter          # Windows: .\target\release\torrenter.exe
 ```
 
-### Run
+## Usage
 
-```bash
-npm start
-```
+Interactive (no arguments):
 
 ```
 Choose download type:
@@ -101,44 +55,16 @@ Choose download type:
 2. Direct URL (multi-part)
 ```
 
----
+Commands:
 
-## Usage
-
-### Mode 1 — Magnet URL (torrent)
-
-```
-1
-
-Please paste your magnetURI:
-
-magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10
+```bash
+torrenter magnet "magnet:?xt=urn:btih:…"
+torrenter http "https://example.com/large-file.iso"
 ```
 
-WebTorrent connects to peers, downloads to `./downloads/`, and exits at 100%.
+Magnet links need a 32-character base32 or 40-character hex info hash. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
-### Mode 2 — Direct URL (multipart HTTP)
-
-```
-2
-
-Please paste the direct download URL:
-
-https://example.com/large-file.iso
-```
-
-**Server supports byte ranges** (`Content-Length` + `Accept-Ranges: bytes`):
-
-1. Splits the file into **4 parts**  
-2. Downloads parts **in parallel**  
-3. **Resumes** from `.downloads/.nodewt/` if interrupted  
-4. **Merges** into the final file in `./downloads/`  
-
-**No range support:** automatically falls back to a single streamed download.
-
-Filename from `Content-Disposition` header or URL path.
-
----
+Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes.
 
 ## Progress bar
 
@@ -146,97 +72,79 @@ Filename from `Content-Disposition` header or URL path.
 [████████████████░░░░] 75% | Peers: 12 | D: 750.45 MB @ 2.5 MB/s | T: 1.0 GB | ETA: 2 minutes
 ```
 
-| Field | Magnet mode | Direct HTTP mode |
-|-------|-------------|------------------|
-| Bar / `%` | Torrent progress | Bytes received / total |
-| `Peers` | Live peer count | `0` |
-| `D` / `@` / `T` / `ETA` | Downloaded, speed, total, time left | Same |
-
----
-
 ## How it works
 
 ```mermaid
 flowchart TD
-  A[npm start] --> B{1 or 2?}
-  B -->|Magnet| C[WebTorrent P2P]
-  C --> F[./downloads/]
-  B -->|Direct URL| D{Byte ranges?}
-  D -->|Yes| E[4 parallel parts + resume + merge]
-  D -->|No| G[Single HTTP stream]
-  E --> F
-  G --> F
+  start[torrenter] --> entry{Args?}
+  entry -->|none| menu{Menu 1 or 2}
+  entry -->|magnet| torrent
+  entry -->|http| httpStart
+  menu -->|1 Magnet| torrent
+  menu -->|2 Direct URL| httpStart
+
+  subgraph magnetFlow [Magnet]
+    torrent[librqbit session]
+    torrent --> dht[DHT in memory no persistence]
+    dht --> waitComplete[wait_until_completed]
+    waitComplete --> stopSession[session.stop]
+    stopSession --> outDir
+  end
+
+  subgraph httpFlow [Direct HTTP]
+    httpStart[HEAD plus Range bytes 0-0]
+    httpStart --> sized{Known size?}
+    sized -->|no| single[Single GET stream]
+    sized -->|yes| parts[4 parallel Range parts]
+    parts --> resumeDir["downloads/.resume hashed-url parts"]
+    resumeDir --> honor{"HTTP 206?"}
+    honor -->|no| wipe[Wipe parts] --> single
+    honor -->|short body| fail[Fail incomplete no zero pad]
+    honor -->|yes| merge[Copy exact bytes to temp then rename]
+    merge --> outDir
+    single --> outDir
+  end
+
+  outDir["./downloads"]
 ```
 
-- **Torrent:** `server.js` → `startDownload()` → WebTorrent  
-- **Direct:** `server.js` → `startURLDownload()` → `fetch` with `Range` headers → merge  
-
----
+HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `downloads/.resume/`. Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
 
 ## Configuration
 
-### Download folder
+- Download folder: `./downloads` (`DOWNLOAD_DIRECTORY` in `src/http.rs`)
+- Parallel parts: `PART_COUNT = 4` in `src/http.rs`
+- Progress format: `BAR_TEMPLATE` in `src/progress.rs`
+- HTTP timeouts: 20s connect, 60s between reads
 
-Default: `./downloads`. In `src/client/index.js`:
+## Development
 
-```javascript
-const DOWNLOAD_DIRECTORY = './downloads';
+```bash
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 ```
 
-For magnet mode, also update `path` in `client.add(…)`.
+CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows.
 
-### Parallel part count
-
-Direct multipart uses `PART_COUNT = 4` in `src/client/index.js`.
-
-### Progress bar format
-
-Edit `getDisplayFormat()` in `src/utils/formatters/index.js`.
-
----
-
-## Project layout
-
-```
-torrent-http-download-cli/
-├── server.js              # Mode menu: magnet vs direct URL
-├── src/client/index.js    # startDownload() + startURLDownload()
-├── src/utils/             # formatters, loaders, logger, validators
-├── downloads/             # Output (gitignored)
-└── package.json
-```
-
----
+Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `main`).
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and include a valid info hash |
-| No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall |
+| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and a 32-char base32 or 40-char hex hash |
+| No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
-| Multipart not used | Server may not send `Accept-Ranges: bytes` — single stream is used instead |
-| Resume not working (HTTP) | Keep the same URL; state is in `.downloads/.nodewt/` |
-| Node version error | Need Node 22+: `node --version` |
-
----
+| Multipart not used | Server did not return HTTP 206 — single stream is used instead |
+| Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
+| Incomplete part | Server closed a Range early; retry the same URL |
+| Rust version error | Recent stable toolchain if building from source (`rustup update`) |
 
 ## Responsible use
 
-Download only **content you have the legal right to access**. Generic tool — not affiliated with WebTorrent beyond using their OSS library.
-
----
-
-## Contributing
-
-Issues and PRs welcome. No copyrighted files or illegal magnet links in issues.
-
----
+Download only **content you have the legal right to access**. Generic tool — not affiliated with rqbit beyond using their OSS library.
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-**Made by [danted4](https://github.com/danted4)**

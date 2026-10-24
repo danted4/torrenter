@@ -1,3 +1,6 @@
-package-lock.json
+/target
 node_modules
+package-lock.json
+yarn.lock
 downloads
+.DS_Store
