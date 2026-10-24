@@ -1,64 +1,53 @@
 # torrenter
 
-Terminal downloader with two modes. No GUI, no HTML, no CSS.
+Terminal downloader with two modes. No GUI.
 
-1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit) (peers, speed, ETA)
-2. **Direct HTTP(S)** — **4-part parallel multipart download** with byte-range resume
+1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
+2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
 
-Shared progress bar and `./downloads/` output. Cross-platform: Linux, macOS, Windows.
-
-## Why this exists
-
-You often need a **terminal downloader** without a GUI — whether the source is a **magnet link** or a **plain HTTPS file URL**.
+Output goes to `./downloads/`. Runs on Linux, macOS, and Windows.
 
 ## Two download modes
 
-| | **1. Magnet / torrent** | **2. Direct HTTP(S)** |
-|---|---------------------------|------------------------|
-| **When to use** | `.torrent` / magnet P2P sources | CDN, mirror, or any direct file link |
+| | **Magnet / torrent** | **Direct HTTP(S)** |
+|---|----------------------|---------------------|
+| **Use when** | magnet / `.torrent` P2P | CDN, mirror, or any direct file URL |
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
-| **Engine** | librqbit (BitTorrent P2P) | `reqwest` + `Range: bytes=` |
-| **Parallelism** | Piece picker | **4 parallel byte-range parts** |
-| **Resume** | librqbit built-in | Part files in `downloads/.resume/` |
-| **Peers** | Shown in progress bar | `Peers: 0` |
-| **Fallback** | — | Single-stream if the server has no ranges |
+| **Engine** | librqbit | `reqwest` + `Range: bytes=` |
+| **Parallelism** | piece picker | 4 byte-range parts |
+| **Resume** | librqbit on disk | `downloads/.resume/` part files |
+| **Peers** | live count in the bar | `Peers: 0` |
+| **Fallback** | — | single stream if the server ignores ranges |
 
-## Features
-
-- Interactive menu or CLI subcommands
-- Multipart HTTP when the server honors `Range`
-- Resume interrupted direct downloads
-- Magnet validation (32-char base32 and 40-char hex info hashes)
-- Progress: size, speed, ETA, percentage, peers
-- rustls TLS (no OpenSSL required)
+Single-stream HTTP **does not resume**. It truncates the destination and starts over.
 
 ## Install
 
-Pre-built binaries are attached to [GitHub Releases](https://github.com/danted4/torrenter/releases) (Linux, macOS, Windows). Download the asset for your OS, make it executable on Unix, and put it on your `PATH`.
+Pre-built binaries are on [GitHub Releases](https://github.com/danted4/torrenter/releases):
 
-A tag `vX.Y.Z` on `main` builds those assets automatically.
+| OS | Asset |
+|----|--------|
+| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` |
+| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` |
+| macOS Intel | `torrenter-x86_64-apple-darwin` |
+| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` |
 
-From source:
+On Unix: `chmod +x` the file and put it on your `PATH`. No Rust/Cargo needed at runtime.
+
+A `vX.Y.Z` tag whose commit is on `main` builds those assets.
+
+From source (Rust 1.85+):
 
 ```bash
 git clone https://github.com/danted4/torrenter.git
 cd torrenter
 cargo build --release
-```
-
-The binary is `target/release/torrenter` (`.exe` on Windows).
-
-```bash
-# Linux / macOS
-./target/release/torrenter
-
-# Windows
-.\target\release\torrenter.exe
+./target/release/torrenter          # Windows: .\target\release\torrenter.exe
 ```
 
 ## Usage
 
-### Interactive
+Interactive (no arguments):
 
 ```
 Choose download type:
@@ -66,22 +55,16 @@ Choose download type:
 2. Direct URL (multi-part)
 ```
 
-### Commands
+Commands:
 
 ```bash
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
 ```
 
-**Magnet:** connects to peers, writes to `./downloads/`, exits at 100%.
+Magnet links need a 32-character base32 or 40-character hex info hash. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
-**HTTP with byte ranges:** splits into 4 parts, downloads in parallel, resumes from `downloads/.resume/` if interrupted, then merges into `./downloads/`.
-
-**No range support:** single streamed download. This fallback **does not resume**; it truncates the destination and starts over.
-
-Filename comes from `Content-Disposition` or the URL path (a single path component only; `.` / `..` become `download.bin`).
-
-Torrent mode enables DHT in memory only (no DHT state written outside `./downloads`) and stops the session when the download finishes.
+Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes.
 
 ## Progress bar
 
@@ -93,22 +76,46 @@ Torrent mode enables DHT in memory only (no DHT state written outside `./downloa
 
 ```mermaid
 flowchart TD
-  A[torrenter] --> B{1 or 2?}
-  B -->|Magnet| C[librqbit Session]
-  C --> F[./downloads]
-  B -->|Direct URL| D{Known size?}
-  D -->|Yes| E[4 parallel parts + resume + merge]
-  D -->|No| G[Single HTTP stream]
-  E -->|Server rejects 206| G
-  E --> F
-  G --> F
+  start[torrenter] --> entry{Args?}
+  entry -->|none| menu{Menu 1 or 2}
+  entry -->|magnet| torrent
+  entry -->|http| httpStart
+  menu -->|1 Magnet| torrent
+  menu -->|2 Direct URL| httpStart
+
+  subgraph magnetFlow [Magnet]
+    torrent[librqbit session]
+    torrent --> dht[DHT in memory no persistence]
+    dht --> waitComplete[wait_until_completed]
+    waitComplete --> stopSession[session.stop]
+    stopSession --> outDir
+  end
+
+  subgraph httpFlow [Direct HTTP]
+    httpStart[HEAD plus Range bytes 0-0]
+    httpStart --> sized{Known size?}
+    sized -->|no| single[Single GET stream]
+    sized -->|yes| parts[4 parallel Range parts]
+    parts --> resumeDir["downloads/.resume hashed-url parts"]
+    resumeDir --> honor{"HTTP 206?"}
+    honor -->|no| wipe[Wipe parts] --> single
+    honor -->|short body| fail[Fail incomplete no zero pad]
+    honor -->|yes| merge[Copy exact bytes to temp then rename]
+    merge --> outDir
+    single --> outDir
+  end
+
+  outDir["./downloads"]
 ```
+
+HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `downloads/.resume/`. Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
 
 ## Configuration
 
 - Download folder: `./downloads` (`DOWNLOAD_DIRECTORY` in `src/http.rs`)
 - Parallel parts: `PART_COUNT = 4` in `src/http.rs`
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
+- HTTP timeouts: 20s connect, 60s between reads
 
 ## Development
 
@@ -118,20 +125,21 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-GitHub Actions runs fmt, clippy (`-D warnings`), and tests on **Linux, macOS, and Windows** for every push and pull request to `main`.
+CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows.
 
-Pushing a `v*.*.*` tag whose commit is on `main` builds release binaries for Linux, macOS (Intel + Apple Silicon), and Windows.
+Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `main`).
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and include a 32+ character info hash |
+| `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and a 32-char base32 or 40-char hex hash |
 | No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
-| Resume not working (HTTP) | Keep the same URL; state is in `downloads/.resume/` |
-| Rust version error | Need a recent stable toolchain (`rustup update`) |
+| Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
+| Incomplete part | Server closed a Range early; retry the same URL |
+| Rust version error | Recent stable toolchain if building from source (`rustup update`) |
 
 ## Responsible use
 
