@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented here.
 
+## [3.0.2] - 2026-10-24
+
+### Added
+
+- Native GUI (`torrenter-gui`) with phosphor / amber / ice themes, no HTML/CSS
+- Release assets now ship CLI and GUI binaries per OS
+- `danted4/torrenter vX.Y.Z` on the CLI banner, `--version`, and GUI header
+- Opt-in auto-update from GitHub Releases (`--auto-update`, GUI checkbox, or menu item 3)
+- Release `SHA256SUMS`; the updater verifies SHA-256, size, host, and timeouts before replacing the binary
+- GUI jobs run concurrently (cap of 4) and are keyed by id
+
+### Fixed
+
+- HTTP pause now drops the Range body instead of sleeping on a live connection
+- Stop is honored during HTTP metadata and merge
+- Magnets isolate output under `./downloads/<info-hash>/` instead of overwriting a shared tree
+- Update asset URLs must be `github.com/danted4/torrenter/releases/download/<tag>/<name>` with tag matching the release; cached foreign or mismatched-tag URLs are ignored
+- Same magnet cannot run twice at once (GUI refuse + in-process folder lock)
+- CLI startup auto-update is gated to an interactive TTY
+- GitHub API 429 / cached ETag skip instead of failing the GUI
+- Job snapshot mutex poison, pause toggle races, per-frame theme apply, UTC job dates
+
 ## [3.0.1] - 2026-10-24
 
 ### Fixed

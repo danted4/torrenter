@@ -1,11 +1,11 @@
 # torrenter
 
-Terminal downloader with two modes. No GUI.
+Downloader with two engines and two fronts. Each release ships a **CLI** binary and a **native GUI** binary (egui, no HTML/CSS).
 
 1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
 2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
 
-Output goes to `./downloads/`. Runs on Linux, macOS, and Windows.
+Output goes to `./downloads/`. Runs on Linux, macOS, and Windows. Both fronts show `danted4/torrenter vX.Y.Z`.
 
 ## Two download modes
 
@@ -25,12 +25,12 @@ Single-stream HTTP **does not resume**. It truncates the destination and starts 
 
 Pre-built binaries are on [GitHub Releases](https://github.com/danted4/torrenter/releases):
 
-| OS | Asset |
-|----|--------|
-| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` |
-| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` |
-| macOS Intel | `torrenter-x86_64-apple-darwin` |
-| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` |
+| OS | CLI | GUI |
+|----|-----|-----|
+| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` | `torrenter-gui-x86_64-unknown-linux-gnu` |
+| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` | `torrenter-gui-aarch64-apple-darwin` |
+| macOS Intel | `torrenter-x86_64-apple-darwin` | `torrenter-gui-x86_64-apple-darwin` |
+| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` | `torrenter-gui-x86_64-pc-windows-msvc.exe` |
 
 On Unix: `chmod +x` the file and put it on your `PATH`. No Rust/Cargo needed at runtime.
 
@@ -42,7 +42,9 @@ From source (Rust 1.85+):
 git clone https://github.com/danted4/torrenter.git
 cd torrenter
 cargo build --release
-./target/release/torrenter          # Windows: .\target\release\torrenter.exe
+cargo build --release --features gui --bin torrenter-gui
+./target/release/torrenter              # Windows: .\target\release\torrenter.exe
+./target/release/torrenter-gui          # Windows: .\target\release\torrenter-gui.exe
 ```
 
 ## Usage
@@ -50,9 +52,13 @@ cargo build --release
 Interactive (no arguments):
 
 ```
+danted4/torrenter v3.0.2
+auto-update: off
 Choose download type:
 1. Magnet URL
 2. Direct URL (multi-part)
+3. Toggle auto-update
+4. Update now
 ```
 
 Commands:
@@ -60,11 +66,22 @@ Commands:
 ```bash
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
+torrenter --auto-update          # persist: check GitHub Releases on startup
+torrenter --no-auto-update
+torrenter update                 # install the latest matching CLI asset now
 ```
+
+GUI: same engines, phosphor / amber / ice themes, checkbox for auto-update. The GUI binary only replaces itself with `torrenter-gui-*` assets; the CLI binary only replaces itself with `torrenter-*` assets. The binary directory must be writable.
 
 Magnet links need a 32-character base32 or 40-character hex info hash. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
-Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes.
+Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes. Each magnet writes into `./downloads/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume.
+
+HTTP **pause** aborts the live Range body and continues from `downloads/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
+
+The GUI runs at most four downloads at once; further rows stay queued. The same magnet (or HTTP URL) cannot start twice while it is already active. A second copy of the same info hash also waits on an in-process folder lock so two sessions cannot overwrite `./downloads/<info-hash>/` at once.
+
+Self-update downloads only `https://github.com/danted4/torrenter/releases/download/<tag>/<name>` (tag in the path must match the release). Cached config URLs are re-checked. GitHub then 302s to `objects.githubusercontent.com`; that redirect is followed because the first hop is pinned. It requires `SHA256SUMS`, caps size, and times out. That hash is **same-publisher integrity**, not a signature: a stolen GitHub token can still ship a binary and a matching sums file. CLI auto-update on startup runs only on an interactive TTY.
 
 ## Progress bar
 
@@ -116,18 +133,19 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - Parallel parts: `PART_COUNT = 4` in `src/http.rs`
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP timeouts: 20s connect, 60s between reads
+- Auto-update flag: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`)
 
 ## Development
 
 ```bash
-cargo test
+cargo test --all-features
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows.
+CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows (`--all-features` so the GUI compiles).
 
-Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `main`).
+Release: `git tag v3.0.2 && git push origin v3.0.2` (commit must already be on `main`).
 
 ## Troubleshooting
 
@@ -140,6 +158,7 @@ Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
 | Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
 | Incomplete part | Server closed a Range early; retry the same URL |
+| Linux GUI missing GTK/xcb | `torrenter-gui-*-linux-gnu` is dynamically linked; install GTK 3 and xcb (`libgtk-3-0 libxkbcommon0 libxcb-render0 libxcb-shape0 libxcb-xfixes0` on Debian/Ubuntu) |
 | Rust version error | Recent stable toolchain if building from source (`rustup update`) |
 
 ## Responsible use
