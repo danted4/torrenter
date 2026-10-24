@@ -1,25 +1,31 @@
-mod http;
-mod progress;
-mod torrent;
-mod validate;
-
 use std::io::Write;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
-
-use crate::http::start_url_download;
-use crate::torrent::start_download;
-use crate::validate::{is_valid_download_url, is_valid_magnet_url};
+use torrenter::http::start_url_download;
+use torrenter::identity::{banner, AppKind, VERSION_TAG};
+use torrenter::torrent::start_download;
+use torrenter::update::{self, load_config};
+use torrenter::validate::{is_valid_download_url, is_valid_magnet_url};
 
 #[derive(Parser)]
 #[command(
     name = "torrenter",
-    about = "Magnet/torrent and multipart HTTP(S) downloader",
-    version
+    version = VERSION_TAG,
+    about = concat!(
+        "danted4/torrenter v",
+        env!("CARGO_PKG_VERSION"),
+        " — magnet/torrent and multipart HTTP(S) downloader"
+    )
 )]
 struct Cli {
+    /// Persist auto-update from GitHub Releases (on)
+    #[arg(long, conflicts_with = "no_auto_update")]
+    auto_update: bool,
+    /// Persist auto-update from GitHub Releases (off)
+    #[arg(long)]
+    no_auto_update: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -30,6 +36,8 @@ enum Command {
     Http { url: String },
     /// Download a magnet / torrent link
     Magnet { uri: String },
+    /// Check GitHub and replace this binary if a newer release exists
+    Update,
 }
 
 #[tokio::main]
@@ -42,44 +50,121 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    if cli.auto_update {
+        update::set_auto_update(true)?;
+        eprintln!("auto-update: on");
+    } else if cli.no_auto_update {
+        update::set_auto_update(false)?;
+        eprintln!("auto-update: off");
+    }
+
+    if matches!(cli.command, Some(Command::Update)) {
+        println!("{}", banner());
+        return run_update().await;
+    }
+
+    maybe_auto_update().await?;
+    println!("{}", banner());
+
+    match cli.command {
         Some(Command::Http { url }) => start_url_download(url.trim()).await,
         Some(Command::Magnet { uri }) => start_download(uri.trim()).await,
+        Some(Command::Update) => unreachable!(),
         None => prompt_user().await,
+    }
+}
+
+async fn maybe_auto_update() -> Result<()> {
+    update::cleanup_replaced_binary();
+    let Ok(found) = update::check_latest(AppKind::Cli).await else {
+        return Ok(());
+    };
+    let Some(available) = found else {
+        return Ok(());
+    };
+    if load_config().auto_update {
+        println!(
+            "Updating {VERSION_TAG} -> {} ({})",
+            available.tag, available.asset_name
+        );
+        update::install_update(&available).await?;
+        update::relaunch()?;
+        return Ok(());
+    }
+    eprintln!(
+        "a new version is available: {}  —  torrenter update",
+        available.tag
+    );
+    Ok(())
+}
+
+async fn run_update() -> Result<()> {
+    match update::check_latest(AppKind::Cli).await? {
+        None => {
+            println!("Already on {VERSION_TAG}");
+            Ok(())
+        }
+        Some(available) => {
+            println!("Installing {}", available.tag);
+            update::install_update(&available).await?;
+            println!("Updated to {}. Relaunch torrenter.", available.tag);
+            Ok(())
+        }
     }
 }
 
 async fn prompt_user() -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     loop {
-        print!("\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n\n");
+        let auto = if load_config().auto_update {
+            "on"
+        } else {
+            "off"
+        };
+        print!(
+            "\nauto-update: {auto}\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n3. Toggle auto-update\n4. Update now\n\n"
+        );
         std::io::stdout().flush()?;
         let mut choice = String::new();
         stdin.read_line(&mut choice).await?;
 
-        if choice.trim() == "2" {
-            print!("\nPlease paste the direct download URL:\n\n");
-            std::io::stdout().flush()?;
-            let mut url = String::new();
-            stdin.read_line(&mut url).await?;
-            let url = url.trim().to_string();
-            if !is_valid_download_url(&url) {
-                eprintln!("\nInvalid HTTP(S) URL! Try again ...");
+        match choice.trim() {
+            "3" => {
+                let enabled = !load_config().auto_update;
+                update::set_auto_update(enabled)?;
+                println!("auto-update: {}", if enabled { "on" } else { "off" });
+                if enabled {
+                    maybe_auto_update().await?;
+                }
                 continue;
             }
-            return start_url_download(&url).await;
+            "4" => return run_update().await,
+            "2" => {
+                print!("\nPlease paste the direct download URL:\n\n");
+                std::io::stdout().flush()?;
+                let mut url = String::new();
+                stdin.read_line(&mut url).await?;
+                let url = url.trim().to_string();
+                if !is_valid_download_url(&url) {
+                    eprintln!("\nInvalid HTTP(S) URL! Try again ...");
+                    continue;
+                }
+                return start_url_download(&url).await;
+            }
+            _ => {
+                print!("\nPlease paste your magnetURI:\n\n");
+                std::io::stdout().flush()?;
+                let mut magnet = String::new();
+                stdin.read_line(&mut magnet).await?;
+                let magnet = magnet.trim().to_string();
+                if !is_valid_magnet_url(&magnet) {
+                    eprintln!("\nInvalid magnet URL! Try again ...");
+                    continue;
+                }
+                return start_download(&magnet).await;
+            }
         }
-
-        print!("\nPlease paste your magnetURI:\n\n");
-        std::io::stdout().flush()?;
-        let mut magnet = String::new();
-        stdin.read_line(&mut magnet).await?;
-        let magnet = magnet.trim().to_string();
-        if !is_valid_magnet_url(&magnet) {
-            eprintln!("\nInvalid magnet URL! Try again ...");
-            continue;
-        }
-        return start_download(&magnet).await;
     }
 }
 
@@ -104,6 +189,13 @@ mod tests {
             Some(Command::Magnet { uri }) => assert_eq!(uri, magnet),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_update_and_auto_update_flag() {
+        let cli = Cli::try_parse_from(["torrenter", "--auto-update", "update"]).unwrap();
+        assert!(cli.auto_update);
+        assert!(matches!(cli.command, Some(Command::Update)));
     }
 
     #[test]

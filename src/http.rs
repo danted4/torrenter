@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
-use indicatif::ProgressBar;
 use reqwest::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use url::Url;
 
-use crate::progress::new_bar;
+use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
 use crate::validate::is_valid_download_url;
 
 pub const DOWNLOAD_DIRECTORY: &str = "./downloads";
@@ -68,12 +67,25 @@ pub async fn start_url_download(download_url: &str) -> Result<()> {
     start_url_download_in(download_url, DownloadLayout::default()).await
 }
 
+pub async fn start_url_download_reported(
+    download_url: &str,
+    snapshot: Arc<JobSnapshot>,
+) -> Result<()> {
+    run_url_download(download_url, DownloadLayout::default(), Some(snapshot)).await
+}
+
 pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -> Result<()> {
+    run_url_download(download_url, layout, None).await
+}
+
+async fn run_url_download(
+    download_url: &str,
+    layout: DownloadLayout,
+    snapshot: Option<Arc<JobSnapshot>>,
+) -> Result<()> {
     if !is_valid_download_url(download_url) {
         bail!("Invalid HTTP(S) URL!");
     }
-
-    println!("\nPreparing direct download...\n");
 
     let client = Client::builder()
         .user_agent(concat!(
@@ -101,36 +113,65 @@ pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -
         .context("failed to create downloads directory")?;
 
     let output_path = layout.directory.join(&filename);
-    let progress = new_bar(total);
-    if cfg!(test) {
-        progress.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    let progress = match snapshot {
+        Some(snapshot) => ProgressHandle::gui(total.max(1), snapshot),
+        None => ProgressHandle::cli(total.max(1)),
+    };
+    progress.set_title(&filename);
+    if progress.announce() {
+        println!("\nPreparing direct download...\n");
+        println!("{filename}\n");
+        println!("[1] pause/resume   [2] stop\n");
     }
     progress.set_message("0");
     let downloaded = Arc::new(AtomicU64::new(0));
 
-    let result = if total > 0 {
-        match download_multipart(
-            &client,
-            download_url,
-            &filename,
-            total,
-            &progress,
-            &downloaded,
-            &layout,
-        )
-        .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) if error.downcast_ref::<RangesNotHonored>().is_some() => {
-                downloaded.store(0, Ordering::Relaxed);
-                progress.set_position(0);
-                // Single-stream fallback does not resume; it truncates the destination.
-                stream_single(&client, download_url, &output_path, &progress, &downloaded).await
+    let download = async {
+        if total > 0 {
+            match download_multipart(
+                &client,
+                download_url,
+                &filename,
+                total,
+                &progress,
+                &downloaded,
+                &layout,
+            )
+            .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.downcast_ref::<RangesNotHonored>().is_some() => {
+                    downloaded.store(0, Ordering::Relaxed);
+                    progress.set_position(0);
+                    // Single-stream fallback does not resume; it truncates the destination.
+                    stream_single(&client, download_url, &output_path, &progress, &downloaded).await
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
+        } else {
+            stream_single(&client, download_url, &output_path, &progress, &downloaded).await
+        }
+    };
+
+    let result = if progress.announce() {
+        let snapshot = progress.snapshot().cloned();
+        tokio::select! {
+            result = download => result,
+            _ = async {
+                if let Some(snapshot) = snapshot {
+                    watch_cli_controls(snapshot).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                if let Some(snapshot) = progress.snapshot() {
+                    snapshot.request_stop();
+                }
+                Err(crate::progress::DownloadStopped.into())
+            }
         }
     } else {
-        stream_single(&client, download_url, &output_path, &progress, &downloaded).await
+        download.await
     };
 
     match result {
@@ -147,7 +188,19 @@ pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -
                 downloaded.load(Ordering::Relaxed)
             });
             progress.finish();
-            println!("\nDirect download finished: {filename}");
+            if progress.announce() {
+                println!("\nDirect download finished: {filename}");
+            }
+            Ok(())
+        }
+        Err(error) if is_stopped(&error) => {
+            if let Some(snapshot) = progress.snapshot() {
+                snapshot.mark_stopped();
+            }
+            progress.finish_and_clear();
+            if progress.announce() {
+                println!("\nDirect download stopped.");
+            }
             Ok(())
         }
         Err(error) => {
@@ -198,7 +251,7 @@ fn parse_content_range_total(value: &reqwest::header::HeaderValue) -> Option<u64
     total.parse().ok().filter(|size| *size > 0)
 }
 
-fn filename_from_url(
+pub(crate) fn filename_from_url(
     download_url: &str,
     disposition: Option<&reqwest::header::HeaderValue>,
 ) -> String {
@@ -320,7 +373,7 @@ async fn download_multipart(
     download_url: &str,
     filename: &str,
     total: u64,
-    progress: &ProgressBar,
+    progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
     layout: &DownloadLayout,
 ) -> Result<()> {
@@ -386,21 +439,38 @@ async fn download_multipart(
     }
 
     let mut range_failure = false;
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) if error.downcast_ref::<RangesNotHonored>().is_some() => {
-                range_failure = true;
-                tasks.abort_all();
+    loop {
+        tokio::select! {
+            joined = tasks.join_next() => {
+                let Some(joined) = joined else {
+                    break;
+                };
+                match joined {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) if error.downcast_ref::<RangesNotHonored>().is_some() => {
+                        range_failure = true;
+                        tasks.abort_all();
+                    }
+                    Ok(Err(error)) if is_stopped(&error) => {
+                        tasks.abort_all();
+                        return Err(error);
+                    }
+                    Ok(Err(error)) => {
+                        tasks.abort_all();
+                        while tasks.join_next().await.is_some() {}
+                        return Err(error);
+                    }
+                    Err(join_error) if join_error.is_cancelled() => {}
+                    Err(join_error) => {
+                        return Err(join_error).context("download part task failed");
+                    }
+                }
             }
-            Ok(Err(error)) => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return Err(error);
-            }
-            Err(join_error) if join_error.is_cancelled() => {}
-            Err(join_error) => {
-                return Err(join_error).context("download part task failed");
+            _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                if progress.should_stop() {
+                    tasks.abort_all();
+                    anyhow::bail!(crate::progress::DownloadStopped);
+                }
             }
         }
     }
@@ -438,7 +508,7 @@ async fn download_part(
     part_size: u64,
     total: u64,
     existing_size: u64,
-    progress: &ProgressBar,
+    progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
 ) -> Result<()> {
     let Some((start, end, expected)) = part_range(index, part_size, total) else {
@@ -506,7 +576,7 @@ async fn stream_single(
     client: &Client,
     download_url: &str,
     output_path: &Path,
-    progress: &ProgressBar,
+    progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
 ) -> Result<()> {
     let response = client
@@ -535,13 +605,17 @@ async fn stream_single(
 async fn stream_into_file(
     response: reqwest::Response,
     file: &mut File,
-    progress: &ProgressBar,
+    progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let mut remaining = max_bytes;
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        honor_control(progress.snapshot().map(Arc::as_ref)).await?;
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
         let mut chunk = chunk.context("failed to read download stream")?;
         if let Some(left) = remaining {
             if left == 0 {
@@ -577,7 +651,7 @@ async fn merge_parts(
     layout: &DownloadLayout,
     key: &str,
     filename: &str,
-    progress: &ProgressBar,
+    progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
     total: u64,
 ) -> Result<()> {

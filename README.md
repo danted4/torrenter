@@ -1,11 +1,11 @@
 # torrenter
 
-Terminal downloader with two modes. No GUI.
+Downloader with two engines and two fronts. Each release ships a **CLI** binary and a **native GUI** binary (egui, no HTML/CSS).
 
 1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
 2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
 
-Output goes to `./downloads/`. Runs on Linux, macOS, and Windows.
+Output goes to `./downloads/`. Runs on Linux, macOS, and Windows. Both fronts show `danted4/torrenter vX.Y.Z`.
 
 ## Two download modes
 
@@ -25,12 +25,12 @@ Single-stream HTTP **does not resume**. It truncates the destination and starts 
 
 Pre-built binaries are on [GitHub Releases](https://github.com/danted4/torrenter/releases):
 
-| OS | Asset |
-|----|--------|
-| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` |
-| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` |
-| macOS Intel | `torrenter-x86_64-apple-darwin` |
-| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` |
+| OS | CLI | GUI |
+|----|-----|-----|
+| Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` | `torrenter-gui-x86_64-unknown-linux-gnu` |
+| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` | `torrenter-gui-aarch64-apple-darwin` |
+| macOS Intel | `torrenter-x86_64-apple-darwin` | `torrenter-gui-x86_64-apple-darwin` |
+| Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` | `torrenter-gui-x86_64-pc-windows-msvc.exe` |
 
 On Unix: `chmod +x` the file and put it on your `PATH`. No Rust/Cargo needed at runtime.
 
@@ -42,7 +42,9 @@ From source (Rust 1.85+):
 git clone https://github.com/danted4/torrenter.git
 cd torrenter
 cargo build --release
-./target/release/torrenter          # Windows: .\target\release\torrenter.exe
+cargo build --release --features gui --bin torrenter-gui
+./target/release/torrenter              # Windows: .\target\release\torrenter.exe
+./target/release/torrenter-gui          # Windows: .\target\release\torrenter-gui.exe
 ```
 
 ## Usage
@@ -50,9 +52,13 @@ cargo build --release
 Interactive (no arguments):
 
 ```
+danted4/torrenter v3.0.2
+auto-update: off
 Choose download type:
 1. Magnet URL
 2. Direct URL (multi-part)
+3. Toggle auto-update
+4. Update now
 ```
 
 Commands:
@@ -60,7 +66,12 @@ Commands:
 ```bash
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
+torrenter --auto-update          # persist: check GitHub Releases on startup
+torrenter --no-auto-update
+torrenter update                 # install the latest matching CLI asset now
 ```
+
+GUI: same engines, phosphor / amber / ice themes, checkbox for auto-update. The GUI binary only replaces itself with `torrenter-gui-*` assets; the CLI binary only replaces itself with `torrenter-*` assets. The binary directory must be writable.
 
 Magnet links need a 32-character base32 or 40-character hex info hash. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
@@ -116,18 +127,19 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - Parallel parts: `PART_COUNT = 4` in `src/http.rs`
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP timeouts: 20s connect, 60s between reads
+- Auto-update flag: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`)
 
 ## Development
 
 ```bash
-cargo test
+cargo test --all-features
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows.
+CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows (`--all-features` so the GUI compiles).
 
-Release: `git tag v3.0.0 && git push origin v3.0.0` (commit must already be on `main`).
+Release: `git tag v3.0.2 && git push origin v3.0.2` (commit must already be on `main`).
 
 ## Troubleshooting
 
