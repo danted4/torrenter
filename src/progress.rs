@@ -37,9 +37,10 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub const BAR_TEMPLATE: &str =
     "[{bar:20}] {percent}% | Peers: {msg} | D: {have} @ {speed_txt} | T: {full_size} | ETA: {estimate}";
 
-pub fn progress_style() -> ProgressStyle {
-    ProgressStyle::with_template(BAR_TEMPLATE)
-        .expect("valid progress template")
+pub const SEED_TEMPLATE: &str = "[{bar:20}] {percent}% | Peers: {msg} | T: {full_size}";
+
+fn bar_keys(style: ProgressStyle) -> ProgressStyle {
+    style
         .progress_chars("█░")
         .with_key(
             "have",
@@ -67,6 +68,14 @@ pub fn progress_style() -> ProgressStyle {
         )
 }
 
+pub fn progress_style() -> ProgressStyle {
+    bar_keys(ProgressStyle::with_template(BAR_TEMPLATE).expect("valid progress template"))
+}
+
+pub fn seed_progress_style() -> ProgressStyle {
+    bar_keys(ProgressStyle::with_template(SEED_TEMPLATE).expect("valid seed progress template"))
+}
+
 pub fn new_bar(total: u64) -> ProgressBar {
     styled_bar(ProgressBar::new(total.max(1)), total)
 }
@@ -87,6 +96,8 @@ fn styled_bar(bar: ProgressBar, total: u64) -> ProgressBar {
 pub struct JobSnapshot {
     pub downloaded: AtomicU64,
     pub total: AtomicU64,
+    pub uploaded: AtomicU64,
+    pub upload_bps: AtomicU64,
     pub peers: AtomicU64,
     pub finished: AtomicBool,
     paused: AtomicBool,
@@ -101,6 +112,8 @@ impl Default for JobSnapshot {
         Self {
             downloaded: AtomicU64::new(0),
             total: AtomicU64::new(0),
+            uploaded: AtomicU64::new(0),
+            upload_bps: AtomicU64::new(0),
             peers: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -172,7 +185,18 @@ impl JobSnapshot {
             return;
         }
         let was_paused = self.paused.fetch_xor(true, Ordering::Relaxed);
-        self.set_status(if was_paused { "downloading" } else { "paused" });
+        let total = self.total.load(Ordering::Relaxed);
+        let downloaded = self.downloaded.load(Ordering::Relaxed);
+        let next = if was_paused {
+            if total > 0 && downloaded >= total {
+                "seeding"
+            } else {
+                "downloading"
+            }
+        } else {
+            "paused"
+        };
+        self.set_status(next);
     }
 
     pub fn request_stop(&self) {
@@ -344,6 +368,44 @@ impl ProgressHandle {
         self.sync();
     }
 
+    pub fn set_status(&self, value: impl Into<String>) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.set_status(value);
+        }
+    }
+
+    pub fn set_uploaded(&self, n: u64) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.uploaded.store(n, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_upload_bps(&self, bps: f64) {
+        if let Some(snapshot) = &self.snapshot {
+            let bps = if bps.is_finite() && bps > 0.0 {
+                bps.round() as u64
+            } else {
+                0
+            };
+            snapshot.upload_bps.store(bps, Ordering::Relaxed);
+        }
+    }
+
+    pub fn use_seed_style(&self) {
+        self.bar.set_style(seed_progress_style());
+    }
+
+    pub fn set_seed_message(&self, peers: u64, uploaded: u64, up_speed: f64) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.peers.store(peers, Ordering::Relaxed);
+        }
+        self.bar.set_message(format!(
+            "{peers} | U: {} @ {}",
+            format_size(uploaded),
+            format_speed(up_speed)
+        ));
+    }
+
     pub fn set_message(&self, message: impl Into<String>) {
         let message = message.into();
         if let Ok(peers) = message.parse::<u64>() {
@@ -489,6 +551,12 @@ mod tests {
         bar.set_message("3");
         let _ = bar.elapsed();
         bar.finish_and_clear();
+        let seed = ProgressBar::hidden();
+        seed.set_style(seed_progress_style());
+        seed.set_length(100);
+        seed.set_position(100);
+        seed.set_message("2 | U: 1.00 KB @ 1.00 KB/s");
+        seed.finish_and_clear();
     }
 
     #[test]

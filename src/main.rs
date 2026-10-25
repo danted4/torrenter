@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Http { url }) => start_url_download(url.trim()).await,
-        Some(Command::Magnet { uri }) => start_download(uri.trim()).await,
+        Some(Command::Magnet { uri }) => start_download(uri.trim(), load_config().seed).await,
         Some(Command::Update) => unreachable!(),
         None => prompt_user().await,
     }
@@ -120,13 +120,11 @@ async fn run_update() -> Result<()> {
 async fn prompt_user() -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin());
     loop {
-        let auto = if load_config().auto_update {
-            "on"
-        } else {
-            "off"
-        };
+        let config = load_config();
+        let auto = if config.auto_update { "on" } else { "off" };
+        let seed = if config.seed { "on" } else { "off" };
         print!(
-            "\nauto-update: {auto}\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n3. Toggle auto-update\n4. Update now\n\n"
+            "\nauto-update: {auto}\nseed: {seed}\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n3. Toggle auto-update\n4. Update now\n5. Toggle seed\n\n"
         );
         std::io::stdout().flush()?;
         let mut choice = String::new();
@@ -140,6 +138,12 @@ async fn prompt_user() -> Result<()> {
                 if enabled {
                     maybe_auto_update().await?;
                 }
+                continue;
+            }
+            "5" => {
+                let enabled = !load_config().seed;
+                update::set_seed(enabled)?;
+                println!("seed: {}", if enabled { "on" } else { "off" });
                 continue;
             }
             "4" => return run_update().await,
@@ -165,7 +169,7 @@ async fn prompt_user() -> Result<()> {
                     eprintln!("\nInvalid magnet URL! Try again ...");
                     continue;
                 }
-                return start_download(&magnet).await;
+                return start_download(&magnet, load_config().seed).await;
             }
         }
     }

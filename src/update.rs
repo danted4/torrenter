@@ -16,10 +16,16 @@ const CHECKSUMS_NAME: &str = "SHA256SUMS";
 const MAX_UPDATE_BYTES: u64 = 80 * 1024 * 1024;
 const MAX_CHECKSUMS_BYTES: u64 = 64 * 1024;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     #[serde(default)]
     pub auto_update: bool,
+    #[serde(default = "default_true")]
+    pub seed: bool,
     #[serde(default)]
     pub release_etag: Option<String>,
     #[serde(default)]
@@ -30,6 +36,20 @@ pub struct AppConfig {
     pub cached_asset_url: Option<String>,
     #[serde(default)]
     pub cached_checksums_url: Option<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            auto_update: false,
+            seed: true,
+            release_etag: None,
+            cached_tag: None,
+            cached_asset_name: None,
+            cached_asset_url: None,
+            cached_checksums_url: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -521,6 +541,13 @@ pub fn set_auto_update(enabled: bool) -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn set_seed(enabled: bool) -> Result<AppConfig> {
+    let mut config = load_config();
+    config.seed = enabled;
+    save_config(&config)?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +569,14 @@ mod tests {
     #[test]
     fn default_auto_update_is_off() {
         assert!(!AppConfig::default().auto_update);
+    }
+
+    #[test]
+    fn default_seed_is_on() {
+        assert!(AppConfig::default().seed);
+        let parsed: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(parsed.seed);
+        assert!(!parsed.auto_update);
     }
 
     #[test]

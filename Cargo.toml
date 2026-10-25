@@ -1,6 +1,6 @@
 [package]
 name = "torrenter"
-version = "3.0.3"
+version = "3.1.0"
 edition = "2021"
 description = "CLI and native GUI: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
 license = "MIT"
@@ -20,7 +20,7 @@ clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", optional = true }
 futures-util = "0.3"
 indicatif = "0.17"
-librqbit = { version = "9", default-features = false, features = ["rust-tls"] }
+librqbit = { version = "9", default-features = false, features = ["rust-tls", "disable-upload"] }
 percent-encoding = "2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "charset", "http2", "json"] }

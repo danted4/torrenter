@@ -17,6 +17,7 @@ Output goes to `./downloads/`. Runs on Linux, macOS, and Windows. Both fronts sh
 | **Parallelism** | piece picker | 4 byte-range parts |
 | **Resume** | librqbit on disk under `./downloads/<info-hash>/` | `downloads/.resume/` part files |
 | **Peers** | live count in the bar | `Peers: 0` |
+| **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |
 
 Magnet links need a 32-character base32 or 40-character hex info hash. `.torrent` files are not accepted. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
@@ -58,13 +59,15 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.0.3
+danted4/torrenter v3.1.0
 auto-update: off
+seed: on
 Choose download type:
 1. Magnet URL
 2. Direct URL (multi-part)
 3. Toggle auto-update
 4. Update now
+5. Toggle seed
 ```
 
 Commands:
@@ -79,13 +82,13 @@ torrenter update                 # install the latest matching CLI asset now
 
 While a download runs, type `1` then Enter to pause/resume, or `2` then Enter to stop. HTTP pause aborts the live Range body and continues from `downloads/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
 
-Torrent mode uses DHT in memory only and calls `session.stop()` when the download finishes. Each magnet writes into `./downloads/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume.
+Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. The OS may prompt for a firewall exception the first time a share-mode magnet runs. Each magnet writes into `./downloads/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume. Closing the CLI or GUI drops every seed.
 
 Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torrenter update` always runs when you ask.
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, pause / stop / clear (and restart when stopped) per row, auto-update checkbox.
+Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), pause / stop / clear per row. Idle magnet rows restart from those glyphs; HTTP still has a restart button when stopped. Auto-update checkbox. The window must stay open to keep seeding.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS
@@ -105,6 +108,7 @@ Opt-in. The updater downloads only `https://github.com/danted4/torrenter/release
 
 ```
 [████████████████░░░░] 75% | Peers: 12 | D: 750.45 MB @ 2.5 MB/s | T: 1.0 GB | ETA: 2 minutes
+[████████████████████] 100% | Peers: 8 | U: 120.00 MB @ 1.1 MB/s | T: 1.0 GB
 ```
 
 ## How it works
@@ -120,12 +124,20 @@ flowchart TD
   menu -->|2 Direct URL| httpStart
   menu -->|3 Toggle auto-update| menu
   menu -->|4 Update now| updater
+  menu -->|5 Toggle seed| menu
 
   subgraph magnetFlow [Magnet]
     torrent[librqbit session]
     torrent --> dht[DHT in memory no persistence]
-    dht --> waitComplete[wait_until_completed]
-    waitComplete --> stopSession[session.stop]
+    dht --> upload{share?}
+    upload -->|no| leech[disable upload]
+    upload -->|yes| listen[listen TCP]
+    leech --> waitComplete[wait_until_completed]
+    listen --> waitComplete
+    waitComplete --> after{share?}
+    after -->|no| stopSession[session.stop]
+    after -->|yes| seedUntilStop[seed until Stop]
+    seedUntilStop --> stopSession
     stopSession --> magnetDir
   end
 
@@ -157,7 +169,7 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - GUI concurrent jobs: 4
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP and updater timeouts: 20s connect, 60s between reads
-- Auto-update flag: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`)
+- Auto-update and magnet seed flags: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on.
 
 ## Development
 
@@ -177,6 +189,7 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 |---------|-----|
 | `Invalid magnet URL` | Must start with `magnet:?xt=urn:` and a 32-char base32 or 40-char hex hash |
 | No peers / slow torrent | Wait for DHT; try a seeded magnet; check firewall/UDP |
+| Share magnet, no upload | Keep the app open; allow the firewall prompt; leech mode never uploads and does not listen |
 | `Too many open files` | torrenter raises the process limit when it can; otherwise `ulimit -n 10240` and retry |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |

@@ -13,7 +13,7 @@ Guidance for coding agents working on this repository. Human-facing install, usa
 
 Both fronts call the same engines in `src/lib.rs`:
 
-- **Magnet / torrent** — `src/torrent.rs` via [librqbit](https://github.com/ikatson/rqbit) 9 (DHT in memory, output under `./downloads/<info-hash>/`). `.torrent` files are not accepted.
+- **Magnet / torrent** — `src/torrent.rs` via [librqbit](https://github.com/ikatson/rqbit) 9 (DHT in memory, output under `./downloads/<info-hash>/`). Share mode uploads and keeps the session until Stop; leech mode disables upload and calls `session.stop()` at 100%. `.torrent` files are not accepted.
 - **Direct HTTP(S)** — `src/http.rs` via `reqwest` 0.12 + rustls, 4-part `Range` download with resume under `downloads/.resume/`.
 - **Progress / pause / stop** — `src/progress.rs` (`JobSnapshot`, `ProgressHandle`). CLI watches stdin (`1` pause, `2` stop); GUI shares the same snapshot.
 - **Opt-in updater** — `src/update.rs` from GitHub Releases + `SHA256SUMS`. CLI and GUI only replace their own asset family (`torrenter-*` vs `torrenter-gui-*`).
@@ -54,7 +54,7 @@ After code changes, run the relevant `fmt` / `clippy` / `test` commands and fix 
 - **Language:** Rust 2021. Prefer `anyhow::{Result, bail, Context}` at binaries and engine boundaries. Keep `?` paths; do not add `unwrap()` on fallible I/O or network unless the existing pattern is a poisoned lock recovery (`into_inner()`).
 - **Async:** Tokio multi-thread runtime. HTTP and torrent work is async; GUI (`eframe`) is sync and drives jobs through `JobSnapshot` / spawned tasks. Do not block the GUI thread on downloads.
 - **TLS / HTTP:** `reqwest` with `rustls-tls` only (no native-tls). Timeouts stay 20s connect / 60s between reads unless there is a documented reason to change them. HTTP resume and merge rules in README **How it works** are invariants: no zero-padding short 206 bodies; merge via `.{filename}.merge.tmp` then rename; single-stream GET does not resume.
-- **Torrent:** librqbit with `default-features = false` and `rust-tls`. DHT must stay in-memory (`DhtSessionConfig`). Call `session.stop()` when a magnet job finishes. Isolate output per info-hash; keep the in-process folder lock so the same hash cannot run twice.
+- **Torrent:** librqbit with `default-features = false` and `rust-tls` plus `disable-upload` so leech sessions can set `disable_upload`. DHT must stay in-memory (`DhtSessionConfig`). Share mode listens on an ephemeral TCP port and calls `session.stop()` only when the job is Stopped; leech mode never uploads and stops at 100%. Isolate output per info-hash; keep the in-process folder lock so the same hash cannot run twice.
 - **GUI:** `eframe` / egui, gated with `#[cfg(feature = "gui")]`. Keep phosphor / amber / ice themes. Cap concurrent jobs at 4; refuse a second active job with the same magnet info-hash or HTTP URL. Do not introduce a webview or HTML/CSS front.
 - **CLI:** `clap` derive. Interactive menu remains the no-args path. Startup auto-update stays TTY-only; `torrenter update` always runs when requested.
 - **Serialization:** `serde` / `serde_json`. Resume manifests use `camelCase` (`ResumeManifest` in `src/http.rs`). Updater config is `~` platform config dir `torrenter/config.json` (see `update::config_path`).

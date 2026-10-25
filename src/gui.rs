@@ -109,6 +109,7 @@ enum WorkerCmd {
         mode: Mode,
         source: String,
         snapshot: Arc<JobSnapshot>,
+        seed: bool,
     },
     Check,
     Install(AvailableUpdate),
@@ -129,8 +130,11 @@ struct Job {
     snapshot: Arc<JobSnapshot>,
     added: String,
     last_bytes: u64,
+    last_uploaded: u64,
     last_check: Instant,
     speed: f64,
+    up_speed: f64,
+    seed: bool,
 }
 
 struct GuiApp {
@@ -143,6 +147,7 @@ struct GuiApp {
     tx: Sender<WorkerCmd>,
     events: Receiver<WorkerEvent>,
     auto_update: bool,
+    seed: bool,
     update_note: String,
     note_expires_at: Option<Instant>,
     pending: Option<AvailableUpdate>,
@@ -172,7 +177,9 @@ impl GuiApp {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         thread::spawn(move || worker_loop(cmd_rx, event_tx));
-        let auto_update = update::load_config().auto_update;
+        let config = update::load_config();
+        let auto_update = config.auto_update;
+        let seed = config.seed;
         let _ = cmd_tx.send(WorkerCmd::Check);
         let app = Self {
             theme: ThemeId::Phosphor,
@@ -184,6 +191,7 @@ impl GuiApp {
             tx: cmd_tx,
             events: event_rx,
             auto_update,
+            seed,
             update_note: String::new(),
             note_expires_at: None,
             pending: None,
@@ -246,6 +254,7 @@ impl GuiApp {
         }
         let id = self.next_id;
         self.next_id += 1;
+        let seed = self.mode == Mode::Magnet && self.seed;
         let job = Job {
             id,
             kind: self.mode,
@@ -253,20 +262,24 @@ impl GuiApp {
             snapshot: Arc::clone(&snapshot),
             added: today(),
             last_bytes: 0,
+            last_uploaded: 0,
             last_check: Instant::now(),
             speed: 0.0,
+            up_speed: 0.0,
+            seed,
         };
         let _ = self.tx.send(WorkerCmd::Download {
             id,
             mode: self.mode,
             source,
             snapshot,
+            seed,
         });
         self.jobs.push(job);
         self.input.clear();
     }
 
-    fn restart_job(&mut self, index: usize) {
+    fn restart_job(&mut self, index: usize, seed: bool) {
         let Some(job) = self.jobs.get(index) else {
             return;
         };
@@ -284,11 +297,13 @@ impl GuiApp {
         }
         let id = self.next_id;
         self.next_id += 1;
+        let seed = kind == Mode::Magnet && seed;
         let _ = self.tx.send(WorkerCmd::Download {
             id,
             mode: kind,
             source: source.clone(),
             snapshot: Arc::clone(&snapshot),
+            seed,
         });
         self.jobs[index] = Job {
             id,
@@ -297,8 +312,11 @@ impl GuiApp {
             snapshot,
             added: today(),
             last_bytes: 0,
+            last_uploaded: 0,
             last_check: Instant::now(),
             speed: 0.0,
+            up_speed: 0.0,
+            seed,
         };
     }
 
@@ -487,13 +505,18 @@ impl eframe::App for GuiApp {
                         .max_rect(url_row)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         if mode_switch(ui, self.mode, palette).clicked() {
                             self.mode = self.mode.toggle();
                         }
-                        ui.add_space(10.0);
-                        let button_w = 72.0_f32;
-                        let gap = 8.0_f32;
-                        let edit_w = (ui.available_width() - gap - button_w).clamp(240.0, 720.0);
+                        let button_w = 80.0_f32;
+                        let gap = 10.0_f32;
+                        let glyphs_w = 42.0_f32;
+                        let edit_margin = 16.0_f32;
+                        ui.add_space(gap);
+                        let field_w = (ui.available_width() - gap - glyphs_w - gap - button_w)
+                            .clamp(200.0, 680.0);
+                        let edit_w = (field_w - edit_margin).max(160.0);
                         let input_id = ui.make_persistent_id("download-url");
                         let focused = ui.memory(|memory| memory.has_focus(input_id));
                         let mut edit = TextEdit::singleline(&mut self.input)
@@ -507,20 +530,35 @@ impl eframe::App for GuiApp {
                                 Mode::Http => "https://example.com/file.iso",
                             });
                         }
-                        let response = ui.scope(|ui| {
-                            let dim = Stroke::new(1.0_f32, palette.dim);
-                            let lit = Stroke::new(1.0_f32, palette.fg);
-                            ui.visuals_mut().widgets.inactive.bg_stroke = dim;
-                            ui.visuals_mut().widgets.hovered.bg_stroke = lit;
-                            ui.visuals_mut().widgets.active.bg_stroke = lit;
-                            ui.visuals_mut().widgets.open.bg_stroke = lit;
-                            ui.visuals_mut().widgets.hovered.expansion = 0.0;
-                            ui.visuals_mut().widgets.active.expansion = 0.0;
-                            ui.visuals_mut().widgets.open.expansion = 0.0;
-                            ui.add(edit)
-                        });
+                        let response = ui.allocate_ui_with_layout(
+                            egui::vec2(field_w, URL_H),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let dim = Stroke::new(1.0_f32, palette.dim);
+                                let lit = Stroke::new(1.0_f32, palette.fg);
+                                ui.visuals_mut().widgets.inactive.bg_stroke = dim;
+                                ui.visuals_mut().widgets.hovered.bg_stroke = lit;
+                                ui.visuals_mut().widgets.active.bg_stroke = lit;
+                                ui.visuals_mut().widgets.open.bg_stroke = lit;
+                                ui.visuals_mut().widgets.hovered.expansion = 0.0;
+                                ui.visuals_mut().widgets.active.expansion = 0.0;
+                                ui.visuals_mut().widgets.open.expansion = 0.0;
+                                ui.add(edit)
+                            },
+                        );
                         ui.add_space(gap);
-                        if ui.button(mono("START", 14.0, palette.fg)).clicked()
+                        if let Some(seed) =
+                            seed_toggle(ui, self.seed, palette, self.mode == Mode::Magnet)
+                        {
+                            self.seed = seed;
+                            let _ = update::set_seed(seed);
+                        }
+                        ui.add_space(gap);
+                        let start = ui.add_sized(
+                            egui::vec2(button_w, URL_H),
+                            egui::Button::new(mono("START", 14.0, palette.fg)),
+                        );
+                        if start.clicked()
                             || (response.inner.lost_focus()
                                 && ui.input(|input| input.key_pressed(egui::Key::Enter)))
                         {
@@ -633,7 +671,7 @@ impl eframe::App for GuiApp {
                     return;
                 }
                 let mut clear_index = None;
-                let mut restart_index = None;
+                let mut restart_choice = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (index, job) in self.jobs.iter_mut().enumerate() {
                         let now = Instant::now();
@@ -641,12 +679,29 @@ impl eframe::App for GuiApp {
                             .snapshot
                             .downloaded
                             .load(std::sync::atomic::Ordering::Relaxed);
+                        let uploaded = job
+                            .snapshot
+                            .uploaded
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let engine_up = job
+                            .snapshot
+                            .upload_bps
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as f64;
                         let elapsed = now.saturating_duration_since(job.last_check).as_secs_f64();
                         if elapsed >= 0.4 {
                             job.speed =
                                 (downloaded.saturating_sub(job.last_bytes) as f64) / elapsed;
+                            job.up_speed = if engine_up > 0.0 {
+                                engine_up
+                            } else {
+                                (uploaded.saturating_sub(job.last_uploaded) as f64) / elapsed
+                            };
                             job.last_bytes = downloaded;
+                            job.last_uploaded = uploaded;
                             job.last_check = now;
+                        } else if engine_up > 0.0 {
+                            job.up_speed = engine_up;
                         }
                         let total = job
                             .snapshot
@@ -677,6 +732,10 @@ impl eframe::App for GuiApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(mono(job.kind.label(), 13.0, palette.dim));
+                                    if job.kind == Mode::Magnet && job.snapshot.is_active() {
+                                        ui.add_space(6.0);
+                                        seed_glyph(ui, job.seed, true, false, false, palette);
+                                    }
                                     ui.add_space(8.0);
                                     let title = job.snapshot.title();
                                     let shown = if title.is_empty() {
@@ -715,12 +774,18 @@ impl eframe::App for GuiApp {
                                                 {
                                                     clear_index = Some(index);
                                                 }
-                                                if job.snapshot.is_stopped()
+                                                if job.kind == Mode::Magnet {
+                                                    if let Some(seed) =
+                                                        seed_toggle(ui, job.seed, palette, true)
+                                                    {
+                                                        restart_choice = Some((index, seed));
+                                                    }
+                                                } else if job.snapshot.is_stopped()
                                                     && ui
                                                         .button(mono("restart", 12.0, palette.fg))
                                                         .clicked()
                                                 {
-                                                    restart_index = Some(index);
+                                                    restart_choice = Some((index, false));
                                                 }
                                             }
                                         },
@@ -749,12 +814,38 @@ impl eframe::App for GuiApp {
                                 } else {
                                     "N/A".into()
                                 };
-                                let line = format!(
-                                    "{status}  peers {peers}  {} @ {}  {}  eta {eta}",
-                                    format_size(downloaded),
-                                    format_speed(job.speed),
-                                    format_size(total),
-                                );
+                                let sharing = job.kind == Mode::Magnet && job.seed;
+                                let seeding = sharing
+                                    && job.snapshot.is_active()
+                                    && total > 0
+                                    && downloaded >= total;
+                                let line = if sharing {
+                                    if seeding {
+                                        format!(
+                                            "{status}  peers {peers}  D {}  U {} @ {}  {}",
+                                            format_size(downloaded),
+                                            format_size(uploaded),
+                                            format_speed(job.up_speed),
+                                            format_size(total),
+                                        )
+                                    } else {
+                                        format!(
+                                            "{status}  peers {peers}  D {} @ {}  U {} @ {}  {}  eta {eta}",
+                                            format_size(downloaded),
+                                            format_speed(job.speed),
+                                            format_size(uploaded),
+                                            format_speed(job.up_speed),
+                                            format_size(total),
+                                        )
+                                    }
+                                } else {
+                                    format!(
+                                        "{status}  peers {peers}  D {} @ {}  {}  eta {eta}",
+                                        format_size(downloaded),
+                                        format_speed(job.speed),
+                                        format_size(total),
+                                    )
+                                };
                                 let color = if job.snapshot.error().is_some() {
                                     palette.fail
                                 } else {
@@ -764,13 +855,119 @@ impl eframe::App for GuiApp {
                             });
                     }
                 });
-                if let Some(index) = restart_index {
-                    self.restart_job(index);
+                if let Some((index, seed)) = restart_choice {
+                    self.restart_job(index, seed);
                 } else if let Some(index) = clear_index {
                     self.jobs.remove(index);
                 }
             });
     }
+}
+
+fn seed_toggle(ui: &mut egui::Ui, seed: bool, palette: Theme, enabled: bool) -> Option<bool> {
+    ui.scope(|ui| {
+        ui.style_mut().interaction.interact_radius = 0.0;
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(38.0, 16.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let share = seed_glyph(ui, true, seed && enabled, enabled, !enabled, palette);
+                let leech = seed_glyph(ui, false, !seed && enabled, enabled, !enabled, palette);
+                if enabled && share.clicked() {
+                    Some(true)
+                } else if enabled && leech.clicked() {
+                    Some(false)
+                } else {
+                    None
+                }
+            },
+        )
+        .inner
+    })
+    .inner
+}
+
+fn seed_glyph(
+    ui: &mut egui::Ui,
+    share: bool,
+    selected: bool,
+    clickable: bool,
+    faded: bool,
+    palette: Theme,
+) -> egui::Response {
+    let size = egui::vec2(16.0, 16.0);
+    let sense = if clickable {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    let color = if faded {
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
+    } else if selected {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    if share {
+        paint_share(ui.painter(), rect, color);
+    } else {
+        paint_leech(ui.painter(), rect, color);
+    }
+    if selected && !faded {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            2.0,
+            Stroke::new(1.2_f32, color),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let response = if clickable {
+        click_cursor(response)
+    } else {
+        response.on_hover_cursor(egui::CursorIcon::Default)
+    };
+    response.on_hover_text(if faded {
+        "share and leech apply to magnet downloads"
+    } else if share {
+        "share: download and keep uploading until you stop"
+    } else {
+        "leech: download only, never upload"
+    })
+}
+
+fn paint_share(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.2_f32, color);
+    painter.circle_stroke(egui::pos2(c.x, c.y + 1.5), 4.4, stroke);
+    let mut halo = Vec::with_capacity(11);
+    for i in 0..=10 {
+        let x = -5.0 + i as f32;
+        let y = -5.4 + (x * x) / 16.0;
+        halo.push(egui::pos2(c.x + x * 0.85, c.y + y));
+    }
+    painter.add(egui::Shape::line(halo, stroke));
+}
+
+fn paint_leech(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.2_f32, color);
+    painter.circle_stroke(egui::pos2(c.x, c.y + 1.8), 4.4, stroke);
+    painter.line_segment(
+        [
+            egui::pos2(c.x - 2.4, c.y - 1.6),
+            egui::pos2(c.x - 4.6, c.y - 6.4),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x + 2.4, c.y - 1.6),
+            egui::pos2(c.x + 4.6, c.y - 6.4),
+        ],
+        stroke,
+    );
 }
 
 fn theme_swatch(ui: &mut egui::Ui, fill: Color32, selected: bool, name: &str) -> egui::Response {
@@ -988,6 +1185,7 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     mode,
                     source,
                     snapshot,
+                    seed,
                 } => {
                     snapshot.set_status("queued");
                     let Ok(_permit) = limiter.acquire_owned().await else {
@@ -999,7 +1197,7 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     }
                     snapshot.set_status("starting");
                     let result = match mode {
-                        Mode::Magnet => start_download_reported(&source, snapshot).await,
+                        Mode::Magnet => start_download_reported(&source, snapshot, seed).await,
                         Mode::Http => start_url_download_reported(&source, snapshot).await,
                     };
                     if let Err(error) = result {
