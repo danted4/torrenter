@@ -163,6 +163,10 @@ impl JobSnapshot {
         self.status() == "stopped"
     }
 
+    pub fn is_done(&self) -> bool {
+        self.status() == "done"
+    }
+
     pub fn toggle_pause(&self) {
         if !self.is_active() {
             return;
@@ -498,6 +502,20 @@ mod tests {
         assert!(snapshot.should_stop());
         snapshot.set_title("Sintel");
         assert_eq!(snapshot.title(), "Sintel");
+    }
+
+    #[test]
+    fn finished_jobs_are_inactive_and_not_stopped() {
+        let snapshot = JobSnapshot::default();
+        assert!(snapshot.is_active());
+        snapshot.mark_finished();
+        assert!(!snapshot.is_active());
+        assert!(!snapshot.is_stopped());
+        assert_eq!(snapshot.status(), "done");
+        assert!(snapshot.is_done());
+        snapshot.mark_stopped();
+        assert!(!snapshot.is_done());
+        assert!(snapshot.is_stopped());
     }
 
     #[test]

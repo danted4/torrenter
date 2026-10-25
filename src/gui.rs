@@ -12,7 +12,7 @@ use crate::torrent::{magnet_display_name, magnet_info_hash, start_download_repor
 use crate::update::{self, AvailableUpdate};
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThemeId {
     Phosphor,
     Amber,
@@ -27,6 +27,24 @@ struct Theme {
     fg: Color32,
     dim: Color32,
     fail: Color32,
+}
+
+fn mix_rgb(a: Color32, b: Color32, toward_b: f32) -> Color32 {
+    let t = toward_b.clamp(0.0, 1.0);
+    let blend = |x: u8, y: u8| ((x as f32) * (1.0 - t) + (y as f32) * t).round() as u8;
+    Color32::from_rgb(
+        blend(a.r(), b.r()),
+        blend(a.g(), b.g()),
+        blend(a.b(), b.b()),
+    )
+}
+
+fn row_accent(palette: Theme, settled: bool) -> Color32 {
+    if settled {
+        palette.fg
+    } else {
+        mix_rgb(palette.fg, palette.dim, 0.65)
+    }
 }
 
 fn theme(id: ThemeId) -> Theme {
@@ -58,7 +76,7 @@ fn theme(id: ThemeId) -> Theme {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Magnet,
     Http,
@@ -71,9 +89,19 @@ impl Mode {
             Self::Http => "HTTP",
         }
     }
+
+    fn toggle(self) -> Self {
+        match self {
+            Self::Magnet => Self::Http,
+            Self::Http => Self::Magnet,
+        }
+    }
 }
 
 const MAX_ACTIVE_DOWNLOADS: usize = 4;
+const CHECKING_UPDATES: &str = "checking for updates…";
+const NO_UPDATES: &str = "no updates found";
+const STATUS_HOLD: Duration = Duration::from_millis(1500);
 
 enum WorkerCmd {
     Download {
@@ -116,6 +144,7 @@ struct GuiApp {
     events: Receiver<WorkerEvent>,
     auto_update: bool,
     update_note: String,
+    note_expires_at: Option<Instant>,
     pending: Option<AvailableUpdate>,
     banner_dismissed: bool,
     installed_tag: Option<String>,
@@ -156,6 +185,7 @@ impl GuiApp {
             events: event_rx,
             auto_update,
             update_note: String::new(),
+            note_expires_at: None,
             pending: None,
             banner_dismissed: false,
             installed_tag: None,
@@ -179,6 +209,7 @@ impl GuiApp {
         visuals.selection.bg_fill =
             Color32::from_rgba_unmultiplied(palette.fg.r(), palette.fg.g(), palette.fg.b(), 40);
         visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, palette.fg);
+        visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
         ctx.set_visuals(visuals);
         ctx.style_mut(|style| {
             style.spacing.item_spacing = Vec2::new(10.0, 8.0);
@@ -188,7 +219,7 @@ impl GuiApp {
     fn queue_job(&mut self) {
         let source = self.input.trim().to_string();
         if source.is_empty() {
-            self.update_note = "paste a magnet or HTTP URL first".into();
+            self.set_note("paste a magnet or HTTP URL first");
             return;
         }
         let valid = match self.mode {
@@ -196,11 +227,11 @@ impl GuiApp {
             Mode::Http => is_valid_download_url(&source),
         };
         if !valid {
-            self.update_note = format!("invalid {} URL", self.mode.label().to_lowercase());
+            self.set_note(format!("invalid {} URL", self.mode.label().to_lowercase()));
             return;
         }
         if let Some(note) = self.duplicate_active_note(self.mode, &source) {
-            self.update_note = note;
+            self.set_note(note);
             return;
         }
         let snapshot = Arc::new(JobSnapshot::default());
@@ -242,7 +273,7 @@ impl GuiApp {
         let kind = job.kind;
         let source = job.source.clone();
         if let Some(note) = self.duplicate_active_note(kind, &source) {
-            self.update_note = note;
+            self.set_note(note);
             return;
         }
         let title = job.snapshot.title();
@@ -289,6 +320,21 @@ impl GuiApp {
         })
     }
 
+    fn set_note(&mut self, text: impl Into<String>) {
+        self.update_note = text.into();
+        self.note_expires_at = None;
+    }
+
+    fn expire_note(&mut self) {
+        if self
+            .note_expires_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.update_note.clear();
+            self.note_expires_at = None;
+        }
+    }
+
     fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             match event {
@@ -296,24 +342,29 @@ impl GuiApp {
                     self.banner_dismissed = false;
                     if self.auto_update {
                         let _ = self.tx.send(WorkerCmd::Install(update.clone()));
-                        self.update_note = format!("installing {}…", update.tag);
+                        self.set_note(format!("installing {}…", update.tag));
                     } else {
-                        self.update_note.clear();
+                        self.set_note("");
                     }
                     self.pending = Some(update);
                 }
                 WorkerEvent::UpToDate => {
                     self.pending = None;
-                    self.update_note.clear();
+                    if let Some(note) = note_after_up_to_date(&self.update_note) {
+                        self.update_note = note.into();
+                        self.note_expires_at = Some(Instant::now() + STATUS_HOLD);
+                    } else {
+                        self.set_note("");
+                    }
                 }
                 WorkerEvent::UpdateFailed(error) => {
                     if self.auto_update {
-                        self.update_note = error;
+                        self.set_note(error);
                     }
                 }
                 WorkerEvent::Installed(tag) => {
                     self.pending = None;
-                    self.update_note.clear();
+                    self.set_note("");
                     self.installed_tag = Some(tag);
                 }
                 WorkerEvent::DownloadFailed { id, error } => {
@@ -331,6 +382,7 @@ impl GuiApp {
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.expire_note();
         if self.applied_theme != self.theme {
             self.apply_theme(ctx);
             self.applied_theme = self.theme;
@@ -338,109 +390,110 @@ impl eframe::App for GuiApp {
         let palette = theme(self.theme);
         ctx.request_repaint_after(Duration::from_millis(200));
 
-        const HEADER_H: f32 = 142.0;
-        const CONTROLS_H: f32 = 70.0;
-        const URL_H: f32 = 36.0;
+        const CONTROLS_H: f32 = 28.0;
+        const URL_H: f32 = 28.0;
+        const NOTE_PAD: f32 = 2.0;
+        const NOTE_SHIFT: f32 = 8.0;
+        let note_font = FontId::new(11.0, FontFamily::Monospace);
+        let note_line = ctx.fonts(|fonts| fonts.row_height(&note_font));
+        let note_h = note_line + NOTE_PAD * 2.0 + NOTE_SHIFT;
+        let header_h = 16.0 + CONTROLS_H + note_h + URL_H + 16.0;
         egui::TopBottomPanel::top("header")
-            .exact_height(HEADER_H)
+            .exact_height(header_h)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(palette.bg).inner_margin(16.0))
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
                 let width = ui.available_width();
                 let (controls, _) =
                     ui.allocate_exact_size(egui::vec2(width, CONTROLS_H), egui::Sense::hover());
                 ui.allocate_new_ui(
                     egui::UiBuilder::new()
                         .max_rect(controls)
-                        .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
-                        ui.set_clip_rect(controls);
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(380.0, CONTROLS_H),
+                            egui::Layout::left_to_right(egui::Align::Max),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
                                 ui.label(mono(identity::REPO, 18.0, palette.fg));
-                                ui.add_space(8.0);
-                                ui.label(mono(VERSION_TAG, 12.0, palette.dim));
-                            });
-                            ui.add_space(6.0);
-                            ui.horizontal(|ui| {
-                                for mode in [Mode::Magnet, Mode::Http] {
-                                    let selected = self.mode == mode;
-                                    let text = mono(
-                                        mode.label(),
-                                        13.0,
-                                        if selected { palette.fg } else { palette.dim },
-                                    );
-                                    if ui.selectable_label(selected, text).clicked() {
-                                        self.mode = mode;
-                                    }
-                                }
-                            });
-                        });
+                                ui.label(mono(VERSION_TAG, 10.0, palette.dim));
+                            },
+                        );
                         let right = egui::Rect::from_min_size(
-                            egui::pos2(controls.right() - 250.0, controls.top()),
-                            egui::vec2(250.0, CONTROLS_H),
+                            egui::pos2(controls.right() - 310.0, controls.top()),
+                            egui::vec2(310.0, CONTROLS_H),
                         );
                         ui.allocate_new_ui(
                             egui::UiBuilder::new()
                                 .max_rect(right)
                                 .layout(egui::Layout::top_down(egui::Align::RIGHT)),
                             |ui| {
-                                ui.set_clip_rect(right);
                                 ui.horizontal(|ui| {
-                                    ui.label(mono("theme", 12.0, palette.dim));
-                                    ui.add_space(8.0);
-                                    for (id, name) in [
-                                        (ThemeId::Phosphor, "phosphor"),
-                                        (ThemeId::Amber, "amber"),
-                                        (ThemeId::Ice, "ice"),
-                                    ] {
-                                        if theme_swatch(ui, theme(id).fg, self.theme == id, name)
-                                            .clicked()
-                                        {
-                                            self.theme = id;
+                                    if refresh_toggle(ui, self.auto_update, palette).clicked() {
+                                        self.auto_update = !self.auto_update;
+                                        let _ = update::set_auto_update(self.auto_update);
+                                        if self.auto_update {
+                                            let _ = self.tx.send(WorkerCmd::Check);
+                                            self.set_note(CHECKING_UPDATES);
+                                        } else {
+                                            self.set_note("");
                                         }
                                     }
+                                    ui.add_space(10.0);
+                                    ui.scope(|ui| {
+                                        ui.style_mut().interaction.interact_radius = 0.0;
+                                        for (id, name) in [
+                                            (ThemeId::Phosphor, "phosphor"),
+                                            (ThemeId::Amber, "amber"),
+                                            (ThemeId::Ice, "ice"),
+                                        ] {
+                                            if theme_swatch(
+                                                ui,
+                                                theme(id).fg,
+                                                self.theme == id,
+                                                name,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.theme = id;
+                                            }
+                                        }
+                                    });
+                                    ui.add_space(6.0);
+                                    ui.label(mono("theme", 12.0, palette.dim));
                                 });
-                                ui.add_space(4.0);
-                                if refresh_toggle(ui, self.auto_update, palette).clicked() {
-                                    self.auto_update = !self.auto_update;
-                                    let _ = update::set_auto_update(self.auto_update);
-                                    if self.auto_update {
-                                        let _ = self.tx.send(WorkerCmd::Check);
-                                        self.update_note = "checking for updates…".into();
-                                    } else {
-                                        self.update_note.clear();
-                                    }
-                                }
-                                if !self.update_note.is_empty() {
-                                    ui.painter().text(
-                                        egui::pos2(right.right(), right.bottom() - 2.0),
-                                        egui::Align2::RIGHT_BOTTOM,
-                                        &self.update_note,
-                                        FontId::new(11.0, FontFamily::Monospace),
-                                        palette.dim,
-                                    );
-                                }
                             },
                         );
                     },
                 );
-                ui.add_space(8.0);
+                let (note_gap, _) =
+                    ui.allocate_exact_size(egui::vec2(width, note_h), egui::Sense::hover());
+                if !self.update_note.is_empty() {
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new()
+                            .max_rect(note_gap)
+                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                        |ui| {
+                            ui.label(mono(&self.update_note, 11.0, palette.dim));
+                        },
+                    );
+                }
                 let (url_row, _) =
                     ui.allocate_exact_size(egui::vec2(width, URL_H), egui::Sense::hover());
-                let button_w = 72.0_f32;
-                let gap = 8.0_f32;
-                let edit_w = (url_row.width() * 0.58).clamp(380.0, 620.0);
-                let group_w = edit_w + gap + button_w;
-                let group = egui::Rect::from_min_size(
-                    egui::pos2(url_row.center().x - group_w / 2.0, url_row.top()),
-                    egui::vec2(group_w, url_row.height()),
-                );
                 ui.allocate_new_ui(
                     egui::UiBuilder::new()
-                        .max_rect(group)
+                        .max_rect(url_row)
                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                     |ui| {
+                        if mode_switch(ui, self.mode, palette).clicked() {
+                            self.mode = self.mode.toggle();
+                        }
+                        ui.add_space(10.0);
+                        let button_w = 72.0_f32;
+                        let gap = 8.0_f32;
+                        let edit_w = (ui.available_width() - gap - button_w).clamp(240.0, 720.0);
                         let input_id = ui.make_persistent_id("download-url");
                         let focused = ui.memory(|memory| memory.has_focus(input_id));
                         let mut edit = TextEdit::singleline(&mut self.input)
@@ -560,7 +613,7 @@ impl eframe::App for GuiApp {
                                                 let _ = self
                                                     .tx
                                                     .send(WorkerCmd::Install(available.clone()));
-                                                self.update_note = "installing update…".into();
+                                                self.set_note("installing update…");
                                             }
                                         },
                                     );
@@ -612,6 +665,12 @@ impl eframe::App for GuiApp {
                         } else {
                             palette.row_alt
                         };
+                        let settled = job.snapshot.is_done()
+                            || (total > 0
+                                && downloaded >= total
+                                && job.snapshot.error().is_none()
+                                && !job.snapshot.is_stopped());
+                        let accent = row_accent(palette, settled);
                         egui::Frame::NONE
                             .fill(fill)
                             .inner_margin(10.0)
@@ -625,7 +684,7 @@ impl eframe::App for GuiApp {
                                     } else {
                                         truncate(&title, 64)
                                     };
-                                    ui.label(mono(shown, 13.0, palette.fg))
+                                    ui.label(mono(shown, 13.0, accent))
                                         .on_hover_text(&job.source);
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -644,21 +703,22 @@ impl eframe::App for GuiApp {
                                                     "pause"
                                                 };
                                                 if ui
-                                                    .button(mono(pause_label, 12.0, palette.fg))
+                                                    .button(mono(pause_label, 12.0, accent))
                                                     .clicked()
                                                 {
                                                     job.snapshot.toggle_pause();
                                                 }
-                                            } else if job.snapshot.is_stopped() {
+                                            } else {
                                                 if ui
                                                     .button(mono("clear", 12.0, palette.dim))
                                                     .clicked()
                                                 {
                                                     clear_index = Some(index);
                                                 }
-                                                if ui
-                                                    .button(mono("restart", 12.0, palette.fg))
-                                                    .clicked()
+                                                if job.snapshot.is_stopped()
+                                                    && ui
+                                                        .button(mono("restart", 12.0, palette.fg))
+                                                        .clicked()
                                                 {
                                                     restart_index = Some(index);
                                                 }
@@ -672,11 +732,11 @@ impl eframe::App for GuiApp {
                                     0.0
                                 };
                                 ui.scope(|ui| {
-                                    ui.visuals_mut().selection.bg_fill = palette.fg;
+                                    ui.visuals_mut().selection.bg_fill = accent;
                                     ui.add(
                                         egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
                                             .desired_height(8.0)
-                                            .fill(palette.fg),
+                                            .fill(accent),
                                     );
                                 });
                                 let eta = if !job.snapshot.is_paused()
@@ -726,7 +786,104 @@ fn theme_swatch(ui: &mut egui::Ui, fill: Color32, selected: bool, name: &str) ->
             egui::StrokeKind::Outside,
         );
     }
-    response.on_hover_text(format!("theme: {name}"))
+    click_cursor(response).on_hover_text(format!("theme: {name}"))
+}
+
+fn mode_switch(ui: &mut egui::Ui, mode: Mode, palette: Theme) -> egui::Response {
+    let magnet = ui.painter().layout_no_wrap(
+        Mode::Magnet.label().into(),
+        FontId::new(13.0, FontFamily::Monospace),
+        if mode == Mode::Magnet {
+            palette.fg
+        } else {
+            palette.dim
+        },
+    );
+    let http = ui.painter().layout_no_wrap(
+        Mode::Http.label().into(),
+        FontId::new(13.0, FontFamily::Monospace),
+        if mode == Mode::Http {
+            palette.fg
+        } else {
+            palette.dim
+        },
+    );
+    let arrow_w = 22.0_f32;
+    let pad_x = 10.0_f32;
+    let gap = 6.0_f32;
+    let size = egui::vec2(
+        pad_x * 2.0 + magnet.size().x + gap + arrow_w + gap + http.size().x,
+        28.0,
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter();
+    let stroke = Stroke::new(
+        1.0_f32,
+        if response.hovered() {
+            palette.fg
+        } else {
+            palette.dim
+        },
+    );
+    painter.rect_filled(rect, 2.0, palette.row);
+    painter.rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+    let magnet_pos = egui::pos2(rect.left() + pad_x, rect.center().y - magnet.size().y / 2.0);
+    let arrow_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            magnet_pos.x + magnet.size().x + gap + arrow_w / 2.0,
+            rect.center().y,
+        ),
+        egui::vec2(arrow_w, 16.0),
+    );
+    let http_pos = egui::pos2(
+        arrow_rect.right() + gap,
+        rect.center().y - http.size().y / 2.0,
+    );
+    painter.galley(magnet_pos, magnet, palette.fg);
+    paint_swap_arrows(painter, arrow_rect, palette.fg);
+    painter.galley(http_pos, http, palette.fg);
+    click_cursor(response).on_hover_text("switch between magnet and HTTP")
+}
+
+fn paint_swap_arrows(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = Stroke::new(1.6_f32, color);
+    let c = rect.center();
+    let w = 7.0_f32;
+    let head = 3.2_f32;
+    let top_y = c.y - 3.6;
+    let bot_y = c.y + 3.6;
+    let left = c.x - w;
+    let right = c.x + w;
+    painter.line_segment([egui::pos2(left, top_y), egui::pos2(right, top_y)], stroke);
+    painter.line_segment(
+        [
+            egui::pos2(right - head, top_y - head),
+            egui::pos2(right, top_y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(right - head, top_y + head),
+            egui::pos2(right, top_y),
+        ],
+        stroke,
+    );
+    painter.line_segment([egui::pos2(right, bot_y), egui::pos2(left, bot_y)], stroke);
+    painter.line_segment(
+        [
+            egui::pos2(left + head, bot_y - head),
+            egui::pos2(left, bot_y),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(left + head, bot_y + head),
+            egui::pos2(left, bot_y),
+        ],
+        stroke,
+    );
 }
 
 fn refresh_toggle(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Response {
@@ -764,7 +921,16 @@ fn refresh_toggle(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Response
         galley,
         if on { palette.fg } else { palette.dim },
     );
-    response.on_hover_text("check GitHub Releases and replace this app when a newer version exists")
+    click_cursor(response)
+        .on_hover_text("check GitHub Releases and replace this app when a newer version exists")
+}
+
+fn click_cursor(response: egui::Response) -> egui::Response {
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn note_after_up_to_date(current: &str) -> Option<&'static str> {
+    (current == CHECKING_UPDATES).then_some(NO_UPDATES)
 }
 
 fn paint_refresh(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32) {
@@ -893,5 +1059,34 @@ mod tests {
     #[test]
     fn caps_active_downloads() {
         assert_eq!(MAX_ACTIVE_DOWNLOADS, 4);
+    }
+
+    #[test]
+    fn mode_toggle_swaps_magnet_and_http() {
+        assert_eq!(Mode::Magnet.toggle(), Mode::Http);
+        assert_eq!(Mode::Http.toggle(), Mode::Magnet);
+        assert_eq!(Mode::Magnet.label(), "MAGNET");
+        assert_eq!(Mode::Http.label(), "HTTP");
+    }
+
+    #[test]
+    fn in_progress_accent_is_duller_than_settled() {
+        for id in [ThemeId::Phosphor, ThemeId::Amber, ThemeId::Ice] {
+            let palette = theme(id);
+            let live = row_accent(palette, false);
+            let done = row_accent(palette, true);
+            assert_eq!(done, palette.fg);
+            assert_ne!(live, done);
+            let dist = |c: Color32| c.r() as i16 + c.g() as i16 + c.b() as i16;
+            assert!(dist(live) < dist(done), "{id:?} live should be duller");
+        }
+    }
+
+    #[test]
+    fn up_to_date_follows_a_manual_check() {
+        assert_eq!(note_after_up_to_date(CHECKING_UPDATES), Some(NO_UPDATES));
+        assert_eq!(note_after_up_to_date(""), None);
+        assert_eq!(note_after_up_to_date("installing v3.0.3…"), None);
+        assert_eq!(STATUS_HOLD, Duration::from_millis(1500));
     }
 }
