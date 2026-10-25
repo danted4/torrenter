@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [3.1.0] - 2026-10-25
+
+### Added
+
+- Magnet **share** mode (default): stay connected after 100% and keep uploading until Stop; incoming TCP listen on a random high port
+- Magnet **leech** mode: never upload; stop the session at 100%
+- CLI menu `seed: on/off` and **5. Toggle seed**; GUI halo/horns glyphs on the URL row and on idle magnet rows (Restart)
+- Seeding progress shows **U:** upload size and speed; window/process must stay open to share
+
+### Changed
+
+- `torrenter magnet` in share mode does not exit when the download finishes (`2` or Ctrl-C to stop)
+
 ## [3.0.3] - 2026-10-25
 
 ### Changed

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use librqbit::{AddTorrent, AddTorrentOptions, DhtSessionConfig, Session, SessionOptions};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, DhtSessionConfig, ListenerOptions, Session, SessionOptions,
+};
 
 use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
@@ -53,15 +56,23 @@ pub fn magnet_display_name(magnet_uri: &str) -> Option<String> {
     })
 }
 
-pub async fn start_download(magnet_uri: &str) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::cli(1)).await
+pub async fn start_download(magnet_uri: &str, seed: bool) -> Result<()> {
+    start_download_with(magnet_uri, ProgressHandle::cli(1), seed).await
 }
 
-pub async fn start_download_reported(magnet_uri: &str, snapshot: Arc<JobSnapshot>) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot)).await
+pub async fn start_download_reported(
+    magnet_uri: &str,
+    snapshot: Arc<JobSnapshot>,
+    seed: bool,
+) -> Result<()> {
+    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed).await
 }
 
-pub async fn start_download_with(magnet_uri: &str, progress: ProgressHandle) -> Result<()> {
+pub async fn start_download_with(
+    magnet_uri: &str,
+    progress: ProgressHandle,
+    seed: bool,
+) -> Result<()> {
     if !is_valid_magnet_url(magnet_uri) {
         bail!("Invalid magnet URL!");
     }
@@ -85,21 +96,50 @@ pub async fn start_download_with(magnet_uri: &str, progress: ProgressHandle) -> 
                 ..Default::default()
             }),
             persistence: None,
+            listen: seed.then(share_listen),
+            disable_upload: !seed,
             ..Default::default()
         },
     )
     .await
     .context("failed to start torrent session")?;
 
-    let result = run_torrent(&session, magnet_uri, progress).await;
+    let result = run_torrent(&session, magnet_uri, progress, seed).await;
     session.stop().await;
     result
+}
+
+fn share_listen() -> ListenerOptions {
+    ListenerOptions {
+        listen_addr: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        ..Default::default()
+    }
+}
+
+fn live_peers_and_upload(stats: &librqbit::TorrentStats) -> (u64, u64, f64) {
+    let peers = stats
+        .live
+        .as_ref()
+        .map(|live| live.snapshot.peer_stats.live as u64)
+        .unwrap_or(0);
+    let uploaded = stats
+        .live
+        .as_ref()
+        .map(|live| live.snapshot.uploaded_bytes.max(stats.uploaded_bytes))
+        .unwrap_or(stats.uploaded_bytes);
+    let up_speed = stats
+        .live
+        .as_ref()
+        .map(|live| live.upload_speed.mbps * 1024.0 * 1024.0)
+        .unwrap_or(0.0);
+    (peers, uploaded, up_speed)
 }
 
 async fn run_torrent(
     session: &std::sync::Arc<Session>,
     magnet_uri: &str,
     progress: ProgressHandle,
+    seed: bool,
 ) -> Result<()> {
     let handle = session
         .add_torrent(
@@ -131,6 +171,7 @@ async fn run_torrent(
         println!("[1] pause/resume   [2] stop\n");
     }
     progress.set_message("0");
+    progress.set_status("downloading");
 
     let completed = handle.wait_until_completed();
     tokio::pin!(completed);
@@ -148,22 +189,35 @@ async fn run_torrent(
     tokio::pin!(controls);
 
     let mut engine_paused = false;
+    let mut download_done = false;
     loop {
         tokio::select! {
-            result = &mut completed => {
+            result = &mut completed, if !download_done => {
                 if let Err(error) = result {
                     progress.finish_and_clear();
                     return Err(error).context("torrent failed");
                 }
+                download_done = true;
                 let stats = handle.stats();
                 let total = stats.total_bytes.max(1);
                 progress.set_length(total);
                 progress.set_position(total);
-                progress.finish();
-                if progress.announce() {
-                    println!("\nTorrent download finished!");
+                let (peers, uploaded, up_speed) = live_peers_and_upload(&stats);
+                progress.set_uploaded(uploaded);
+                progress.set_upload_bps(up_speed);
+                if !seed {
+                    progress.finish();
+                    if progress.announce() {
+                        println!("\nTorrent download finished!");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                progress.set_status("seeding");
+                progress.use_seed_style();
+                progress.set_seed_message(peers, uploaded, up_speed);
+                if progress.announce() {
+                    println!("\nTorrent download finished — seeding until you press 2.");
+                }
             }
             _ = &mut controls => {
                 if let Some(snapshot) = progress.snapshot() {
@@ -202,16 +256,25 @@ async fn run_torrent(
                     progress.finish_and_clear();
                     bail!("{error}");
                 }
-                if !stats.finished && !want_pause {
+                if !want_pause && (!stats.finished || seed) {
                     let total = stats.total_bytes.max(1);
+                    let position = if stats.finished {
+                        total
+                    } else {
+                        stats.progress_bytes.min(total)
+                    };
                     progress.set_length(total);
-                    progress.set_position(stats.progress_bytes.min(total));
-                    let peers = stats
-                        .live
-                        .as_ref()
-                        .map(|live| live.snapshot.peer_stats.live)
-                        .unwrap_or(0);
-                    progress.set_message(format!("{peers}"));
+                    progress.set_position(position);
+                    let (peers, uploaded, up_speed) = live_peers_and_upload(&stats);
+                    progress.set_uploaded(uploaded);
+                    progress.set_upload_bps(up_speed);
+                    if download_done && seed {
+                        progress.set_status("seeding");
+                        progress.set_seed_message(peers, uploaded, up_speed);
+                    } else {
+                        progress.set_status("downloading");
+                        progress.set_message(format!("{peers}"));
+                    }
                 }
             }
         }
@@ -224,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_magnet() {
-        let err = start_download("https://example.com/not-a-magnet")
+        let err = start_download("https://example.com/not-a-magnet", false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Invalid magnet URL"));
@@ -263,6 +326,47 @@ mod tests {
         )
         .await
         .expect("librqbit session should start");
+        session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn torrent_session_starts_with_incoming_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new_with_opts(
+            dir.path().to_path_buf(),
+            SessionOptions {
+                dht: Some(DhtSessionConfig {
+                    persistence: None,
+                    ..Default::default()
+                }),
+                persistence: None,
+                listen: Some(share_listen()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("librqbit session should start with a listen socket");
+        assert!(session.listen_addr().is_some());
+        session.stop().await;
+    }
+
+    #[tokio::test]
+    async fn torrent_session_starts_with_upload_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new_with_opts(
+            dir.path().to_path_buf(),
+            SessionOptions {
+                dht: Some(DhtSessionConfig {
+                    persistence: None,
+                    ..Default::default()
+                }),
+                persistence: None,
+                disable_upload: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("librqbit session should start with upload disabled");
         session.stop().await;
     }
 }
