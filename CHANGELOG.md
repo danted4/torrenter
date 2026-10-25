@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [3.0.3] - 2026-10-25
+
+### Changed
+
+- GUI header: magnet/HTTP swap on the URL row, auto-update beside theme, pointer cursor on clickable controls, theme swatches that only hit the color squares
+- Finished job rows use a brighter accent than in-progress rows; **clear** on inactive rows
+- Manual update check shows **no updates found** for about 1.5s when already up to date
+
 ## [3.0.2] - 2026-10-24
 
 ### Added

@@ -58,7 +58,7 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.0.2
+danted4/torrenter v3.0.3
 auto-update: off
 Choose download type:
 1. Magnet URL
@@ -85,7 +85,7 @@ Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torren
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, pause / stop / restart per row, auto-update checkbox.
+Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, pause / stop / clear (and restart when stopped) per row, auto-update checkbox.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS

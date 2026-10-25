@@ -1,6 +1,6 @@
 [package]
 name = "torrenter"
-version = "3.0.2"
+version = "3.0.3"
 edition = "2021"
 description = "CLI and native GUI: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
 license = "MIT"
