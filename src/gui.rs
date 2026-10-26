@@ -311,15 +311,15 @@ impl GuiApp {
         self.input.clear();
     }
 
-    fn restart_job(&mut self, index: usize, seed: bool, dest: PathBuf) {
+    fn restart_job(&mut self, index: usize, seed: bool, dest: PathBuf) -> bool {
         let Some(job) = self.jobs.get(index) else {
-            return;
+            return false;
         };
         let kind = job.kind;
         let source = job.source.clone();
         if let Some(note) = self.duplicate_active_note(kind, &source) {
             self.toast_fail(note);
-            return;
+            return false;
         }
         let title = job.snapshot.title();
         let snapshot = Arc::new(JobSnapshot::default());
@@ -352,6 +352,7 @@ impl GuiApp {
             seed,
             dest,
         };
+        true
     }
 
     fn duplicate_active_note(&self, kind: Mode, source: &str) -> Option<String> {
@@ -1069,10 +1070,17 @@ impl GuiApp {
             self.apply_picked_dir(path, true);
         }
         if start {
-            if let Some(draft) = self.restart.take() {
-                if let Some(index) = self.jobs.iter().position(|job| job.id == draft.id) {
-                    self.restart_job(index, draft.seed, draft.dest);
-                }
+            let Some(draft) = self.restart.as_ref() else {
+                return;
+            };
+            let Some(index) = self.jobs.iter().position(|job| job.id == draft.id) else {
+                self.restart = None;
+                return;
+            };
+            let seed = draft.seed;
+            let dest = draft.dest.clone();
+            if self.restart_job(index, seed, dest) {
+                self.restart = None;
             }
         } else if !open {
             self.restart = None;
