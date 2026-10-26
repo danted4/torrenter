@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -8,7 +9,6 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, DhtSessionConfig, ListenerOptions, Session, SessionOptions,
 };
 
-use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
 use crate::validate::is_valid_magnet_url;
 
@@ -56,22 +56,24 @@ pub fn magnet_display_name(magnet_uri: &str) -> Option<String> {
     })
 }
 
-pub async fn start_download(magnet_uri: &str, seed: bool) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::cli(1), seed).await
+pub async fn start_download(magnet_uri: &str, seed: bool, dest: PathBuf) -> Result<()> {
+    start_download_with(magnet_uri, ProgressHandle::cli(1), seed, dest).await
 }
 
 pub async fn start_download_reported(
     magnet_uri: &str,
     snapshot: Arc<JobSnapshot>,
     seed: bool,
+    dest: PathBuf,
 ) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed).await
+    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed, dest).await
 }
 
 pub async fn start_download_with(
     magnet_uri: &str,
     progress: ProgressHandle,
     seed: bool,
+    dest: PathBuf,
 ) -> Result<()> {
     if !is_valid_magnet_url(magnet_uri) {
         bail!("Invalid magnet URL!");
@@ -89,7 +91,7 @@ pub async fn start_download_with(
     let _ = librqbit::try_increase_nofile_limit();
 
     let session = Session::new_with_opts(
-        DOWNLOAD_DIRECTORY.into(),
+        dest,
         SessionOptions {
             dht: Some(DhtSessionConfig {
                 persistence: None,
@@ -287,9 +289,13 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_magnet() {
-        let err = start_download("https://example.com/not-a-magnet", false)
-            .await
-            .unwrap_err();
+        let err = start_download(
+            "https://example.com/not-a-magnet",
+            false,
+            PathBuf::from("."),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("Invalid magnet URL"));
     }
 

@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.0] - 2026-10-26
+
+### Added
+
+- Download folder picker: default `<OS Downloads>/torrenter`, optional `download_dir` in config
+- CLI menu `download:` path and **6. Change download folder**; `--dir` on `http` / `magnet` for a one-shot override
+- GUI dest row under the URL field; restart confirm popup (mode + folder + START); click a job title to reveal the folder
+- Bottom-right toasts for update checks and folder/IO errors
+
+### Changed
+
+- Output no longer uses `./downloads`; magnets still isolate under `<dest>/<info-hash>/`
+- Idle magnet rows use **restart** (glyphs are last-mode indicators); HTTP stopped jobs use the same popup minus seed glyphs
+
 ## [3.1.0] - 2026-10-25
 
 ### Added

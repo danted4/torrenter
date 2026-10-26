@@ -13,8 +13,9 @@ Guidance for coding agents working on this repository. Human-facing install, usa
 
 Both fronts call the same engines in `src/lib.rs`:
 
-- **Magnet / torrent** — `src/torrent.rs` via [librqbit](https://github.com/ikatson/rqbit) 9 (DHT in memory, output under `./downloads/<info-hash>/`). Share mode uploads and keeps the session until Stop; leech mode disables upload and calls `session.stop()` at 100%. `.torrent` files are not accepted.
-- **Direct HTTP(S)** — `src/http.rs` via `reqwest` 0.12 + rustls, 4-part `Range` download with resume under `downloads/.resume/`.
+- **Magnet / torrent** — `src/torrent.rs` via [librqbit](https://github.com/ikatson/rqbit) 9 (DHT in memory, output under `<dest>/<info-hash>/`). Share mode uploads and keeps the session until Stop; leech mode disables upload and calls `session.stop()` at 100%. `.torrent` files are not accepted.
+- **Direct HTTP(S)** — `src/http.rs` via `reqwest` 0.12 + rustls, 4-part `Range` download with resume under `<dest>/.resume/`.
+- **Download dest** — `src/paths.rs`. Default `<OS Downloads>/torrenter`; optional `download_dir` in config after an explicit pick. `--dir` is one-shot.
 - **Progress / pause / stop** — `src/progress.rs` (`JobSnapshot`, `ProgressHandle`). CLI watches stdin (`1` pause, `2` stop); GUI shares the same snapshot.
 - **Opt-in updater** — `src/update.rs` from GitHub Releases + `SHA256SUMS`. CLI and GUI only replace their own asset family (`torrenter-*` vs `torrenter-gui-*`).
 - **Validation / identity** — `src/validate.rs`, `src/identity.rs` (`danted4/torrenter vX.Y.Z` from `CARGO_PKG_VERSION`).
@@ -63,7 +64,7 @@ After code changes, run the relevant `fmt` / `clippy` / `test` commands and fix 
 
 ## Code style
 
-- rustfmt defaults (no `rustfmt.toml`). Match surrounding naming: `snake_case` functions, `SCREAMING_SNAKE` for module constants (`DOWNLOAD_DIRECTORY`, `PART_COUNT`).
+- rustfmt defaults (no `rustfmt.toml`). Match surrounding naming: `snake_case` functions, `SCREAMING_SNAKE` for module constants (`PART_COUNT`).
 - Keep public surfaces small. New engine entry points should follow existing pairs: `start_*` (CLI) and `start_*_reported` (GUI + `JobSnapshot`).
 - Feature-gate GUI-only modules the same way `src/lib.rs` does (`gui`, `icon`). The GUI binary stays a thin `main` that calls `torrenter::gui::run()`.
 - User-visible strings already used in tests and the README (`Invalid magnet URL!`, `Invalid HTTP(S) URL!`, banner format) should stay stable unless the change is intentional and tests/docs update together.
@@ -74,7 +75,7 @@ After code changes, run the relevant `fmt` / `clippy` / `test` commands and fix 
 This tool downloads untrusted content the user asked for. Do not weaken path, URL, or updater checks.
 
 - Magnet: only `magnet:?xt=urn:` with 32-char base32 or 40-char hex info hash (`validate.rs`). No `.torrent` file parse.
-- HTTP filenames come from `Content-Disposition` or a **single** URL path segment; `.` / `..` become `download.bin`. Never write outside the configured download / info-hash / `.resume` trees.
+- HTTP filenames come from `Content-Disposition` or a **single** URL path segment; `.` / `..` become `download.bin`. Never write outside the configured dest / info-hash / `.resume` trees. Do not fall back to `./downloads`.
 - Updater (`src/update.rs`) must keep: pinned first hop `https://github.com/danted4/torrenter/releases/download/<tag>/<name>` with tag matching the release; SHA-256 against `SHA256SUMS`; size caps; timeouts; CLI vs GUI asset prefix. `SHA256SUMS` is same-publisher integrity, not a signature — do not claim otherwise.
 - Auto-update defaults **off**. Do not enable it by default in config or CI.
 - Do not add credentials, tokens, or tracking. Do not expand the updater to arbitrary hosts.

@@ -13,7 +13,7 @@ Downloader with two engines and two fronts. Each [GitHub Release](https://github
 1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
 2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
 
-Output goes to `./downloads/`. Runs on Linux, macOS, and Windows. Both fronts show `danted4/torrenter vX.Y.Z`. Auto-update is **off** by default.
+Output goes to `<OS Downloads>/torrenter` until you pick another folder. Runs on Linux, macOS, and Windows. Both fronts show `danted4/torrenter vX.Y.Z`. Auto-update is **off** by default.
 
 ## Two download modes
 
@@ -23,7 +23,7 @@ Output goes to `./downloads/`. Runs on Linux, macOS, and Windows. Both fronts sh
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
 | **Parallelism** | piece picker | 4 byte-range parts |
-| **Resume** | librqbit on disk under `./downloads/<info-hash>/` | `downloads/.resume/` part files |
+| **Resume** | librqbit on disk under `<dest>/<info-hash>/` | `<dest>/.resume/` part files |
 | **Peers** | live count in the bar | `Peers: 0` |
 | **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |
@@ -67,15 +67,17 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.1.0
+danted4/torrenter v3.2.0
 auto-update: off
 seed: on
+download: /Users/you/Downloads/torrenter
 Choose download type:
 1. Magnet URL
 2. Direct URL (multi-part)
 3. Toggle auto-update
 4. Update now
 5. Toggle seed
+6. Change download folder
 ```
 
 Commands:
@@ -83,20 +85,21 @@ Commands:
 ```bash
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
+torrenter magnet "magnet:?xt=urn:btih:…" --dir /tmp/out   # one-shot, not saved
 torrenter --auto-update          # persist: check GitHub Releases on startup (TTY only)
 torrenter --no-auto-update
 torrenter update                 # install the latest matching CLI asset now
 ```
 
-While a download runs, type `1` then Enter to pause/resume, or `2` then Enter to stop. HTTP pause aborts the live Range body and continues from `downloads/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
+While a download runs, type `1` then Enter to pause/resume, or `2` then Enter to stop. HTTP pause aborts the live Range body and continues from `<dest>/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
 
-Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. The OS may prompt for a firewall exception the first time a share-mode magnet runs. Each magnet writes into `./downloads/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume. Closing the CLI or GUI drops every seed.
+Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. The OS may prompt for a firewall exception the first time a share-mode magnet runs. Each magnet writes into `<dest>/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume. Closing the CLI or GUI drops every seed.
 
 Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torrenter update` always runs when you ask.
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), pause / stop / clear per row. Idle magnet rows restart from those glyphs; HTTP still has a restart button when stopped. Auto-update checkbox. The window must stay open to keep seeding.
+Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast. The window must stay open to keep seeding.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS
@@ -133,6 +136,7 @@ flowchart TD
   menu -->|3 Toggle auto-update| menu
   menu -->|4 Update now| updater
   menu -->|5 Toggle seed| menu
+  menu -->|6 Change download folder| menu
 
   subgraph magnetFlow [Magnet]
     torrent[librqbit session]
@@ -154,7 +158,7 @@ flowchart TD
     httpStart --> sized{Known size?}
     sized -->|no| single[Single GET stream]
     sized -->|yes| parts[4 parallel Range parts]
-    parts --> resumeDir["downloads/.resume hashed-url parts"]
+    parts --> resumeDir["dest/.resume hashed-url parts"]
     resumeDir --> honor{"HTTP 206?"}
     honor -->|no| wipe[Wipe parts] --> single
     honor -->|short body| fail[Fail incomplete no zero pad]
@@ -163,21 +167,21 @@ flowchart TD
     single --> httpDir
   end
 
-  magnetDir["./downloads/info-hash"]
-  httpDir["./downloads"]
+  magnetDir["dest/info-hash"]
+  httpDir["dest"]
   updater[GitHub Releases plus SHA256SUMS]
 ```
 
-HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `downloads/.resume/`. Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
+HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `<dest>/.resume/`. Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
 
 ## Configuration
 
-- Download folder: `./downloads` (`DOWNLOAD_DIRECTORY` in `src/http.rs`)
+- Download folder: `<OS Downloads>/torrenter` until `download_dir` is set (`src/paths.rs`)
 - Parallel HTTP parts: `PART_COUNT = 4` in `src/http.rs`
 - GUI concurrent jobs: 4
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP and updater timeouts: 20s connect, 60s between reads
-- Auto-update and magnet seed flags: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on.
+- Auto-update, magnet seed, and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. Missing `download_dir` keeps following the live OS Downloads path.
 
 ## Development
 
@@ -201,7 +205,7 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | `Too many open files` | torrenter raises the process limit when it can; otherwise `ulimit -n 10240` and retry |
 | `Invalid HTTP(S) URL` | Full `http://` or `https://` URL required |
 | Multipart not used | Server did not return HTTP 206 — single stream is used instead |
-| Resume not working (HTTP) | Same URL; state is in `downloads/.resume/` |
+| Resume not working (HTTP) | Same URL and same dest folder; state is in `<dest>/.resume/` |
 | Incomplete part | Server closed a Range early; retry the same URL |
 | Linux GUI missing GTK/xcb | Install GTK 3 and xcb (see Install) |
 | GUI says already downloading | Same magnet info-hash or HTTP URL is already active |
