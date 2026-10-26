@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -8,7 +10,6 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, DhtSessionConfig, ListenerOptions, Session, SessionOptions,
 };
 
-use crate::http::DOWNLOAD_DIRECTORY;
 use crate::progress::{honor_control, is_stopped, watch_cli_controls, JobSnapshot, ProgressHandle};
 use crate::validate::is_valid_magnet_url;
 
@@ -56,22 +57,156 @@ pub fn magnet_display_name(magnet_uri: &str) -> Option<String> {
     })
 }
 
-pub async fn start_download(magnet_uri: &str, seed: bool) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::cli(1), seed).await
+const HASH_MARKER: &str = ".torrenter-hash";
+const FOLDER_NAME_MAX: usize = 80;
+
+fn sanitize_folder_name(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_whitespace() {
+                '_'
+            } else {
+                match ch {
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '\0' => '_',
+                    ch if ch.is_control() => '_',
+                    ch => ch,
+                }
+            }
+        })
+        .collect();
+    let trimmed = cleaned
+        .trim_matches(|ch: char| ch == '_' || ch == '.' || ch.is_whitespace())
+        .chars()
+        .take(FOLDER_NAME_MAX)
+        .collect::<String>()
+        .trim_end_matches('_')
+        .to_string();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return None;
+    }
+    let reserved = matches!(
+        trimmed.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+    );
+    if reserved {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn short_hash(hash: &str) -> &str {
+    let len = hash.len().min(8);
+    &hash[..len]
+}
+
+fn folder_marker(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path.join(HASH_MARKER)).ok()?;
+    let value = String::from_utf8(bytes).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_ascii_lowercase())
+    }
+}
+
+fn write_folder_marker(path: &Path, hash: &str) -> Result<()> {
+    std::fs::write(path.join(HASH_MARKER), hash)
+        .with_context(|| format!("failed to mark download folder {}", path.display()))
+}
+
+fn folder_belongs_to(path: &Path, hash: &str) -> bool {
+    path.is_dir() && folder_marker(path).as_deref() == Some(hash)
+}
+
+fn folder_candidates(base: &str, hash: &str) -> Vec<String> {
+    let mut candidates = vec![base.to_string()];
+    if base != hash {
+        candidates.push(format!("{base}_{}", short_hash(hash)));
+        candidates.push(format!("{base}_{hash}"));
+    }
+    candidates.push(hash.to_string());
+    candidates.dedup();
+    candidates
+}
+
+fn magnet_folder_base(magnet_uri: &str) -> Option<(String, String)> {
+    let hash = magnet_info_hash(magnet_uri)?;
+    let base = magnet_display_name(magnet_uri)
+        .and_then(|name| sanitize_folder_name(&name))
+        .unwrap_or_else(|| hash.clone());
+    Some((base, hash))
+}
+
+pub fn magnet_sub_folder(dest: &Path, magnet_uri: &str) -> Option<String> {
+    let (base, hash) = magnet_folder_base(magnet_uri)?;
+    folder_candidates(&base, &hash)
+        .into_iter()
+        .find(|name| folder_belongs_to(&dest.join(name), &hash))
+}
+
+pub fn claim_magnet_sub_folder(dest: &Path, magnet_uri: &str) -> Result<String> {
+    let (base, hash) = magnet_folder_base(magnet_uri).context("magnet has no info hash")?;
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create download folder {}", dest.display()))?;
+    for name in folder_candidates(&base, &hash) {
+        let path = dest.join(&name);
+        if folder_belongs_to(&path, &hash) {
+            return Ok(name);
+        }
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                write_folder_marker(&path, &hash)?;
+                return Ok(name);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                if folder_belongs_to(&path, &hash) {
+                    return Ok(name);
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create torrent folder {}", path.display())
+                });
+            }
+        }
+    }
+    bail!(
+        "could not reserve a torrent folder under {}",
+        dest.display()
+    );
+}
+
+pub async fn start_download(magnet_uri: &str, seed: bool, dest: PathBuf) -> Result<()> {
+    start_download_with(magnet_uri, ProgressHandle::cli(1), seed, dest).await
 }
 
 pub async fn start_download_reported(
     magnet_uri: &str,
     snapshot: Arc<JobSnapshot>,
     seed: bool,
+    dest: PathBuf,
 ) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed).await
+    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed, dest).await
 }
 
 pub async fn start_download_with(
     magnet_uri: &str,
     progress: ProgressHandle,
     seed: bool,
+    dest: PathBuf,
 ) -> Result<()> {
     if !is_valid_magnet_url(magnet_uri) {
         bail!("Invalid magnet URL!");
@@ -88,8 +223,9 @@ pub async fn start_download_with(
     // Compilation torrents open many files at once; macOS defaults are often 256.
     let _ = librqbit::try_increase_nofile_limit();
 
+    let sub_folder = claim_magnet_sub_folder(&dest, magnet_uri)?;
     let session = Session::new_with_opts(
-        DOWNLOAD_DIRECTORY.into(),
+        dest.clone(),
         SessionOptions {
             dht: Some(DhtSessionConfig {
                 persistence: None,
@@ -104,7 +240,7 @@ pub async fn start_download_with(
     .await
     .context("failed to start torrent session")?;
 
-    let result = run_torrent(&session, magnet_uri, progress, seed).await;
+    let result = run_torrent(&session, magnet_uri, progress, seed, sub_folder).await;
     session.stop().await;
     result
 }
@@ -140,13 +276,14 @@ async fn run_torrent(
     magnet_uri: &str,
     progress: ProgressHandle,
     seed: bool,
+    sub_folder: String,
 ) -> Result<()> {
     let handle = session
         .add_torrent(
             AddTorrent::from_url(magnet_uri),
             Some(AddTorrentOptions {
                 overwrite: true,
-                sub_folder: magnet_info_hash(magnet_uri),
+                sub_folder: Some(sub_folder),
                 ..Default::default()
             }),
         )
@@ -287,9 +424,13 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_magnet() {
-        let err = start_download("https://example.com/not-a-magnet", false)
-            .await
-            .unwrap_err();
+        let err = start_download(
+            "https://example.com/not-a-magnet",
+            false,
+            PathBuf::from("."),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("Invalid magnet URL"));
     }
 
@@ -368,5 +509,65 @@ mod tests {
         .await
         .expect("librqbit session should start with upload disabled");
         session.stop().await;
+    }
+
+    #[test]
+    fn folder_name_replaces_whitespace_and_unsafe_chars() {
+        assert_eq!(
+            sanitize_folder_name("Sintel Movie").as_deref(),
+            Some("Sintel_Movie")
+        );
+        assert_eq!(
+            sanitize_folder_name("foo / bar:baz").as_deref(),
+            Some("foo___bar_baz")
+        );
+        assert!(sanitize_folder_name("   ").is_none());
+        assert!(sanitize_folder_name("..").is_none());
+        assert!(sanitize_folder_name("CON").is_none());
+    }
+
+    #[test]
+    fn magnet_folder_uses_name_then_hash_on_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "08ada5a7a6183aae1e09d831df6748d566095a10";
+        let other = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=Sintel Movie");
+        let rival = format!("magnet:?xt=urn:btih:{other}&dn=Sintel Movie");
+        assert_eq!(
+            claim_magnet_sub_folder(dir.path(), &magnet).unwrap(),
+            "Sintel_Movie"
+        );
+        assert_eq!(
+            folder_marker(&dir.path().join("Sintel_Movie")).as_deref(),
+            Some(hash)
+        );
+        assert_eq!(
+            claim_magnet_sub_folder(dir.path(), &rival).unwrap(),
+            "Sintel_Movie_aaaaaaaa"
+        );
+        assert_eq!(
+            claim_magnet_sub_folder(dir.path(), &magnet).unwrap(),
+            "Sintel_Movie"
+        );
+        assert_eq!(
+            magnet_sub_folder(dir.path(), &magnet).as_deref(),
+            Some("Sintel_Movie")
+        );
+        assert_eq!(
+            magnet_sub_folder(dir.path(), &rival).as_deref(),
+            Some("Sintel_Movie_aaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn magnet_folder_falls_back_to_info_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash = "08ada5a7a6183aae1e09d831df6748d566095a10";
+        let magnet = format!("magnet:?xt=urn:btih:{hash}");
+        assert_eq!(claim_magnet_sub_folder(dir.path(), &magnet).unwrap(), hash);
+        assert_eq!(
+            magnet_sub_folder(dir.path(), &magnet).as_deref(),
+            Some(hash)
+        );
     }
 }

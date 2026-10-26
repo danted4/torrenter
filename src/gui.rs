@@ -1,14 +1,18 @@
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Stroke, TextEdit, Vec2};
+use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextEdit, Vec2};
 
 use crate::http::{filename_from_url, start_url_download_reported};
 use crate::identity::{self, AppKind, VERSION_TAG};
+use crate::paths;
 use crate::progress::{format_eta, format_size, format_speed, is_stopped, JobSnapshot};
-use crate::torrent::{magnet_display_name, magnet_info_hash, start_download_reported};
+use crate::torrent::{
+    magnet_display_name, magnet_info_hash, magnet_sub_folder, start_download_reported,
+};
 use crate::update::{self, AvailableUpdate};
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -110,6 +114,7 @@ enum WorkerCmd {
         source: String,
         snapshot: Arc<JobSnapshot>,
         seed: bool,
+        dest: PathBuf,
     },
     Check,
     Install(AvailableUpdate),
@@ -135,6 +140,21 @@ struct Job {
     speed: f64,
     up_speed: f64,
     seed: bool,
+    dest: PathBuf,
+}
+
+struct Toast {
+    id: u64,
+    text: String,
+    fail: bool,
+    expires_at: Option<Instant>,
+}
+
+struct RestartDraft {
+    id: u64,
+    kind: Mode,
+    seed: bool,
+    dest: PathBuf,
 }
 
 struct GuiApp {
@@ -142,14 +162,16 @@ struct GuiApp {
     applied_theme: ThemeId,
     mode: Mode,
     input: String,
+    dest: PathBuf,
     jobs: Vec<Job>,
     next_id: u64,
     tx: Sender<WorkerCmd>,
     events: Receiver<WorkerEvent>,
     auto_update: bool,
     seed: bool,
-    update_note: String,
-    note_expires_at: Option<Instant>,
+    toasts: Vec<Toast>,
+    next_toast: u64,
+    restart: Option<RestartDraft>,
     pending: Option<AvailableUpdate>,
     banner_dismissed: bool,
     installed_tag: Option<String>,
@@ -180,24 +202,33 @@ impl GuiApp {
         let config = update::load_config();
         let auto_update = config.auto_update;
         let seed = config.seed;
+        let dest = paths::effective_dir(&config);
+        let launch_error = paths::ensure_dir(&dest)
+            .err()
+            .map(|error| format!("{error:#}"));
         let _ = cmd_tx.send(WorkerCmd::Check);
-        let app = Self {
+        let mut app = Self {
             theme: ThemeId::Phosphor,
             applied_theme: ThemeId::Phosphor,
             mode: Mode::Magnet,
             input: String::new(),
+            dest,
             jobs: Vec::new(),
             next_id: 1,
             tx: cmd_tx,
             events: event_rx,
             auto_update,
             seed,
-            update_note: String::new(),
-            note_expires_at: None,
+            toasts: Vec::new(),
+            next_toast: 1,
+            restart: None,
             pending: None,
             banner_dismissed: false,
             installed_tag: None,
         };
+        if let Some(error) = launch_error {
+            app.toast_fail(error);
+        }
         app.apply_theme(&cc.egui_ctx);
         app
     }
@@ -227,7 +258,7 @@ impl GuiApp {
     fn queue_job(&mut self) {
         let source = self.input.trim().to_string();
         if source.is_empty() {
-            self.set_note("paste a magnet or HTTP URL first");
+            self.toast_fail("paste a magnet or HTTP URL first");
             return;
         }
         let valid = match self.mode {
@@ -235,11 +266,11 @@ impl GuiApp {
             Mode::Http => is_valid_download_url(&source),
         };
         if !valid {
-            self.set_note(format!("invalid {} URL", self.mode.label().to_lowercase()));
+            self.toast_fail(format!("invalid {} URL", self.mode.label().to_lowercase()));
             return;
         }
         if let Some(note) = self.duplicate_active_note(self.mode, &source) {
-            self.set_note(note);
+            self.toast_fail(note);
             return;
         }
         let snapshot = Arc::new(JobSnapshot::default());
@@ -255,6 +286,7 @@ impl GuiApp {
         let id = self.next_id;
         self.next_id += 1;
         let seed = self.mode == Mode::Magnet && self.seed;
+        let dest = self.dest.clone();
         let job = Job {
             id,
             kind: self.mode,
@@ -267,6 +299,7 @@ impl GuiApp {
             speed: 0.0,
             up_speed: 0.0,
             seed,
+            dest: dest.clone(),
         };
         let _ = self.tx.send(WorkerCmd::Download {
             id,
@@ -274,20 +307,21 @@ impl GuiApp {
             source,
             snapshot,
             seed,
+            dest,
         });
         self.jobs.push(job);
         self.input.clear();
     }
 
-    fn restart_job(&mut self, index: usize, seed: bool) {
+    fn restart_job(&mut self, index: usize, seed: bool, dest: PathBuf) -> bool {
         let Some(job) = self.jobs.get(index) else {
-            return;
+            return false;
         };
         let kind = job.kind;
         let source = job.source.clone();
         if let Some(note) = self.duplicate_active_note(kind, &source) {
-            self.set_note(note);
-            return;
+            self.toast_fail(note);
+            return false;
         }
         let title = job.snapshot.title();
         let snapshot = Arc::new(JobSnapshot::default());
@@ -304,6 +338,7 @@ impl GuiApp {
             source: source.clone(),
             snapshot: Arc::clone(&snapshot),
             seed,
+            dest: dest.clone(),
         });
         self.jobs[index] = Job {
             id,
@@ -317,7 +352,9 @@ impl GuiApp {
             speed: 0.0,
             up_speed: 0.0,
             seed,
+            dest,
         };
+        true
     }
 
     fn duplicate_active_note(&self, kind: Mode, source: &str) -> Option<String> {
@@ -338,18 +375,95 @@ impl GuiApp {
         })
     }
 
-    fn set_note(&mut self, text: impl Into<String>) {
-        self.update_note = text.into();
-        self.note_expires_at = None;
+    fn toast_info(&mut self, text: impl Into<String>) {
+        self.push_toast(text.into(), false, Some(STATUS_HOLD));
     }
 
-    fn expire_note(&mut self) {
-        if self
-            .note_expires_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
+    fn toast_hold(&mut self, text: impl Into<String>) {
+        self.push_toast(text.into(), false, None);
+    }
+
+    fn toast_fail(&mut self, text: impl Into<String>) {
+        self.push_toast(text.into(), true, None);
+    }
+
+    fn push_toast(&mut self, text: String, fail: bool, hold: Option<Duration>) {
+        if text.is_empty() {
+            return;
+        }
+        let id = self.next_toast;
+        self.next_toast += 1;
+        self.toasts.push(Toast {
+            id,
+            text,
+            fail,
+            expires_at: hold.map(|duration| Instant::now() + duration),
+        });
+    }
+
+    fn expire_toasts(&mut self) {
+        let now = Instant::now();
+        self.toasts
+            .retain(|toast| toast.expires_at.is_none_or(|deadline| now < deadline));
+    }
+
+    fn replace_checking_toast(&mut self) {
+        if let Some(toast) = self
+            .toasts
+            .iter_mut()
+            .find(|toast| toast.text == CHECKING_UPDATES)
         {
-            self.update_note.clear();
-            self.note_expires_at = None;
+            toast.text = note_after_up_to_date(CHECKING_UPDATES)
+                .unwrap_or(NO_UPDATES)
+                .into();
+            toast.fail = false;
+            toast.expires_at = Some(Instant::now() + STATUS_HOLD);
+        } else {
+            self.toast_info(NO_UPDATES);
+        }
+    }
+
+    fn apply_picked_dir(&mut self, path: PathBuf, job_local: bool) {
+        let result = if job_local {
+            paths::persistable_dir(&path).inspect(|stored| {
+                if let Some(draft) = self.restart.as_mut() {
+                    draft.dest = stored.clone();
+                }
+            })
+        } else {
+            update::set_download_dir(&path).map(|config| {
+                let dest = paths::effective_dir(&config);
+                self.dest = dest.clone();
+                dest
+            })
+        };
+        if let Err(error) = result {
+            self.toast_fail(format!("{error:#}"));
+        }
+    }
+
+    fn pick_folder(start: &Path) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new().set_title("download folder");
+        if start.exists() {
+            dialog = dialog.set_directory(start);
+        } else if let Some(parent) = start.parent().filter(|path| path.exists()) {
+            dialog = dialog.set_directory(parent);
+        }
+        dialog.pick_folder()
+    }
+
+    fn reveal_path(&mut self, kind: Mode, source: &str, dest: &Path) {
+        let mut target = dest.to_path_buf();
+        if kind == Mode::Magnet {
+            if let Some(folder) = magnet_sub_folder(dest, source) {
+                let nested = dest.join(folder);
+                if nested.is_dir() {
+                    target = nested;
+                }
+            }
+        }
+        if let Err(error) = open::that(&target) {
+            self.toast_fail(format!("could not open folder: {error}"));
         }
     }
 
@@ -358,31 +472,32 @@ impl GuiApp {
             match event {
                 WorkerEvent::UpdateAvailable(update) => {
                     self.banner_dismissed = false;
+                    self.toasts.retain(|toast| toast.text != CHECKING_UPDATES);
                     if self.auto_update {
                         let _ = self.tx.send(WorkerCmd::Install(update.clone()));
-                        self.set_note(format!("installing {}…", update.tag));
-                    } else {
-                        self.set_note("");
+                        self.toast_hold(format!("installing {}…", update.tag));
                     }
                     self.pending = Some(update);
                 }
                 WorkerEvent::UpToDate => {
                     self.pending = None;
-                    if let Some(note) = note_after_up_to_date(&self.update_note) {
-                        self.update_note = note.into();
-                        self.note_expires_at = Some(Instant::now() + STATUS_HOLD);
-                    } else {
-                        self.set_note("");
+                    if self
+                        .toasts
+                        .iter()
+                        .any(|toast| toast.text == CHECKING_UPDATES)
+                    {
+                        self.replace_checking_toast();
                     }
                 }
                 WorkerEvent::UpdateFailed(error) => {
                     if self.auto_update {
-                        self.set_note(error);
+                        self.toast_fail(error);
                     }
                 }
                 WorkerEvent::Installed(tag) => {
                     self.pending = None;
-                    self.set_note("");
+                    self.toasts
+                        .retain(|toast| !toast.text.starts_with("installing "));
                     self.installed_tag = Some(tag);
                 }
                 WorkerEvent::DownloadFailed { id, error } => {
@@ -400,7 +515,7 @@ impl GuiApp {
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
-        self.expire_note();
+        self.expire_toasts();
         if self.applied_theme != self.theme {
             self.apply_theme(ctx);
             self.applied_theme = self.theme;
@@ -410,12 +525,9 @@ impl eframe::App for GuiApp {
 
         const CONTROLS_H: f32 = 28.0;
         const URL_H: f32 = 28.0;
-        const NOTE_PAD: f32 = 2.0;
-        const NOTE_SHIFT: f32 = 8.0;
-        let note_font = FontId::new(11.0, FontFamily::Monospace);
-        let note_line = ctx.fonts(|fonts| fonts.row_height(&note_font));
-        let note_h = note_line + NOTE_PAD * 2.0 + NOTE_SHIFT;
-        let header_h = 16.0 + CONTROLS_H + note_h + URL_H + 16.0;
+        const DEST_H: f32 = 22.0;
+        const GUTTER: f32 = 12.0;
+        let header_h = 16.0 + CONTROLS_H + GUTTER + URL_H + GUTTER + DEST_H + 16.0;
         egui::TopBottomPanel::top("header")
             .exact_height(header_h)
             .resizable(false)
@@ -454,9 +566,7 @@ impl eframe::App for GuiApp {
                                         let _ = update::set_auto_update(self.auto_update);
                                         if self.auto_update {
                                             let _ = self.tx.send(WorkerCmd::Check);
-                                            self.set_note(CHECKING_UPDATES);
-                                        } else {
-                                            self.set_note("");
+                                            self.toast_hold(CHECKING_UPDATES);
                                         }
                                     }
                                     ui.add_space(10.0);
@@ -486,18 +596,7 @@ impl eframe::App for GuiApp {
                         );
                     },
                 );
-                let (note_gap, _) =
-                    ui.allocate_exact_size(egui::vec2(width, note_h), egui::Sense::hover());
-                if !self.update_note.is_empty() {
-                    ui.allocate_new_ui(
-                        egui::UiBuilder::new()
-                            .max_rect(note_gap)
-                            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-                        |ui| {
-                            ui.label(mono(&self.update_note, 11.0, palette.dim));
-                        },
-                    );
-                }
+                ui.add_space(GUTTER);
                 let (url_row, _) =
                     ui.allocate_exact_size(egui::vec2(width, URL_H), egui::Sense::hover());
                 ui.allocate_new_ui(
@@ -563,6 +662,28 @@ impl eframe::App for GuiApp {
                                 && ui.input(|input| input.key_pressed(egui::Key::Enter)))
                         {
                             self.queue_job();
+                        }
+                    },
+                );
+                ui.add_space(GUTTER);
+                let (dest_row, _) =
+                    ui.allocate_exact_size(egui::vec2(width, DEST_H), egui::Sense::hover());
+                ui.allocate_new_ui(
+                    egui::UiBuilder::new()
+                        .max_rect(dest_row)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let folder = dest_glyph(ui, palette, true);
+                        let shown = truncate_middle(&self.dest.display().to_string(), 72);
+                        let path = click_cursor(ui.add(
+                            egui::Label::new(mono(shown, 12.0, palette.dim)).sense(Sense::click()),
+                        ))
+                        .on_hover_text(self.dest.display().to_string());
+                        if folder.clicked() || path.clicked() {
+                            if let Some(picked) = Self::pick_folder(&self.dest) {
+                                self.apply_picked_dir(picked, false);
+                            }
                         }
                     },
                 );
@@ -651,7 +772,7 @@ impl eframe::App for GuiApp {
                                                 let _ = self
                                                     .tx
                                                     .send(WorkerCmd::Install(available.clone()));
-                                                self.set_note("installing update…");
+                                                self.toast_hold("installing update…");
                                             }
                                         },
                                     );
@@ -671,9 +792,13 @@ impl eframe::App for GuiApp {
                     return;
                 }
                 let mut clear_index = None;
-                let mut restart_choice = None;
+                let mut open_restart = None;
+                let mut reveal = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (index, job) in self.jobs.iter_mut().enumerate() {
+                        if index > 0 {
+                            ui.add_space(8.0);
+                        }
                         let now = Instant::now();
                         let downloaded = job
                             .snapshot
@@ -732,7 +857,7 @@ impl eframe::App for GuiApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(mono(job.kind.label(), 13.0, palette.dim));
-                                    if job.kind == Mode::Magnet && job.snapshot.is_active() {
+                                    if job.kind == Mode::Magnet {
                                         ui.add_space(6.0);
                                         seed_glyph(ui, job.seed, true, false, false, palette);
                                     }
@@ -743,8 +868,17 @@ impl eframe::App for GuiApp {
                                     } else {
                                         truncate(&title, 64)
                                     };
-                                    ui.label(mono(shown, 13.0, accent))
-                                        .on_hover_text(&job.source);
+                                    if click_cursor(
+                                        ui.add(
+                                            egui::Label::new(mono(shown, 13.0, accent))
+                                                .sense(Sense::click()),
+                                        ),
+                                    )
+                                    .on_hover_text(&job.source)
+                                    .clicked()
+                                    {
+                                        reveal = Some(index);
+                                    }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -774,18 +908,13 @@ impl eframe::App for GuiApp {
                                                 {
                                                     clear_index = Some(index);
                                                 }
-                                                if job.kind == Mode::Magnet {
-                                                    if let Some(seed) =
-                                                        seed_toggle(ui, job.seed, palette, true)
-                                                    {
-                                                        restart_choice = Some((index, seed));
-                                                    }
-                                                } else if job.snapshot.is_stopped()
+                                                if (job.kind == Mode::Magnet
+                                                    || job.snapshot.is_stopped())
                                                     && ui
                                                         .button(mono("restart", 12.0, palette.fg))
                                                         .clicked()
                                                 {
-                                                    restart_choice = Some((index, false));
+                                                    open_restart = Some(index);
                                                 }
                                             }
                                         },
@@ -855,12 +984,159 @@ impl eframe::App for GuiApp {
                             });
                     }
                 });
-                if let Some((index, seed)) = restart_choice {
-                    self.restart_job(index, seed);
+                if let Some(index) = reveal {
+                    let reveal_job = self.jobs.get(index).map(|job| {
+                        (job.kind, job.source.clone(), job.dest.clone())
+                    });
+                    if let Some((kind, source, dest)) = reveal_job {
+                        self.reveal_path(kind, &source, &dest);
+                    }
+                }
+                if let Some(index) = open_restart {
+                    if let Some(job) = self.jobs.get(index) {
+                        self.restart = Some(RestartDraft {
+                            id: job.id,
+                            kind: job.kind,
+                            seed: job.seed,
+                            dest: job.dest.clone(),
+                        });
+                    }
                 } else if let Some(index) = clear_index {
+                    if self.restart.as_ref().is_some_and(|draft| {
+                        self.jobs.get(index).is_some_and(|job| job.id == draft.id)
+                    }) {
+                        self.restart = None;
+                    }
                     self.jobs.remove(index);
                 }
             });
+
+        self.show_restart_popup(ctx, palette);
+        self.show_toasts(ctx, palette);
+    }
+}
+
+impl GuiApp {
+    fn show_restart_popup(&mut self, ctx: &egui::Context, palette: Theme) {
+        let Some(draft) = self.restart.as_ref() else {
+            return;
+        };
+        if !self.jobs.iter().any(|job| job.id == draft.id) {
+            self.restart = None;
+            return;
+        }
+        let mut open = true;
+        let mut picked = None;
+        let mut start = false;
+        let mut seed = draft.seed;
+        let dest = draft.dest.clone();
+        let kind = draft.kind;
+        egui::Window::new("restart")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(420.0);
+                if kind == Mode::Magnet {
+                    ui.horizontal(|ui| {
+                        ui.label(mono("mode", 12.0, palette.dim));
+                        if let Some(value) = seed_toggle(ui, seed, palette, true) {
+                            seed = value;
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let folder = dest_glyph(ui, palette, true);
+                    let shown = truncate_middle(&dest.display().to_string(), 48);
+                    let path = click_cursor(ui.add(
+                        egui::Label::new(mono(shown, 12.0, palette.dim)).sense(Sense::click()),
+                    ))
+                    .on_hover_text(dest.display().to_string());
+                    if folder.clicked() || path.clicked() {
+                        picked = Self::pick_folder(&dest);
+                    }
+                });
+                ui.add_space(12.0);
+                if ui
+                    .add_sized(
+                        egui::vec2(80.0, 28.0),
+                        egui::Button::new(mono("START", 14.0, palette.fg)),
+                    )
+                    .clicked()
+                {
+                    start = true;
+                }
+            });
+        if let Some(draft) = self.restart.as_mut() {
+            draft.seed = seed;
+        }
+        if let Some(path) = picked {
+            self.apply_picked_dir(path, true);
+        }
+        if start {
+            let Some(draft) = self.restart.as_ref() else {
+                return;
+            };
+            let Some(index) = self.jobs.iter().position(|job| job.id == draft.id) else {
+                self.restart = None;
+                return;
+            };
+            let seed = draft.seed;
+            let dest = draft.dest.clone();
+            if self.restart_job(index, seed, dest) {
+                self.restart = None;
+            }
+        } else if !open {
+            self.restart = None;
+        }
+    }
+
+    fn show_toasts(&mut self, ctx: &egui::Context, palette: Theme) {
+        if self.toasts.is_empty() {
+            return;
+        }
+        let mut clicked = None;
+        egui::Area::new(egui::Id::new("toasts"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(360.0);
+                ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    for toast in self.toasts.iter().rev().take(5) {
+                        let fill = Color32::from_rgba_unmultiplied(
+                            palette.row.r(),
+                            palette.row.g(),
+                            palette.row.b(),
+                            230,
+                        );
+                        let color = if toast.fail {
+                            palette.fail
+                        } else {
+                            palette.dim
+                        };
+                        let response = egui::Frame::NONE
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0_f32, color))
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(360.0);
+                                ui.label(mono(&toast.text, 12.0, color));
+                            })
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if response.clicked() {
+                            clicked = Some(toast.id);
+                        }
+                    }
+                });
+            });
+        if let Some(id) = clicked {
+            self.toasts.retain(|toast| toast.id != id);
+        }
     }
 }
 
@@ -1168,6 +1444,55 @@ fn truncate(value: &str, max: usize) -> String {
     }
 }
 
+fn truncate_middle(value: &str, max: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max {
+        return value.to_string();
+    }
+    if max <= 1 {
+        return "…".into();
+    }
+    let keep = max - 1;
+    let left = keep / 2;
+    let right = keep - left;
+    format!(
+        "{}…{}",
+        chars[..left].iter().collect::<String>(),
+        chars[chars.len() - right..].iter().collect::<String>()
+    )
+}
+
+fn dest_glyph(ui: &mut egui::Ui, palette: Theme, clickable: bool) -> egui::Response {
+    let size = egui::vec2(16.0, 16.0);
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
+    paint_folder(ui.painter(), rect, palette.fg);
+    let response = if clickable {
+        click_cursor(response)
+    } else {
+        response.on_hover_cursor(egui::CursorIcon::Default)
+    };
+    response.on_hover_text("choose download folder")
+}
+
+fn paint_folder(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = Stroke::new(1.2_f32, color);
+    let tab = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 1.5, rect.top() + 3.0),
+        egui::pos2(rect.left() + 7.0, rect.top() + 6.5),
+    );
+    let body = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 1.5, rect.top() + 6.0),
+        egui::pos2(rect.right() - 1.5, rect.bottom() - 2.0),
+    );
+    painter.rect_stroke(tab, 1.0, stroke, egui::StrokeKind::Inside);
+    painter.rect_stroke(body, 1.2, stroke, egui::StrokeKind::Inside);
+}
+
 fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
@@ -1186,6 +1511,7 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     source,
                     snapshot,
                     seed,
+                    dest,
                 } => {
                     snapshot.set_status("queued");
                     let Ok(_permit) = limiter.acquire_owned().await else {
@@ -1197,8 +1523,10 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     }
                     snapshot.set_status("starting");
                     let result = match mode {
-                        Mode::Magnet => start_download_reported(&source, snapshot, seed).await,
-                        Mode::Http => start_url_download_reported(&source, snapshot).await,
+                        Mode::Magnet => {
+                            start_download_reported(&source, snapshot, seed, dest).await
+                        }
+                        Mode::Http => start_url_download_reported(&source, snapshot, dest).await,
                     };
                     if let Err(error) = result {
                         if !is_stopped(&error) {
@@ -1286,5 +1614,14 @@ mod tests {
         assert_eq!(note_after_up_to_date(""), None);
         assert_eq!(note_after_up_to_date("installing v3.0.3…"), None);
         assert_eq!(STATUS_HOLD, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn middle_truncation_keeps_ends() {
+        let value = truncate_middle("/Users/me/Downloads/torrenter/very-long-name", 16);
+        assert!(value.contains('…'));
+        assert!(value.starts_with("/U"));
+        assert!(value.ends_with("me"));
+        assert_eq!(value.chars().count(), 16);
     }
 }

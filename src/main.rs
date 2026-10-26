@@ -1,10 +1,12 @@
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use torrenter::http::start_url_download;
 use torrenter::identity::{banner, AppKind, VERSION_TAG};
+use torrenter::paths;
 use torrenter::torrent::start_download;
 use torrenter::update::{self, load_config};
 use torrenter::validate::{is_valid_download_url, is_valid_magnet_url};
@@ -33,9 +35,19 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Download a direct HTTP(S) URL with 4-part resume
-    Http { url: String },
+    Http {
+        url: String,
+        /// One-shot download folder (does not persist)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Download a magnet / torrent link
-    Magnet { uri: String },
+    Magnet {
+        uri: String,
+        /// One-shot download folder (does not persist)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Check GitHub and replace this binary if a newer release exists
     Update,
 }
@@ -66,13 +78,42 @@ async fn main() -> Result<()> {
 
     maybe_auto_update().await?;
     println!("{}", banner());
+    warn_ensure_dest();
 
     match cli.command {
-        Some(Command::Http { url }) => start_url_download(url.trim()).await,
-        Some(Command::Magnet { uri }) => start_download(uri.trim(), load_config().seed).await,
+        Some(Command::Http { url, dir }) => run_http(url.trim(), dir).await,
+        Some(Command::Magnet { uri, dir }) => run_magnet(uri.trim(), dir).await,
         Some(Command::Update) => unreachable!(),
         None => prompt_user().await,
     }
+}
+
+fn warn_ensure_dest() {
+    let dir = paths::effective_dir(&load_config());
+    if let Err(error) = paths::ensure_dir(&dir) {
+        eprintln!("download folder: {error:#}");
+    }
+}
+
+fn dest_for_run(override_dir: Option<PathBuf>) -> Result<PathBuf> {
+    let dest = match override_dir {
+        Some(path) => paths::resolve_user_dir(path)?,
+        None => paths::effective_dir(&load_config()),
+    };
+    paths::ensure_dir(&dest)?;
+    Ok(dest)
+}
+
+async fn run_http(url: &str, dir: Option<PathBuf>) -> Result<()> {
+    let dest = dest_for_run(dir)?;
+    println!("download: {}", dest.display());
+    start_url_download(url, dest).await
+}
+
+async fn run_magnet(uri: &str, dir: Option<PathBuf>) -> Result<()> {
+    let dest = dest_for_run(dir)?;
+    println!("download: {}", dest.display());
+    start_download(uri, load_config().seed, dest).await
 }
 
 async fn maybe_auto_update() -> Result<()> {
@@ -123,8 +164,10 @@ async fn prompt_user() -> Result<()> {
         let config = load_config();
         let auto = if config.auto_update { "on" } else { "off" };
         let seed = if config.seed { "on" } else { "off" };
+        let download = paths::effective_dir(&config);
         print!(
-            "\nauto-update: {auto}\nseed: {seed}\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n3. Toggle auto-update\n4. Update now\n5. Toggle seed\n\n"
+            "\nauto-update: {auto}\nseed: {seed}\ndownload: {}\nChoose download type:\n1. Magnet URL\n2. Direct URL (multi-part)\n3. Toggle auto-update\n4. Update now\n5. Toggle seed\n6. Change download folder\n\n",
+            download.display()
         );
         std::io::stdout().flush()?;
         let mut choice = String::new();
@@ -146,6 +189,23 @@ async fn prompt_user() -> Result<()> {
                 println!("seed: {}", if enabled { "on" } else { "off" });
                 continue;
             }
+            "6" => {
+                print!("\nDownload folder path:\n\n");
+                std::io::stdout().flush()?;
+                let mut path = String::new();
+                stdin.read_line(&mut path).await?;
+                let path = path.trim();
+                if path.is_empty() {
+                    continue;
+                }
+                match update::set_download_dir(path) {
+                    Ok(config) => {
+                        println!("download: {}", paths::effective_dir(&config).display());
+                    }
+                    Err(error) => eprintln!("{error:#}"),
+                }
+                continue;
+            }
             "4" => return run_update().await,
             "2" => {
                 print!("\nPlease paste the direct download URL:\n\n");
@@ -157,7 +217,7 @@ async fn prompt_user() -> Result<()> {
                     eprintln!("\nInvalid HTTP(S) URL! Try again ...");
                     continue;
                 }
-                return start_url_download(&url).await;
+                return run_http(&url, None).await;
             }
             _ => {
                 print!("\nPlease paste your magnetURI:\n\n");
@@ -169,7 +229,7 @@ async fn prompt_user() -> Result<()> {
                     eprintln!("\nInvalid magnet URL! Try again ...");
                     continue;
                 }
-                return start_download(&magnet, load_config().seed).await;
+                return run_magnet(&magnet, None).await;
             }
         }
     }
@@ -183,7 +243,29 @@ mod tests {
     fn parses_http_subcommand() {
         let cli = Cli::try_parse_from(["torrenter", "http", "https://example.com/a.bin"]).unwrap();
         match cli.command {
-            Some(Command::Http { url }) => assert_eq!(url, "https://example.com/a.bin"),
+            Some(Command::Http { url, dir }) => {
+                assert_eq!(url, "https://example.com/a.bin");
+                assert!(dir.is_none());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_http_dir_flag() {
+        let cli = Cli::try_parse_from([
+            "torrenter",
+            "http",
+            "https://example.com/a.bin",
+            "--dir",
+            "/tmp/out",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Http { url, dir }) => {
+                assert_eq!(url, "https://example.com/a.bin");
+                assert_eq!(dir, Some(PathBuf::from("/tmp/out")));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -193,7 +275,24 @@ mod tests {
         let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
         let cli = Cli::try_parse_from(["torrenter", "magnet", magnet]).unwrap();
         match cli.command {
-            Some(Command::Magnet { uri }) => assert_eq!(uri, magnet),
+            Some(Command::Magnet { uri, dir }) => {
+                assert_eq!(uri, magnet);
+                assert!(dir.is_none());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_magnet_dir_flag() {
+        let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
+        let cli =
+            Cli::try_parse_from(["torrenter", "magnet", magnet, "--dir", "/tmp/out"]).unwrap();
+        match cli.command {
+            Some(Command::Magnet { uri, dir }) => {
+                assert_eq!(uri, magnet);
+                assert_eq!(dir, Some(PathBuf::from("/tmp/out")));
+            }
             other => panic!("unexpected {other:?}"),
         }
     }

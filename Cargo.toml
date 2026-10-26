@@ -1,6 +1,6 @@
 [package]
 name = "torrenter"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 description = "CLI and native GUI: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
 license = "MIT"
@@ -11,17 +11,20 @@ rust-version = "1.85"
 
 [features]
 default = []
-gui = ["dep:eframe"]
+gui = ["dep:eframe", "dep:rfd", "dep:open"]
 
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 eframe = { version = "0.31", optional = true }
 futures-util = "0.3"
 indicatif = "0.17"
 librqbit = { version = "9", default-features = false, features = ["rust-tls", "disable-upload"] }
+open = { version = "5", optional = true }
 percent-encoding = "2"
+rfd = { version = "0.15", optional = true }
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "charset", "http2", "json"] }
 serde = { version = "1", features = ["derive"] }

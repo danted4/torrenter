@@ -26,6 +26,8 @@ pub struct AppConfig {
     pub auto_update: bool,
     #[serde(default = "default_true")]
     pub seed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<PathBuf>,
     #[serde(default)]
     pub release_etag: Option<String>,
     #[serde(default)]
@@ -43,6 +45,7 @@ impl Default for AppConfig {
         Self {
             auto_update: false,
             seed: true,
+            download_dir: None,
             release_etag: None,
             cached_tag: None,
             cached_asset_name: None,
@@ -548,6 +551,14 @@ pub fn set_seed(enabled: bool) -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn set_download_dir(path: impl AsRef<Path>) -> Result<AppConfig> {
+    let stored = crate::paths::persistable_dir(path)?;
+    let mut config = load_config();
+    config.download_dir = Some(stored);
+    save_config(&config)?;
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +588,21 @@ mod tests {
         let parsed: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(parsed.seed);
         assert!(!parsed.auto_update);
+        assert!(parsed.download_dir.is_none());
+    }
+
+    #[test]
+    fn download_dir_roundtrips() {
+        let config = AppConfig {
+            download_dir: Some(PathBuf::from("/tmp/torrenter-out")),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.download_dir.as_deref(),
+            Some(Path::new("/tmp/torrenter-out"))
+        );
     }
 
     #[test]

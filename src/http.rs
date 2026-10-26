@@ -21,7 +21,6 @@ use crate::progress::{
 };
 use crate::validate::is_valid_download_url;
 
-pub const DOWNLOAD_DIRECTORY: &str = "./downloads";
 pub const PART_COUNT: usize = 4;
 const RESUME_DIR_NAME: &str = ".resume";
 const MERGE_CHUNK: usize = 1024 * 1024;
@@ -32,10 +31,10 @@ pub struct DownloadLayout {
     pub part_count: usize,
 }
 
-impl Default for DownloadLayout {
-    fn default() -> Self {
+impl DownloadLayout {
+    pub fn in_dir(directory: PathBuf) -> Self {
         Self {
-            directory: PathBuf::from(DOWNLOAD_DIRECTORY),
+            directory,
             part_count: PART_COUNT,
         }
     }
@@ -66,15 +65,16 @@ struct RemoteMetadata {
     filename: String,
 }
 
-pub async fn start_url_download(download_url: &str) -> Result<()> {
-    start_url_download_in(download_url, DownloadLayout::default()).await
+pub async fn start_url_download(download_url: &str, dest: PathBuf) -> Result<()> {
+    start_url_download_in(download_url, DownloadLayout::in_dir(dest)).await
 }
 
 pub async fn start_url_download_reported(
     download_url: &str,
     snapshot: Arc<JobSnapshot>,
+    dest: PathBuf,
 ) -> Result<()> {
-    run_url_download(download_url, DownloadLayout::default(), Some(snapshot)).await
+    run_url_download(download_url, DownloadLayout::in_dir(dest), Some(snapshot)).await
 }
 
 pub async fn start_url_download_in(download_url: &str, layout: DownloadLayout) -> Result<()> {
@@ -985,7 +985,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_url() {
-        let err = start_url_download("ftp://example.com/file")
+        let err = start_url_download("ftp://example.com/file", PathBuf::from("."))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Invalid HTTP(S) URL"));
