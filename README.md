@@ -23,7 +23,7 @@ Output goes to `<OS Downloads>/torrenter` until you pick another folder. Runs on
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
 | **Parallelism** | piece picker | 4 byte-range parts |
-| **Resume** | librqbit on disk under `<dest>/<info-hash>/` | `<dest>/.resume/` part files |
+| **Resume** | librqbit on disk under `<dest>/<torrent-name>/` | `<dest>/.resume/` part files |
 | **Peers** | live count in the bar | `Peers: 0` |
 | **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |
@@ -93,7 +93,7 @@ torrenter update                 # install the latest matching CLI asset now
 
 While a download runs, type `1` then Enter to pause/resume, or `2` then Enter to stop. HTTP pause aborts the live Range body and continues from `<dest>/.resume/` on resume. Pause on a single-stream (no Range) download starts that GET over. Stop is honored during HEAD, range probe, part copy, and merge.
 
-Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. The OS may prompt for a firewall exception the first time a share-mode magnet runs. Each magnet writes into `<dest>/<info-hash>/` so two torrents with the same filenames do not clobber each other; overwrite is allowed only inside that folder so a retry can resume. Closing the CLI or GUI drops every seed.
+Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. The OS may prompt for a firewall exception the first time a share-mode magnet runs. Each magnet writes into `<dest>/<torrent-name>/` (whitespace becomes `_`) so two torrents with the same filenames do not clobber each other. If the magnet has no name, or that folder belongs to a different info-hash, the folder is the hash (or `name_hash`). Overwrite is allowed only inside that folder so a retry can resume. Closing the CLI or GUI drops every seed.
 
 Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torrenter update` always runs when you ask.
 
@@ -167,7 +167,7 @@ flowchart TD
     single --> httpDir
   end
 
-  magnetDir["dest/info-hash"]
+  magnetDir["dest/torrent-name"]
   httpDir["dest"]
   updater[GitHub Releases plus SHA256SUMS]
 ```

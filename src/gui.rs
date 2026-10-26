@@ -10,7 +10,9 @@ use crate::http::{filename_from_url, start_url_download_reported};
 use crate::identity::{self, AppKind, VERSION_TAG};
 use crate::paths;
 use crate::progress::{format_eta, format_size, format_speed, is_stopped, JobSnapshot};
-use crate::torrent::{magnet_display_name, magnet_info_hash, start_download_reported};
+use crate::torrent::{
+    magnet_display_name, magnet_info_hash, magnet_sub_folder, start_download_reported,
+};
 use crate::update::{self, AvailableUpdate};
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -453,8 +455,8 @@ impl GuiApp {
     fn reveal_path(&mut self, kind: Mode, source: &str, dest: &Path) {
         let mut target = dest.to_path_buf();
         if kind == Mode::Magnet {
-            if let Some(hash) = magnet_info_hash(source) {
-                let nested = dest.join(hash);
+            if let Some(folder) = magnet_sub_folder(dest, source) {
+                let nested = dest.join(folder);
                 if nested.is_dir() {
                     target = nested;
                 }
@@ -523,8 +525,9 @@ impl eframe::App for GuiApp {
 
         const CONTROLS_H: f32 = 28.0;
         const URL_H: f32 = 28.0;
-        const DEST_H: f32 = 28.0;
-        let header_h = 16.0 + CONTROLS_H + URL_H + 10.0 + DEST_H + 16.0;
+        const DEST_H: f32 = 22.0;
+        const GUTTER: f32 = 12.0;
+        let header_h = 16.0 + CONTROLS_H + GUTTER + URL_H + GUTTER + DEST_H + 16.0;
         egui::TopBottomPanel::top("header")
             .exact_height(header_h)
             .resizable(false)
@@ -593,6 +596,7 @@ impl eframe::App for GuiApp {
                         );
                     },
                 );
+                ui.add_space(GUTTER);
                 let (url_row, _) =
                     ui.allocate_exact_size(egui::vec2(width, URL_H), egui::Sense::hover());
                 ui.allocate_new_ui(
@@ -661,7 +665,7 @@ impl eframe::App for GuiApp {
                         }
                     },
                 );
-                ui.add_space(10.0);
+                ui.add_space(GUTTER);
                 let (dest_row, _) =
                     ui.allocate_exact_size(egui::vec2(width, DEST_H), egui::Sense::hover());
                 ui.allocate_new_ui(
@@ -792,6 +796,9 @@ impl eframe::App for GuiApp {
                 let mut reveal = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (index, job) in self.jobs.iter_mut().enumerate() {
+                        if index > 0 {
+                            ui.add_space(8.0);
+                        }
                         let now = Instant::now();
                         let downloaded = job
                             .snapshot
@@ -1097,32 +1104,35 @@ impl GuiApp {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
-                for toast in self.toasts.iter().rev().take(5) {
-                    let fill = Color32::from_rgba_unmultiplied(
-                        palette.row.r(),
-                        palette.row.g(),
-                        palette.row.b(),
-                        230,
-                    );
-                    let color = if toast.fail {
-                        palette.fail
-                    } else {
-                        palette.dim
-                    };
-                    let response = egui::Frame::NONE
-                        .fill(fill)
-                        .stroke(Stroke::new(1.0_f32, color))
-                        .inner_margin(egui::Margin::symmetric(10, 8))
-                        .show(ui, |ui| {
-                            ui.label(mono(&toast.text, 12.0, color));
-                        })
-                        .response
-                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if response.clicked() {
-                        clicked = Some(toast.id);
+                ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    for toast in self.toasts.iter().rev().take(5) {
+                        let fill = Color32::from_rgba_unmultiplied(
+                            palette.row.r(),
+                            palette.row.g(),
+                            palette.row.b(),
+                            230,
+                        );
+                        let color = if toast.fail {
+                            palette.fail
+                        } else {
+                            palette.dim
+                        };
+                        let response = egui::Frame::NONE
+                            .fill(fill)
+                            .stroke(Stroke::new(1.0_f32, color))
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_max_width(360.0);
+                                ui.label(mono(&toast.text, 12.0, color));
+                            })
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if response.clicked() {
+                            clicked = Some(toast.id);
+                        }
                     }
-                    ui.add_space(6.0);
-                }
+                });
             });
         if let Some(id) = clicked {
             self.toasts.retain(|toast| toast.id != id);

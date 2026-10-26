@@ -13,7 +13,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
-- Output no longer uses `./downloads`; magnets still isolate under `<dest>/<info-hash>/`
+- Output no longer uses `./downloads`; magnets isolate under `<dest>/<torrent-name>/` (spaces → `_`), falling back to the info-hash when the name is missing or collides
 - Idle magnet rows use **restart** (glyphs are last-mode indicators); HTTP stopped jobs use the same popup minus seed glyphs
 
 ## [3.1.0] - 2026-10-25
