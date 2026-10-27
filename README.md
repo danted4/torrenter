@@ -88,7 +88,7 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.2.2
+danted4/torrenter v3.2.3
 auto-update: off
 seed: on
 download: /Users/you/Downloads/torrenter
