@@ -7,6 +7,7 @@ All notable changes to this project are documented here.
 ### Added
 
 - GUI job search: filter downloading and finished rows by title, URL, folder, mode, or info-hash (`Esc` clears)
+- Dock / taskbar icon is a squircle with transparent corners (and is embedded in the Windows GUI `.exe` so pinning keeps the glyph)
 
 ## [3.2.0] - 2026-10-26
 

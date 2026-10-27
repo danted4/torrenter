@@ -66,7 +66,7 @@ After code changes, run the relevant `fmt` / `clippy` / `test` commands and fix 
 
 - rustfmt defaults (no `rustfmt.toml`). Match surrounding naming: `snake_case` functions, `SCREAMING_SNAKE` for module constants (`PART_COUNT`).
 - Keep public surfaces small. New engine entry points should follow existing pairs: `start_*` (CLI) and `start_*_reported` (GUI + `JobSnapshot`).
-- Feature-gate GUI-only modules the same way `src/lib.rs` does (`gui`, `icon`). The GUI binary stays a thin `main` that calls `torrenter::gui::run()`.
+- Feature-gate GUI-only modules the same way `src/lib.rs` does (`gui`, `icon`, `icon_raster`). The GUI binary stays a thin `main` that calls `torrenter::gui::run()`. On Windows, `build.rs` embeds the same glyph into the `.exe` so a pinned taskbar shortcut keeps the icon.
 - User-visible strings already used in tests and the README (`Invalid magnet URL!`, `Invalid HTTP(S) URL!`, banner format) should stay stable unless the change is intentional and tests/docs update together.
 - Version and asset names are derived from `CARGO_PKG_VERSION` and `identity::current_asset_name`. If you add a release target, update identity, README asset table, and `.github/workflows/release.yml` together.
 

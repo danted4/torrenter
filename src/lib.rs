@@ -10,3 +10,5 @@ pub mod validate;
 pub mod gui;
 #[cfg(feature = "gui")]
 pub mod icon;
+#[cfg(feature = "gui")]
+mod icon_raster;
