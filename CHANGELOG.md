@@ -8,6 +8,11 @@ All notable changes to this project are documented here.
 
 - GUI job search: filter downloading and finished rows by title, URL, folder, mode, or info-hash (`Esc` clears)
 - Dock / taskbar icon is a squircle with transparent corners (and is embedded in the Windows GUI `.exe` so pinning keeps the glyph)
+- macOS GitHub Releases also attach `torrenter-gui-*-apple-darwin.app.zip` (`torrenter.app` for Applications / Launchpad). The updater still uses the naked GUI Mach-O.
+
+### Changed
+
+- README Install documents the `.app.zip` drag-to-Applications path, macOS quarantine / Open Anyway, and Windows SmartScreen **Run anyway**
 
 ## [3.2.0] - 2026-10-26
 

@@ -85,6 +85,14 @@ jobs:
           fi
           cp "$cli_src" "dist/${{ matrix.cli_artifact }}"
           cp "$gui_src" "dist/${{ matrix.gui_artifact }}"
+      - name: Package macOS .app zip
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash scripts/macos-app.sh \
+            "dist/${{ matrix.gui_artifact }}" \
+            "${GITHUB_REF_NAME}" \
+            "dist/${{ matrix.gui_artifact }}.app.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.cli_artifact }}
@@ -94,6 +102,12 @@ jobs:
         with:
           name: ${{ matrix.gui_artifact }}
           path: dist/${{ matrix.gui_artifact }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ${{ matrix.gui_artifact }}.app.zip
+          path: dist/${{ matrix.gui_artifact }}.app.zip
           if-no-files-found: error
 
   publish:

@@ -42,6 +42,12 @@ mod tests {
         if let Some(name) = current_asset_name(AppKind::Cli) {
             assert!(name.starts_with("torrenter"));
             assert!(!name.starts_with("torrenter-gui"));
+            assert!(!name.contains(".app"));
+        }
+        if let Some(name) = current_asset_name(AppKind::Gui) {
+            assert!(name.starts_with("torrenter-gui"));
+            assert!(!name.contains(".app"));
+            assert!(!name.ends_with(".zip"));
         }
     }
 }

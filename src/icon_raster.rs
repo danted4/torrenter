@@ -1,4 +1,4 @@
-//! Shared dock / taskbar glyph: squircle plate + horseshoe magnet.
+// Shared dock / taskbar glyph: squircle plate + horseshoe magnet.
 
 const PLATE: [u8; 4] = [16, 16, 16, 255];
 const BODY: [u8; 4] = [110, 255, 110, 255];

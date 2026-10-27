@@ -11,4 +11,5 @@ pub mod gui;
 #[cfg(feature = "gui")]
 pub mod icon;
 #[cfg(feature = "gui")]
+/// Shared dock / taskbar glyph: squircle plate + horseshoe magnet.
 mod icon_raster;
