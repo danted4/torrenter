@@ -136,15 +136,97 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 pub fn cleanup_replaced_binary() {
     if let Ok(current) = std::env::current_exe() {
-        let old = old_binary_path(&current);
-        let _ = std::fs::remove_file(old);
+        for path in leftover_update_paths(&current) {
+            let _ = std::fs::remove_file(path);
+        }
     }
+}
+
+fn leftover_update_paths(current: &Path) -> Vec<PathBuf> {
+    let name = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("torrenter");
+    vec![
+        old_binary_path(current),
+        current.with_file_name(format!(".{name}.update")),
+        current.with_file_name(format!(".{name}.sha256sums")),
+    ]
 }
 
 fn old_binary_path(current: &Path) -> PathBuf {
     let mut name = current.file_name().unwrap_or_default().to_os_string();
     name.push(".old");
     current.with_file_name(name)
+}
+
+fn enclosing_app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    if macos.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    app.file_name()?
+        .to_str()?
+        .ends_with(".app")
+        .then(|| app.to_path_buf())
+}
+
+fn version_from_tag(tag: &str) -> &str {
+    tag.strip_prefix('v').unwrap_or(tag)
+}
+
+fn replace_plist_string(xml: &str, key: &str, value: &str) -> Result<String> {
+    let header = format!("<key>{key}</key>");
+    let Some(key_at) = xml.find(&header) else {
+        bail!("Info.plist has no {key}");
+    };
+    let after_key = key_at + header.len();
+    let rest = &xml[after_key..];
+    let Some(string_at) = rest.find("<string>") else {
+        bail!("Info.plist {key} has no string value");
+    };
+    if string_at > 80 {
+        bail!("Info.plist {key} is not followed by a string");
+    }
+    let value_at = after_key + string_at + "<string>".len();
+    let Some(end) = xml[value_at..].find("</string>") else {
+        bail!("Info.plist {key} string is unclosed");
+    };
+    Ok(format!(
+        "{}{value}{}",
+        &xml[..value_at],
+        &xml[value_at + end..]
+    ))
+}
+
+fn stamp_app_bundle(app: &Path, tag: &str) -> Result<()> {
+    let version = version_from_tag(tag);
+    let plist_path = app.join("Contents/Info.plist");
+    let xml = std::fs::read_to_string(&plist_path)
+        .with_context(|| format!("read {}", plist_path.display()))?;
+    let xml = replace_plist_string(&xml, "CFBundleShortVersionString", version)?;
+    let xml = replace_plist_string(&xml, "CFBundleVersion", version)?;
+    std::fs::write(&plist_path, xml).with_context(|| format!("write {}", plist_path.display()))?;
+    Ok(())
+}
+
+fn refresh_installed_app(exe: &Path, tag: &str) {
+    let Some(app) = enclosing_app_bundle(exe) else {
+        return;
+    };
+    let _ = stamp_app_bundle(&app, tag);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--deep", "-s", "-"])
+            .arg(&app)
+            .status();
+    }
 }
 
 fn update_client() -> Result<reqwest::Client> {
@@ -410,6 +492,7 @@ pub async fn install_update(update: &AvailableUpdate) -> Result<PathBuf> {
             std::fs::set_permissions(&tmp, permissions)?;
         }
         replace_executable(&current, &tmp)?;
+        refresh_installed_app(&current, &update.tag);
         Ok(current.clone())
     }
     .await;
@@ -694,5 +777,43 @@ bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *torrenter-gui-
         let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert!(hashes_match(hash, &hash.to_ascii_uppercase()));
         assert!(!hashes_match(hash, &hash.replace('0', "1")));
+    }
+
+    #[test]
+    fn leftover_paths_sit_beside_the_running_binary() {
+        let current = PathBuf::from("/Applications/torrenter.app/Contents/MacOS/torrenter-gui");
+        let leftovers = leftover_update_paths(&current);
+        assert!(leftovers
+            .iter()
+            .any(|path| path.ends_with("torrenter-gui.old")));
+        assert!(leftovers
+            .iter()
+            .any(|path| path.ends_with(".torrenter-gui.update")));
+        assert!(leftovers
+            .iter()
+            .any(|path| path.ends_with(".torrenter-gui.sha256sums")));
+    }
+
+    #[test]
+    fn app_bundle_is_the_shell_around_macos_binary() {
+        let exe = PathBuf::from("/Applications/torrenter.app/Contents/MacOS/torrenter-gui");
+        assert_eq!(
+            enclosing_app_bundle(&exe).as_deref(),
+            Some(Path::new("/Applications/torrenter.app"))
+        );
+        assert!(enclosing_app_bundle(Path::new("/tmp/torrenter-gui")).is_none());
+    }
+
+    #[test]
+    fn plist_version_strings_are_replaced() {
+        let xml = r#"<key>CFBundleShortVersionString</key>
+	<string>3.2.1</string>
+	<key>CFBundleVersion</key>
+	<string>3.2.1</string>"#;
+        let xml = replace_plist_string(xml, "CFBundleShortVersionString", "3.2.3").unwrap();
+        let xml = replace_plist_string(&xml, "CFBundleVersion", "3.2.3").unwrap();
+        assert!(xml.contains("<string>3.2.3</string>"));
+        assert!(!xml.contains("3.2.1"));
+        assert_eq!(version_from_tag("v3.2.3"), "3.2.3");
     }
 }

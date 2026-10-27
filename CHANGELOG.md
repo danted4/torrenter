@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.3] - 2026-10-27
+
+### Changed
+
+- macOS `.app.zip` packaging is a feature-gated Rust binary (`macos-app`) instead of `scripts/macos-app.sh`
+- In-app updates restamp `torrenter.app` `Info.plist` and ad-hoc codesign after replacing the inner binary; leftover `.old` / `.update` / `.sha256sums` files are removed on the next launch
+
 ## [3.2.2] - 2026-10-27
 
 ### Changed

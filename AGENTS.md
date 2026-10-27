@@ -10,6 +10,7 @@ Guidance for coding agents working on this repository. Human-facing install, usa
 |--------|------|---------|------|
 | `torrenter` | `src/main.rs` | default | Interactive CLI + `magnet` / `http` / `update` subcommands |
 | `torrenter-gui` | `src/bin/torrenter-gui.rs` | `gui` (`eframe` 0.31) | Native egui window (no HTML/CSS) |
+| `macos-app` | `src/bin/macos-app.rs` | `macos-app` | Release-only: wrap the GUI Mach-O in `torrenter.app` and zip it. Not a user-facing binary. |
 
 Both fronts call the same engines in `src/lib.rs`:
 
@@ -68,7 +69,7 @@ After code changes, run the relevant `fmt` / `clippy` / `test` commands and fix 
 - Keep public surfaces small. New engine entry points should follow existing pairs: `start_*` (CLI) and `start_*_reported` (GUI + `JobSnapshot`).
 - Feature-gate GUI-only modules the same way `src/lib.rs` does (`gui`, `icon`, `icon_raster`). The GUI binary stays a thin `main` that calls `torrenter::gui::run()`. On Windows, `build.rs` embeds the same glyph into the `.exe` so a pinned taskbar shortcut keeps the icon.
 - User-visible strings already used in tests and the README (`Invalid magnet URL!`, `Invalid HTTP(S) URL!`, banner format) should stay stable unless the change is intentional and tests/docs update together.
-- Version and asset names are derived from `CARGO_PKG_VERSION` and `identity::current_asset_name`. If you add an **updater** target, update identity, README asset table, and `.github/workflows/release.yml` together. macOS also zips `torrenter.app` via `scripts/macos-app.sh` as `torrenter-gui-*-apple-darwin.app.zip`; do **not** point `current_asset_name` at that zip.
+- Version and asset names are derived from `CARGO_PKG_VERSION` and `identity::current_asset_name`. If you add an **updater** target, update identity, README asset table, and `.github/workflows/release.yml` together. macOS also zips `torrenter.app` via `cargo run --features macos-app --bin macos-app` as `torrenter-gui-*-apple-darwin.app.zip`; do **not** point `current_asset_name` at that zip.
 
 ## Security considerations
 
