@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, T
 use crate::http::{filename_from_url, start_url_download_reported};
 use crate::identity::{self, AppKind, VERSION_TAG};
 use crate::paths;
-use crate::progress::{format_eta, format_size, format_speed, is_stopped, JobSnapshot};
+use crate::progress::{format_eta, format_size, format_speed, is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash, magnet_sub_folder, start_download_reported,
 };
@@ -106,6 +106,7 @@ const MAX_ACTIVE_DOWNLOADS: usize = 4;
 const CHECKING_UPDATES: &str = "checking for updates…";
 const NO_UPDATES: &str = "no updates found";
 const STATUS_HOLD: Duration = Duration::from_millis(1500);
+const FAIL_HOLD: Duration = Duration::from_secs(5);
 
 enum WorkerCmd {
     Download {
@@ -229,7 +230,7 @@ impl GuiApp {
             job_query: String::new(),
         };
         if let Some(error) = launch_error {
-            app.toast_fail(error);
+            app.toast_fatal(error);
         }
         app.apply_theme(&cc.egui_ctx);
         app
@@ -386,6 +387,10 @@ impl GuiApp {
     }
 
     fn toast_fail(&mut self, text: impl Into<String>) {
+        self.push_toast(text.into(), true, Some(FAIL_HOLD));
+    }
+
+    fn toast_fatal(&mut self, text: impl Into<String>) {
         self.push_toast(text.into(), true, None);
     }
 
@@ -393,6 +398,7 @@ impl GuiApp {
         if text.is_empty() {
             return;
         }
+        self.toasts.retain(|toast| toast.text != text);
         let id = self.next_toast;
         self.next_toast += 1;
         self.toasts.push(Toast {
@@ -493,7 +499,7 @@ impl GuiApp {
                 }
                 WorkerEvent::UpdateFailed(error) => {
                     if self.auto_update {
-                        self.toast_fail(error);
+                        self.toast_fatal(error);
                     }
                 }
                 WorkerEvent::Installed(tag) => {
@@ -928,7 +934,7 @@ impl eframe::App for GuiApp {
                                                     .button(mono("stop", 12.0, palette.fail))
                                                     .clicked()
                                                 {
-                                                    job.snapshot.request_stop();
+                                                    job.snapshot.mark_stopped();
                                                 }
                                                 let pause_label = if job.snapshot.is_paused() {
                                                     "resume"
@@ -1604,8 +1610,19 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
                     seed,
                     dest,
                 } => {
+                    if snapshot.should_stop() {
+                        snapshot.mark_stopped();
+                        return;
+                    }
                     snapshot.set_status("queued");
-                    let Ok(_permit) = limiter.acquire_owned().await else {
+                    let permit = tokio::select! {
+                        permit = limiter.acquire_owned() => permit.ok(),
+                        _ = until_stop(Some(snapshot.as_ref())) => {
+                            snapshot.mark_stopped();
+                            return;
+                        }
+                    };
+                    let Some(_permit) = permit else {
                         return;
                     };
                     if snapshot.should_stop() {
@@ -1705,6 +1722,7 @@ mod tests {
         assert_eq!(note_after_up_to_date(""), None);
         assert_eq!(note_after_up_to_date("installing v3.0.3…"), None);
         assert_eq!(STATUS_HOLD, Duration::from_millis(1500));
+        assert_eq!(FAIL_HOLD, Duration::from_secs(5));
     }
 
     #[test]

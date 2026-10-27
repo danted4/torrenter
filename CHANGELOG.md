@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [3.2.2] - 2026-10-27
+
+### Changed
+
+- GUI toasts: duplicate-job / validation errors auto-dismiss after 5 seconds (click still dismisses). In-progress update notes and dest/update fatals stay until replaced or clicked.
+- GUI **Stop** marks the row stopped immediately so **clear** (and **restart**) appear for queued or incomplete jobs, not only after a finished download.
+
 ## [3.2.1] - 2026-10-27
 
 ### Added
