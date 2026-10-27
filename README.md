@@ -67,7 +67,7 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.2.0
+danted4/torrenter v3.2.1
 auto-update: off
 seed: on
 download: /Users/you/Downloads/torrenter
@@ -99,7 +99,7 @@ Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torren
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast. The window must stay open to keep seeding.
+Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). A **search** field above the list filters jobs by title, URL, folder, MAGNET/HTTP, or info-hash (`Esc` clears). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast. The window must stay open to keep seeding.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS
