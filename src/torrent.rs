@@ -364,10 +364,10 @@ async fn run_torrent(
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 if let Err(error) = honor_control(progress.snapshot().map(Arc::as_ref)).await {
                     if is_stopped(&error) {
-                        let _ = session.pause(&handle).await;
                         if let Some(snapshot) = progress.snapshot() {
                             snapshot.mark_stopped();
                         }
+                        let _ = session.pause(&handle).await;
                         progress.finish_and_clear();
                         if progress.announce() {
                             println!("\nTorrent download stopped.");

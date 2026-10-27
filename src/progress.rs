@@ -173,7 +173,8 @@ impl JobSnapshot {
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.status() == "stopped"
+        self.finished.load(Ordering::Relaxed)
+            && (self.stop.load(Ordering::Relaxed) || self.status() == "stopped")
     }
 
     pub fn is_done(&self) -> bool {
@@ -568,8 +569,20 @@ mod tests {
         assert!(!snapshot.is_paused());
         snapshot.request_stop();
         assert!(snapshot.should_stop());
+        assert!(snapshot.is_active());
         snapshot.set_title("Sintel");
         assert_eq!(snapshot.title(), "Sintel");
+    }
+
+    #[test]
+    fn stop_makes_incomplete_jobs_inactive() {
+        let snapshot = JobSnapshot::default();
+        snapshot.set_status("downloading");
+        snapshot.mark_stopped();
+        assert!(!snapshot.is_active());
+        assert!(snapshot.is_stopped());
+        assert!(!snapshot.is_done());
+        assert_eq!(snapshot.status(), "stopped");
     }
 
     #[test]
