@@ -12,6 +12,7 @@ rust-version = "1.85"
 [features]
 default = []
 gui = ["dep:eframe", "dep:rfd", "dep:open"]
+macos-app = []
 
 [dependencies]
 anyhow = "1"
@@ -52,3 +53,8 @@ path = "src/main.rs"
 name = "torrenter-gui"
 path = "src/bin/torrenter-gui.rs"
 required-features = ["gui"]
+
+[[bin]]
+name = "macos-app"
+path = "src/bin/macos-app.rs"
+required-features = ["macos-app"]

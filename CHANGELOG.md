@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- macOS `.app.zip` packaging is a feature-gated Rust binary (`macos-app`) instead of `scripts/macos-app.sh`
+
 ## [3.2.2] - 2026-10-27
 
 ### Changed

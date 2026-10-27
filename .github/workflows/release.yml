@@ -89,7 +89,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          bash scripts/macos-app.sh \
+          cargo run --locked --release --features macos-app --bin macos-app -- \
             "dist/${{ matrix.gui_artifact }}" \
             "${GITHUB_REF_NAME}" \
             "dist/${{ matrix.gui_artifact }}.app.zip"
