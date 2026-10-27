@@ -39,11 +39,32 @@ Pre-built binaries and `SHA256SUMS` are on [GitHub Releases](https://github.com/
 | OS | CLI | GUI |
 |----|-----|-----|
 | Linux x86_64 | `torrenter-x86_64-unknown-linux-gnu` | `torrenter-gui-x86_64-unknown-linux-gnu` |
-| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` | `torrenter-gui-aarch64-apple-darwin` |
-| macOS Intel | `torrenter-x86_64-apple-darwin` | `torrenter-gui-x86_64-apple-darwin` |
+| macOS Apple Silicon | `torrenter-aarch64-apple-darwin` | `torrenter-gui-aarch64-apple-darwin` and `torrenter-gui-aarch64-apple-darwin.app.zip` |
+| macOS Intel | `torrenter-x86_64-apple-darwin` | `torrenter-gui-x86_64-apple-darwin` and `torrenter-gui-x86_64-apple-darwin.app.zip` |
 | Windows x86_64 | `torrenter-x86_64-pc-windows-msvc.exe` | `torrenter-gui-x86_64-pc-windows-msvc.exe` |
 
-On Unix: `chmod +x` the file and put it on your `PATH`. No Rust/Cargo needed at runtime.
+Releases are **unsigned**. The GUI updater still downloads the naked `torrenter-gui-*` Mach-O / `.exe` (CLI uses `torrenter-*`). The macOS `.app.zip` is extra packaging for Launchpad; it is not the updater asset.
+
+On Unix: `chmod +x` the CLI (and the naked GUI if you use it). Put the CLI on your `PATH` if you want. No Rust/Cargo needed at runtime.
+
+**macOS GUI (Launchpad).** Download `torrenter-gui-<arch>-apple-darwin.app.zip`, double-click to unzip **`torrenter.app`**, drag it to **Applications**. GitHub sets `com.apple.quarantine`:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/torrenter.app
+open /Applications/torrenter.app
+```
+
+If macOS still blocks it: right-click **torrenter** → **Open** → **Open**, or **System Settings → Privacy & Security** → **Open Anyway**. Spotlight and Launchpad list it after it sits in Applications.
+
+**macOS CLI / naked GUI.** Same quarantine on the Mach-O:
+
+```bash
+chmod +x torrenter-gui-aarch64-apple-darwin   # or the Intel / CLI name
+xattr -d com.apple.quarantine torrenter-gui-aarch64-apple-darwin
+./torrenter-gui-aarch64-apple-darwin
+```
+
+**Windows (SmartScreen).** Double-click the `.exe`. If **Windows protected your PC** appears: **More info** → **Run anyway**. Microsoft Defender may scan the first run. Share-mode magnets can prompt Windows Firewall for inbound TCP (allow if you want peers to connect). Pin-to-taskbar uses the icon baked into the `.exe` (v3.2.1+).
 
 Linux GUI needs GTK 3 and xcb at run time (`libgtk-3-0 libxkbcommon0 libxcb-render0 libxcb-shape0 libxcb-xfixes0` on Debian/Ubuntu). The CLI does not.
 
@@ -67,7 +88,7 @@ cargo build --release --features gui --bin torrenter-gui
 Interactive (no arguments):
 
 ```
-danted4/torrenter v3.2.0
+danted4/torrenter v3.2.1
 auto-update: off
 seed: on
 download: /Users/you/Downloads/torrenter
@@ -99,7 +120,7 @@ Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torren
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast. The window must stay open to keep seeding.
+Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). A **search** field above the list filters jobs by title, URL, folder, MAGNET/HTTP, or info-hash (`Esc` clears). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast. The window must stay open to keep seeding.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS
@@ -193,7 +214,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows (`--all-features` so the GUI compiles).
 
-Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `main`). That publishes CLI + GUI assets and `SHA256SUMS`. Doc-only changes on `main` do not need a tag.
+Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `main`). That publishes CLI + GUI binaries, macOS `torrenter-gui-*.app.zip`, and `SHA256SUMS`. Doc-only changes on `main` do not need a tag.
 
 ## Troubleshooting
 
@@ -208,6 +229,8 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | Resume not working (HTTP) | Same URL and same dest folder; state is in `<dest>/.resume/` |
 | Incomplete part | Server closed a Range early; retry the same URL |
 | Linux GUI missing GTK/xcb | Install GTK 3 and xcb (see Install) |
+| macOS “cannot be opened because it is from an unidentified developer” | `xattr -dr com.apple.quarantine` on `torrenter.app` or the Mach-O, then right-click **Open** or **Privacy & Security → Open Anyway** (see Install) |
+| Windows SmartScreen / “Windows protected your PC” | **More info → Run anyway**. Builds are unsigned; this is expected |
 | GUI says already downloading | Same magnet info-hash or HTTP URL is already active |
 | Auto-update did nothing in a script | Startup check is TTY-only; use `torrenter update` |
 | Update hash / URL refused | Asset must be this repo’s release for that tag, with a matching `SHA256SUMS` line |

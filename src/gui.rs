@@ -175,6 +175,7 @@ struct GuiApp {
     pending: Option<AvailableUpdate>,
     banner_dismissed: bool,
     installed_tag: Option<String>,
+    job_query: String,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -225,6 +226,7 @@ impl GuiApp {
             pending: None,
             banner_dismissed: false,
             installed_tag: None,
+            job_query: String::new(),
         };
         if let Some(error) = launch_error {
             app.toast_fail(error);
@@ -791,15 +793,73 @@ impl eframe::App for GuiApp {
                     });
                     return;
                 }
+                for job in &mut self.jobs {
+                    tick_job_rates(job);
+                }
+                const SEARCH_H: f32 = 28.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), SEARCH_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(mono("search", 12.0, palette.dim));
+                        let search_id = ui.make_persistent_id("job-search");
+                        let focused = ui.memory(|memory| memory.has_focus(search_id));
+                        let field_w = ui.available_width().max(160.0);
+                        let mut edit = TextEdit::singleline(&mut self.job_query)
+                            .id(search_id)
+                            .font(FontId::new(14.0, FontFamily::Monospace))
+                            .desired_width((field_w - 16.0).max(120.0))
+                            .margin(egui::Margin::symmetric(8, 5));
+                        if !focused {
+                            edit = edit.hint_text("title, URL, folder…");
+                        }
+                        let response = ui.allocate_ui_with_layout(
+                            egui::vec2(field_w, SEARCH_H),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let dim = Stroke::new(1.0_f32, palette.dim);
+                                let lit = Stroke::new(1.0_f32, palette.fg);
+                                ui.visuals_mut().widgets.inactive.bg_stroke = dim;
+                                ui.visuals_mut().widgets.hovered.bg_stroke = lit;
+                                ui.visuals_mut().widgets.active.bg_stroke = lit;
+                                ui.visuals_mut().widgets.open.bg_stroke = lit;
+                                ui.visuals_mut().widgets.hovered.expansion = 0.0;
+                                ui.visuals_mut().widgets.active.expansion = 0.0;
+                                ui.visuals_mut().widgets.open.expansion = 0.0;
+                                ui.add(edit)
+                            },
+                        );
+                        if response.inner.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Escape))
+                        {
+                            self.job_query.clear();
+                        }
+                    },
+                );
+                ui.add_space(8.0);
+                let visible: Vec<usize> = self
+                    .jobs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, job)| job_matches(job, &self.job_query))
+                    .map(|(index, _)| index)
+                    .collect();
+                if visible.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(mono("no jobs match that search", 14.0, palette.dim));
+                    });
+                    return;
+                }
                 let mut clear_index = None;
                 let mut open_restart = None;
                 let mut reveal = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (index, job) in self.jobs.iter_mut().enumerate() {
-                        if index > 0 {
+                    for (stripe, index) in visible.into_iter().enumerate() {
+                        if stripe > 0 {
                             ui.add_space(8.0);
                         }
-                        let now = Instant::now();
+                        let job = &mut self.jobs[index];
                         let downloaded = job
                             .snapshot
                             .downloaded
@@ -808,26 +868,6 @@ impl eframe::App for GuiApp {
                             .snapshot
                             .uploaded
                             .load(std::sync::atomic::Ordering::Relaxed);
-                        let engine_up = job
-                            .snapshot
-                            .upload_bps
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            as f64;
-                        let elapsed = now.saturating_duration_since(job.last_check).as_secs_f64();
-                        if elapsed >= 0.4 {
-                            job.speed =
-                                (downloaded.saturating_sub(job.last_bytes) as f64) / elapsed;
-                            job.up_speed = if engine_up > 0.0 {
-                                engine_up
-                            } else {
-                                (uploaded.saturating_sub(job.last_uploaded) as f64) / elapsed
-                            };
-                            job.last_bytes = downloaded;
-                            job.last_uploaded = uploaded;
-                            job.last_check = now;
-                        } else if engine_up > 0.0 {
-                            job.up_speed = engine_up;
-                        }
                         let total = job
                             .snapshot
                             .total
@@ -840,7 +880,7 @@ impl eframe::App for GuiApp {
                             .snapshot
                             .error()
                             .unwrap_or_else(|| job.snapshot.status());
-                        let fill = if index % 2 == 0 {
+                        let fill = if stripe % 2 == 0 {
                             palette.row
                         } else {
                             palette.row_alt
@@ -1435,6 +1475,57 @@ fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
+fn tick_job_rates(job: &mut Job) {
+    let now = Instant::now();
+    let downloaded = job
+        .snapshot
+        .downloaded
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let uploaded = job
+        .snapshot
+        .uploaded
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let engine_up = job
+        .snapshot
+        .upload_bps
+        .load(std::sync::atomic::Ordering::Relaxed) as f64;
+    let elapsed = now.saturating_duration_since(job.last_check).as_secs_f64();
+    if elapsed >= 0.4 {
+        job.speed = (downloaded.saturating_sub(job.last_bytes) as f64) / elapsed;
+        job.up_speed = if engine_up > 0.0 {
+            engine_up
+        } else {
+            (uploaded.saturating_sub(job.last_uploaded) as f64) / elapsed
+        };
+        job.last_bytes = downloaded;
+        job.last_uploaded = uploaded;
+        job.last_check = now;
+    } else if engine_up > 0.0 {
+        job.up_speed = engine_up;
+    }
+}
+
+fn job_matches(job: &Job, query: &str) -> bool {
+    let needle = query.trim();
+    if needle.is_empty() {
+        return true;
+    }
+    let needle = needle.to_lowercase();
+    let mut hay = vec![
+        job.kind.label().to_string(),
+        job.source.clone(),
+        job.snapshot.title(),
+        job.dest.display().to_string(),
+        job.added.clone(),
+        job.snapshot.status(),
+    ];
+    if let Some(hash) = magnet_info_hash(&job.source) {
+        hay.push(hash);
+    }
+    hay.iter()
+        .any(|field| field.to_lowercase().contains(&needle))
+}
+
 fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         value.to_string()
@@ -1623,5 +1714,41 @@ mod tests {
         assert!(value.starts_with("/U"));
         assert!(value.ends_with("me"));
         assert_eq!(value.chars().count(), 16);
+    }
+
+    fn sample_job(title: &str, source: &str, dest: &str) -> Job {
+        let snapshot = Arc::new(JobSnapshot::default());
+        snapshot.set_title(title);
+        Job {
+            id: 1,
+            kind: Mode::Http,
+            source: source.into(),
+            snapshot,
+            added: "2026-10-27".into(),
+            last_bytes: 0,
+            last_uploaded: 0,
+            last_check: Instant::now(),
+            speed: 0.0,
+            up_speed: 0.0,
+            seed: false,
+            dest: PathBuf::from(dest),
+        }
+    }
+
+    #[test]
+    fn empty_search_matches_every_job() {
+        let job = sample_job("Sintel", "https://example.com/sintel.mkv", "/tmp/sintel");
+        assert!(job_matches(&job, ""));
+        assert!(job_matches(&job, "   "));
+    }
+
+    #[test]
+    fn search_matches_title_url_and_folder() {
+        let job = sample_job("Sintel", "https://example.com/sintel.mkv", "/tmp/films");
+        assert!(job_matches(&job, "sintel"));
+        assert!(job_matches(&job, "EXAMPLE.COM"));
+        assert!(job_matches(&job, "films"));
+        assert!(job_matches(&job, "http"));
+        assert!(!job_matches(&job, "ubuntu"));
     }
 }
