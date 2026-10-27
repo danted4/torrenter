@@ -796,33 +796,47 @@ impl eframe::App for GuiApp {
                 for job in &mut self.jobs {
                     tick_job_rates(job);
                 }
-                let search_h = 28.0_f32;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(mono("search", 12.0, palette.dim));
-                    let search_id = ui.make_persistent_id("job-search");
-                    let focused = ui.memory(|memory| memory.has_focus(search_id));
-                    let mut edit = TextEdit::singleline(&mut self.job_query)
-                        .id(search_id)
-                        .font(FontId::new(13.0, FontFamily::Monospace))
-                        .desired_width(ui.available_width().max(160.0))
-                        .margin(egui::Margin::symmetric(8, 4));
-                    if !focused {
-                        edit = edit.hint_text("title, URL, folder…");
-                    }
-                    let dim = Stroke::new(1.0_f32, palette.dim);
-                    let lit = Stroke::new(1.0_f32, palette.fg);
-                    ui.visuals_mut().widgets.inactive.bg_stroke = dim;
-                    ui.visuals_mut().widgets.hovered.bg_stroke = lit;
-                    ui.visuals_mut().widgets.active.bg_stroke = lit;
-                    ui.visuals_mut().widgets.open.bg_stroke = lit;
-                    let response = ui.add_sized(egui::vec2(ui.available_width(), search_h), edit);
-                    if response.has_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Escape))
-                    {
-                        self.job_query.clear();
-                    }
-                });
+                const SEARCH_H: f32 = 28.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), SEARCH_H),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(mono("search", 12.0, palette.dim));
+                        let search_id = ui.make_persistent_id("job-search");
+                        let focused = ui.memory(|memory| memory.has_focus(search_id));
+                        let field_w = ui.available_width().max(160.0);
+                        let mut edit = TextEdit::singleline(&mut self.job_query)
+                            .id(search_id)
+                            .font(FontId::new(14.0, FontFamily::Monospace))
+                            .desired_width((field_w - 16.0).max(120.0))
+                            .margin(egui::Margin::symmetric(8, 5));
+                        if !focused {
+                            edit = edit.hint_text("title, URL, folder…");
+                        }
+                        let response = ui.allocate_ui_with_layout(
+                            egui::vec2(field_w, SEARCH_H),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let dim = Stroke::new(1.0_f32, palette.dim);
+                                let lit = Stroke::new(1.0_f32, palette.fg);
+                                ui.visuals_mut().widgets.inactive.bg_stroke = dim;
+                                ui.visuals_mut().widgets.hovered.bg_stroke = lit;
+                                ui.visuals_mut().widgets.active.bg_stroke = lit;
+                                ui.visuals_mut().widgets.open.bg_stroke = lit;
+                                ui.visuals_mut().widgets.hovered.expansion = 0.0;
+                                ui.visuals_mut().widgets.active.expansion = 0.0;
+                                ui.visuals_mut().widgets.open.expansion = 0.0;
+                                ui.add(edit)
+                            },
+                        );
+                        if response.inner.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Escape))
+                        {
+                            self.job_query.clear();
+                        }
+                    },
+                );
                 ui.add_space(8.0);
                 let visible: Vec<usize> = self
                     .jobs
