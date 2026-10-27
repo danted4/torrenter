@@ -1252,13 +1252,23 @@ mod tests {
         );
 
         let key = resume_key(&url);
-        let part0 = fs::metadata(part_path(&download_layout, &key, 0))
-            .await
-            .unwrap()
-            .len();
+        // Any of the 4 parts can be the first to see the short 206 and abort the rest,
+        // so part-0 may not exist yet (Windows CI often loses that race).
+        let mut found_short = false;
+        for index in 0..PART_COUNT {
+            let Ok(meta) = fs::metadata(part_path(&download_layout, &key, index)).await else {
+                continue;
+            };
+            assert!(
+                meta.len() < 64,
+                "part should not be zero-padded to expected size, index={index} len={}",
+                meta.len()
+            );
+            found_short = true;
+        }
         assert!(
-            part0 < 64,
-            "part should not be zero-padded to expected size, len={part0}"
+            found_short,
+            "expected at least one short part file after the incomplete 206"
         );
     }
 
