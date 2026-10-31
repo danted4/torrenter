@@ -20,12 +20,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_theme() -> String {
+    "phosphor".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     #[serde(default)]
     pub auto_update: bool,
     #[serde(default = "default_true")]
     pub seed: bool,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<PathBuf>,
     #[serde(default)]
@@ -45,6 +51,7 @@ impl Default for AppConfig {
         Self {
             auto_update: false,
             seed: true,
+            theme: default_theme(),
             download_dir: None,
             release_etag: None,
             cached_tag: None,
@@ -349,6 +356,12 @@ fn remember_release(
     }
 }
 
+fn persist_release_cache(etag: Option<String>, update: Option<&AvailableUpdate>) {
+    let mut config = load_config();
+    remember_release(&mut config, etag, update);
+    let _ = save_config(&config);
+}
+
 fn header_etag(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get(reqwest::header::ETAG)
@@ -374,7 +387,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         bail!("no GitHub asset name for this OS/architecture");
     };
     let client = update_client()?;
-    let mut config = load_config();
+    let config = load_config();
     let mut request = client
         .get(LATEST_URL)
         .header("Accept", "application/vnd.github+json");
@@ -403,8 +416,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         .context("failed to parse GitHub release JSON")?;
 
     if !is_newer(&release.tag_name, VERSION) {
-        remember_release(&mut config, etag, None);
-        let _ = save_config(&config);
+        persist_release_cache(etag, None);
         return Ok(None);
     }
     let checksums = release
@@ -432,8 +444,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         url: asset.browser_download_url.clone(),
         checksums_url: checksums.browser_download_url.clone(),
     };
-    remember_release(&mut config, etag, Some(&update));
-    let _ = save_config(&config);
+    persist_release_cache(etag, Some(&update));
     Ok(Some(update))
 }
 
@@ -634,6 +645,21 @@ pub fn set_seed(enabled: bool) -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn normalize_theme(name: &str) -> &'static str {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "amber" => "amber",
+        "ice" => "ice",
+        _ => "phosphor",
+    }
+}
+
+pub fn set_theme(theme: impl AsRef<str>) -> Result<AppConfig> {
+    let mut config = load_config();
+    config.theme = normalize_theme(theme.as_ref()).to_string();
+    save_config(&config)?;
+    Ok(config)
+}
+
 pub fn set_download_dir(path: impl AsRef<Path>) -> Result<AppConfig> {
     let stored = crate::paths::persistable_dir(path)?;
     let mut config = load_config();
@@ -671,7 +697,54 @@ mod tests {
         let parsed: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(parsed.seed);
         assert!(!parsed.auto_update);
+        assert_eq!(parsed.theme, "phosphor");
         assert!(parsed.download_dir.is_none());
+    }
+
+    #[test]
+    fn release_cache_reload_keeps_theme_and_other_prefs() {
+        let mut stale = AppConfig {
+            theme: "phosphor".into(),
+            auto_update: false,
+            ..AppConfig::default()
+        };
+        remember_release(&mut stale, Some("W/\"new\"".into()), None);
+        assert_eq!(stale.theme, "phosphor");
+
+        let mut disk = AppConfig {
+            theme: "ice".into(),
+            auto_update: true,
+            seed: false,
+            download_dir: Some(PathBuf::from("/tmp/torrenter-out")),
+            ..AppConfig::default()
+        };
+        remember_release(&mut disk, Some("W/\"new\"".into()), None);
+        assert_eq!(disk.theme, "ice");
+        assert!(disk.auto_update);
+        assert!(!disk.seed);
+        assert_eq!(
+            disk.download_dir.as_deref(),
+            Some(Path::new("/tmp/torrenter-out"))
+        );
+        assert_eq!(disk.release_etag.as_deref(), Some("W/\"new\""));
+        assert!(disk.cached_tag.is_none());
+    }
+
+    #[test]
+    fn theme_roundtrips_and_unknown_falls_back() {
+        let config = AppConfig {
+            theme: "amber".into(),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.theme, "amber");
+        assert_eq!(normalize_theme("Ice"), "ice");
+        assert_eq!(normalize_theme("  AMBER "), "amber");
+        assert_eq!(normalize_theme("nope"), "phosphor");
+        assert_eq!(normalize_theme(""), "phosphor");
+        let parsed: AppConfig = serde_json::from_str(r#"{"theme":"ice"}"#).unwrap();
+        assert_eq!(normalize_theme(&parsed.theme), "ice");
     }
 
     #[test]

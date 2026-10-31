@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [3.3.0] - 2026-10-31
+
+### Added
+
+- GUI theme (phosphor / amber / ice) is stored in `config.json` and restored on the next launch; missing or unknown values stay phosphor
+
 ## [3.2.3] - 2026-10-27
 
 ### Changed

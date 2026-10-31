@@ -23,6 +23,24 @@ enum ThemeId {
     Ice,
 }
 
+impl ThemeId {
+    fn from_config(name: &str) -> Self {
+        match update::normalize_theme(name) {
+            "amber" => Self::Amber,
+            "ice" => Self::Ice,
+            _ => Self::Phosphor,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Phosphor => "phosphor",
+            Self::Amber => "amber",
+            Self::Ice => "ice",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Theme {
     bg: Color32,
@@ -204,14 +222,15 @@ impl GuiApp {
         let config = update::load_config();
         let auto_update = config.auto_update;
         let seed = config.seed;
+        let theme = ThemeId::from_config(&config.theme);
         let dest = paths::effective_dir(&config);
         let launch_error = paths::ensure_dir(&dest)
             .err()
             .map(|error| format!("{error:#}"));
         let _ = cmd_tx.send(WorkerCmd::Check);
         let mut app = Self {
-            theme: ThemeId::Phosphor,
-            applied_theme: ThemeId::Phosphor,
+            theme,
+            applied_theme: theme,
             mode: Mode::Magnet,
             input: String::new(),
             dest,
@@ -592,8 +611,10 @@ impl eframe::App for GuiApp {
                                                 name,
                                             )
                                             .clicked()
+                                                && self.theme != id
                                             {
                                                 self.theme = id;
+                                                let _ = update::set_theme(id.as_str());
                                             }
                                         }
                                     });
@@ -1680,6 +1701,14 @@ mod tests {
         let c = theme(ThemeId::Ice).fg;
         assert_ne!(a, b);
         assert_ne!(b, c);
+    }
+
+    #[test]
+    fn theme_id_maps_config_names() {
+        assert_eq!(ThemeId::from_config("amber").as_str(), "amber");
+        assert_eq!(ThemeId::from_config("ICE").as_str(), "ice");
+        assert_eq!(ThemeId::from_config("").as_str(), "phosphor");
+        assert_eq!(ThemeId::from_config("unknown").as_str(), "phosphor");
     }
 
     #[test]
