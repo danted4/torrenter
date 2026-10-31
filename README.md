@@ -120,7 +120,7 @@ Startup auto-update is skipped when stdin is not a TTY (scripts, pipes). `torren
 
 ### GUI
 
-Same engines, phosphor / amber / ice themes, magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. **Stop** immediately shows **clear** (and **restart**), including queued or incomplete magnets — not only after 100%. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). A **search** field above the list filters jobs by title, URL, folder, MAGNET/HTTP, or info-hash (`Esc` clears). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast (info ~1.5s, errors 5s, click to dismiss; in-progress “checking/installing” and dest/update fatals stay until replaced or clicked). The window must stay open to keep seeding.
+Same engines, phosphor / amber / ice themes (last pick is saved in config), magnet/HTTP swap on the URL row, share/leech glyphs (halo vs horns) between the URL field and START (faded and inactive in HTTP mode), dest path under the URL row, pause / stop / clear per row. **Stop** immediately shows **clear** (and **restart**), including queued or incomplete magnets — not only after 100%. Click a job title to open that job’s folder. Idle magnet and stopped HTTP rows use **restart**, which opens a confirm popup (original mode and dest; START begins the job). A **search** field above the list filters jobs by title, URL, folder, MAGNET/HTTP, or info-hash (`Esc` clears). Auto-update checkbox. Update-check notes and folder errors land in a bottom-right toast (info ~1.5s, errors 5s, click to dismiss; in-progress “checking/installing” and dest/update fatals stay until replaced or clicked). The window must stay open to keep seeding.
 
 ```bash
 ./torrenter-gui-aarch64-apple-darwin    # or the asset for your OS
@@ -202,7 +202,7 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - GUI concurrent jobs: 4
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP and updater timeouts: 20s connect, 60s between reads
-- Auto-update, magnet seed, and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. Missing `download_dir` keeps following the live OS Downloads path.
+- Auto-update, magnet seed, GUI `theme`, and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. `theme` is `phosphor`, `amber`, or `ice` (default phosphor). Missing `download_dir` keeps following the live OS Downloads path.
 
 ## Development
 

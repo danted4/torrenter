@@ -20,12 +20,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_theme() -> String {
+    "phosphor".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppConfig {
     #[serde(default)]
     pub auto_update: bool,
     #[serde(default = "default_true")]
     pub seed: bool,
+    #[serde(default = "default_theme")]
+    pub theme: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_dir: Option<PathBuf>,
     #[serde(default)]
@@ -45,6 +51,7 @@ impl Default for AppConfig {
         Self {
             auto_update: false,
             seed: true,
+            theme: default_theme(),
             download_dir: None,
             release_etag: None,
             cached_tag: None,
@@ -634,6 +641,21 @@ pub fn set_seed(enabled: bool) -> Result<AppConfig> {
     Ok(config)
 }
 
+pub fn normalize_theme(name: &str) -> &'static str {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "amber" => "amber",
+        "ice" => "ice",
+        _ => "phosphor",
+    }
+}
+
+pub fn set_theme(theme: impl AsRef<str>) -> Result<AppConfig> {
+    let mut config = load_config();
+    config.theme = normalize_theme(theme.as_ref()).to_string();
+    save_config(&config)?;
+    Ok(config)
+}
+
 pub fn set_download_dir(path: impl AsRef<Path>) -> Result<AppConfig> {
     let stored = crate::paths::persistable_dir(path)?;
     let mut config = load_config();
@@ -671,7 +693,25 @@ mod tests {
         let parsed: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(parsed.seed);
         assert!(!parsed.auto_update);
+        assert_eq!(parsed.theme, "phosphor");
         assert!(parsed.download_dir.is_none());
+    }
+
+    #[test]
+    fn theme_roundtrips_and_unknown_falls_back() {
+        let config = AppConfig {
+            theme: "amber".into(),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.theme, "amber");
+        assert_eq!(normalize_theme("Ice"), "ice");
+        assert_eq!(normalize_theme("  AMBER "), "amber");
+        assert_eq!(normalize_theme("nope"), "phosphor");
+        assert_eq!(normalize_theme(""), "phosphor");
+        let parsed: AppConfig = serde_json::from_str(r#"{"theme":"ice"}"#).unwrap();
+        assert_eq!(normalize_theme(&parsed.theme), "ice");
     }
 
     #[test]
