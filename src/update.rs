@@ -356,6 +356,12 @@ fn remember_release(
     }
 }
 
+fn persist_release_cache(etag: Option<String>, update: Option<&AvailableUpdate>) {
+    let mut config = load_config();
+    remember_release(&mut config, etag, update);
+    let _ = save_config(&config);
+}
+
 fn header_etag(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get(reqwest::header::ETAG)
@@ -381,7 +387,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         bail!("no GitHub asset name for this OS/architecture");
     };
     let client = update_client()?;
-    let mut config = load_config();
+    let config = load_config();
     let mut request = client
         .get(LATEST_URL)
         .header("Accept", "application/vnd.github+json");
@@ -410,8 +416,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         .context("failed to parse GitHub release JSON")?;
 
     if !is_newer(&release.tag_name, VERSION) {
-        remember_release(&mut config, etag, None);
-        let _ = save_config(&config);
+        persist_release_cache(etag, None);
         return Ok(None);
     }
     let checksums = release
@@ -439,8 +444,7 @@ pub async fn check_latest(kind: AppKind) -> Result<Option<AvailableUpdate>> {
         url: asset.browser_download_url.clone(),
         checksums_url: checksums.browser_download_url.clone(),
     };
-    remember_release(&mut config, etag, Some(&update));
-    let _ = save_config(&config);
+    persist_release_cache(etag, Some(&update));
     Ok(Some(update))
 }
 
@@ -695,6 +699,35 @@ mod tests {
         assert!(!parsed.auto_update);
         assert_eq!(parsed.theme, "phosphor");
         assert!(parsed.download_dir.is_none());
+    }
+
+    #[test]
+    fn release_cache_reload_keeps_theme_and_other_prefs() {
+        let mut stale = AppConfig {
+            theme: "phosphor".into(),
+            auto_update: false,
+            ..AppConfig::default()
+        };
+        remember_release(&mut stale, Some("W/\"new\"".into()), None);
+        assert_eq!(stale.theme, "phosphor");
+
+        let mut disk = AppConfig {
+            theme: "ice".into(),
+            auto_update: true,
+            seed: false,
+            download_dir: Some(PathBuf::from("/tmp/torrenter-out")),
+            ..AppConfig::default()
+        };
+        remember_release(&mut disk, Some("W/\"new\"".into()), None);
+        assert_eq!(disk.theme, "ice");
+        assert!(disk.auto_update);
+        assert!(!disk.seed);
+        assert_eq!(
+            disk.download_dir.as_deref(),
+            Some(Path::new("/tmp/torrenter-out"))
+        );
+        assert_eq!(disk.release_etag.as_deref(), Some("W/\"new\""));
+        assert!(disk.cached_tag.is_none());
     }
 
     #[test]
