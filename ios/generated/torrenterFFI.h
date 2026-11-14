@@ -271,6 +271,11 @@ void*_Nonnull uniffi_torrenter_fn_constructor_engine_open(RustBuffer dest, RustB
 int8_t uniffi_torrenter_fn_method_engine_any_active(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEBRID_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEBRID_ACCOUNT
+RustBuffer uniffi_torrenter_fn_method_engine_debrid_account(void*_Nonnull ptr, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEST
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEST
 RustBuffer uniffi_torrenter_fn_method_engine_dest(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -279,6 +284,11 @@ RustBuffer uniffi_torrenter_fn_method_engine_dest(void*_Nonnull ptr, RustCallSta
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DRAIN_NOTICES
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DRAIN_NOTICES
 RustBuffer uniffi_torrenter_fn_method_engine_drain_notices(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
+int8_t uniffi_torrenter_fn_method_engine_has_debrid_key(void*_Nonnull ptr, RustBuffer service, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HYDRATE
@@ -301,6 +311,11 @@ void uniffi_torrenter_fn_method_engine_persist(void*_Nonnull ptr, int8_t force, 
 uint64_t uniffi_torrenter_fn_method_engine_queue(void*_Nonnull ptr, RustBuffer kind, RustBuffer source, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_DEBRID
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_DEBRID
+uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustBuffer source, RustBuffer service, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 void uniffi_torrenter_fn_method_engine_remove(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
@@ -311,9 +326,29 @@ void uniffi_torrenter_fn_method_engine_remove(void*_Nonnull ptr, uint64_t id, Ru
 uint64_t uniffi_torrenter_fn_method_engine_restart(void*_Nonnull ptr, uint64_t id, int8_t seed, RustBuffer dest, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
+uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer service, int8_t seed, RustBuffer dest, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
 int8_t uniffi_torrenter_fn_method_engine_seed(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_CONNECTIONS
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_CONNECTIONS
+void uniffi_torrenter_fn_method_engine_set_connections(void*_Nonnull ptr, RustBuffer parts, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_KEY
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_KEY
+void uniffi_torrenter_fn_method_engine_set_debrid_key(void*_Nonnull ptr, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
+void uniffi_torrenter_fn_method_engine_set_debrid_remove_after(void*_Nonnull ptr, int8_t enabled, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_SEED
@@ -334,6 +369,12 @@ void uniffi_torrenter_fn_method_engine_toggle_pause(void*_Nonnull ptr, uint64_t 
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_BANNER
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_BANNER
 RustBuffer uniffi_torrenter_fn_func_banner(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_DEBRID_SERVICES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_DEBRID_SERVICES
+RustBuffer uniffi_torrenter_fn_func_debrid_services(RustCallStatus *_Nonnull out_status
     
 );
 #endif
@@ -623,9 +664,21 @@ uint16_t uniffi_torrenter_checksum_func_banner(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_DEBRID_SERVICES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_DEBRID_SERVICES
+uint16_t uniffi_torrenter_checksum_func_debrid_services(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_ANY_ACTIVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_ANY_ACTIVE
 uint16_t uniffi_torrenter_checksum_method_engine_any_active(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DEBRID_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DEBRID_ACCOUNT
+uint16_t uniffi_torrenter_checksum_method_engine_debrid_account(void
     
 );
 #endif
@@ -638,6 +691,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_dest(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DRAIN_NOTICES
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DRAIN_NOTICES
 uint16_t uniffi_torrenter_checksum_method_engine_drain_notices(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
+uint16_t uniffi_torrenter_checksum_method_engine_has_debrid_key(void
     
 );
 #endif
@@ -665,6 +724,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_queue(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_DEBRID
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_DEBRID
+uint16_t uniffi_torrenter_checksum_method_engine_queue_debrid(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE
 uint16_t uniffi_torrenter_checksum_method_engine_remove(void
@@ -677,9 +742,33 @@ uint16_t uniffi_torrenter_checksum_method_engine_restart(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_RESTART_ROUTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_RESTART_ROUTE
+uint16_t uniffi_torrenter_checksum_method_engine_restart_route(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SEED
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SEED
 uint16_t uniffi_torrenter_checksum_method_engine_seed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_CONNECTIONS
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_CONNECTIONS
+uint16_t uniffi_torrenter_checksum_method_engine_set_connections(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_KEY
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_KEY
+uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_key(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
+uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(void
     
 );
 #endif

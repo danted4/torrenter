@@ -400,6 +400,54 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt8: FfiConverterPrimitive {
+    typealias FfiType = UInt8
+    typealias SwiftType = UInt8
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt8 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: UInt8, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -501,9 +549,16 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     func anyActive()  -> Bool
     
+    /**
+     * Settings "Test": blocking network call — run it off the UI thread.
+     */
+    func debridAccount(service: String, key: String) throws  -> AccountView
+    
     func dest()  -> String
     
     func drainNotices()  -> [String]
+    
+    func hasDebridKey(service: String)  -> Bool
     
     func hydrate() throws 
     
@@ -513,11 +568,34 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     func queue(kind: Kind, source: String) throws  -> UInt64
     
+    /**
+     * Queue a magnet through a debrid service.
+     */
+    func queueDebrid(source: String, service: String) throws  -> UInt64
+    
     func remove(id: UInt64) 
     
     func restart(id: UInt64, seed: Bool, dest: String) throws  -> UInt64
     
+    /**
+     * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     */
+    func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String) throws  -> UInt64
+    
     func seed()  -> Bool
+    
+    /**
+     * Connections per download for new jobs (`None` = Auto = 4).
+     */
+    func setConnections(parts: UInt8?) 
+    
+    /**
+     * Hand a key from the platform keychain to the engine (memory only), or
+     * `None` to forget it. Call before `hydrate` so restored jobs can start.
+     */
+    func setDebridKey(service: String, key: String?) throws 
+    
+    func setDebridRemoveAfter(enabled: Bool) 
     
     func setSeed(seed: Bool) 
     
@@ -595,6 +673,18 @@ open func anyActive() -> Bool  {
 })
 }
     
+    /**
+     * Settings "Test": blocking network call — run it off the UI thread.
+     */
+open func debridAccount(service: String, key: String)throws  -> AccountView  {
+    return try  FfiConverterTypeAccountView_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_debrid_account(self.uniffiClonePointer(),
+        FfiConverterString.lower(service),
+        FfiConverterString.lower(key),$0
+    )
+})
+}
+    
 open func dest() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_dest(self.uniffiClonePointer(),$0
@@ -605,6 +695,14 @@ open func dest() -> String  {
 open func drainNotices() -> [String]  {
     return try!  FfiConverterSequenceString.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_drain_notices(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+open func hasDebridKey(service: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_has_debrid_key(self.uniffiClonePointer(),
+        FfiConverterString.lower(service),$0
     )
 })
 }
@@ -638,6 +736,18 @@ open func queue(kind: Kind, source: String)throws  -> UInt64  {
 })
 }
     
+    /**
+     * Queue a magnet through a debrid service.
+     */
+open func queueDebrid(source: String, service: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_queue_debrid(self.uniffiClonePointer(),
+        FfiConverterString.lower(source),
+        FfiConverterString.lower(service),$0
+    )
+})
+}
+    
 open func remove(id: UInt64)  {try! rustCall() {
     uniffi_torrenter_fn_method_engine_remove(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),$0
@@ -655,11 +765,54 @@ open func restart(id: UInt64, seed: Bool, dest: String)throws  -> UInt64  {
 })
 }
     
+    /**
+     * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     */
+open func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_restart_route(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),
+        FfiConverterOptionString.lower(service),
+        FfiConverterBool.lower(seed),
+        FfiConverterString.lower(dest),$0
+    )
+})
+}
+    
 open func seed() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_seed(self.uniffiClonePointer(),$0
     )
 })
+}
+    
+    /**
+     * Connections per download for new jobs (`None` = Auto = 4).
+     */
+open func setConnections(parts: UInt8?)  {try! rustCall() {
+    uniffi_torrenter_fn_method_engine_set_connections(self.uniffiClonePointer(),
+        FfiConverterOptionUInt8.lower(parts),$0
+    )
+}
+}
+    
+    /**
+     * Hand a key from the platform keychain to the engine (memory only), or
+     * `None` to forget it. Call before `hydrate` so restored jobs can start.
+     */
+open func setDebridKey(service: String, key: String?)throws   {try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_set_debrid_key(self.uniffiClonePointer(),
+        FfiConverterString.lower(service),
+        FfiConverterOptionString.lower(key),$0
+    )
+}
+}
+    
+open func setDebridRemoveAfter(enabled: Bool)  {try! rustCall() {
+    uniffi_torrenter_fn_method_engine_set_debrid_remove_after(self.uniffiClonePointer(),
+        FfiConverterBool.lower(enabled),$0
+    )
+}
 }
     
 open func setSeed(seed: Bool)  {try! rustCall() {
@@ -739,6 +892,79 @@ public func FfiConverterTypeEngine_lower(_ value: Engine) -> UnsafeMutableRawPoi
 
 
 
+/**
+ * Result of a settings "Test": never contains the key.
+ */
+public struct AccountView {
+    public var premium: Bool
+    public var expires: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(premium: Bool, expires: String?) {
+        self.premium = premium
+        self.expires = expires
+    }
+}
+
+#if compiler(>=6)
+extension AccountView: Sendable {}
+#endif
+
+
+extension AccountView: Equatable, Hashable {
+    public static func ==(lhs: AccountView, rhs: AccountView) -> Bool {
+        if lhs.premium != rhs.premium {
+            return false
+        }
+        if lhs.expires != rhs.expires {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(premium)
+        hasher.combine(expires)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountView {
+        return
+            try AccountView(
+                premium: FfiConverterBool.read(from: &buf), 
+                expires: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountView, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.premium, into: &buf)
+        FfiConverterOptionString.write(value.expires, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountView_lift(_ buf: RustBuffer) throws -> AccountView {
+    return try FfiConverterTypeAccountView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountView_lower(_ value: AccountView) -> RustBuffer {
+    return FfiConverterTypeAccountView.lower(value)
+}
+
+
 public struct JobView {
     public var id: UInt64
     public var kind: Kind
@@ -759,10 +985,32 @@ public struct JobView {
     public var finished: Bool
     public var active: Bool
     public var error: String?
+    /**
+     * Debrid route only: service id (`torbox`, …).
+     */
+    public var service: String?
+    /**
+     * Provider fetch progress, 0–1000, while the service fetches.
+     */
+    public var remotePermille: UInt16
+    /**
+     * 1-based file being downloaded and the file count (0 before downloading).
+     */
+    public var fileIndex: UInt32
+    public var fileCount: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: UInt64, kind: Kind, source: String, title: String, status: String, downloaded: UInt64, total: UInt64, uploaded: UInt64, uploadBps: UInt64, peers: UInt64, speed: Double, upSpeed: Double, seed: Bool, dest: String, added: String, paused: Bool, finished: Bool, active: Bool, error: String?) {
+    public init(id: UInt64, kind: Kind, source: String, title: String, status: String, downloaded: UInt64, total: UInt64, uploaded: UInt64, uploadBps: UInt64, peers: UInt64, speed: Double, upSpeed: Double, seed: Bool, dest: String, added: String, paused: Bool, finished: Bool, active: Bool, error: String?, 
+        /**
+         * Debrid route only: service id (`torbox`, …).
+         */service: String?, 
+        /**
+         * Provider fetch progress, 0–1000, while the service fetches.
+         */remotePermille: UInt16, 
+        /**
+         * 1-based file being downloaded and the file count (0 before downloading).
+         */fileIndex: UInt32, fileCount: UInt32) {
         self.id = id
         self.kind = kind
         self.source = source
@@ -782,6 +1030,10 @@ public struct JobView {
         self.finished = finished
         self.active = active
         self.error = error
+        self.service = service
+        self.remotePermille = remotePermille
+        self.fileIndex = fileIndex
+        self.fileCount = fileCount
     }
 }
 
@@ -849,6 +1101,18 @@ extension JobView: Equatable, Hashable {
         if lhs.error != rhs.error {
             return false
         }
+        if lhs.service != rhs.service {
+            return false
+        }
+        if lhs.remotePermille != rhs.remotePermille {
+            return false
+        }
+        if lhs.fileIndex != rhs.fileIndex {
+            return false
+        }
+        if lhs.fileCount != rhs.fileCount {
+            return false
+        }
         return true
     }
 
@@ -872,6 +1136,10 @@ extension JobView: Equatable, Hashable {
         hasher.combine(finished)
         hasher.combine(active)
         hasher.combine(error)
+        hasher.combine(service)
+        hasher.combine(remotePermille)
+        hasher.combine(fileIndex)
+        hasher.combine(fileCount)
     }
 }
 
@@ -902,7 +1170,11 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
                 paused: FfiConverterBool.read(from: &buf), 
                 finished: FfiConverterBool.read(from: &buf), 
                 active: FfiConverterBool.read(from: &buf), 
-                error: FfiConverterOptionString.read(from: &buf)
+                error: FfiConverterOptionString.read(from: &buf), 
+                service: FfiConverterOptionString.read(from: &buf), 
+                remotePermille: FfiConverterUInt16.read(from: &buf), 
+                fileIndex: FfiConverterUInt32.read(from: &buf), 
+                fileCount: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -926,6 +1198,10 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
         FfiConverterBool.write(value.finished, into: &buf)
         FfiConverterBool.write(value.active, into: &buf)
         FfiConverterOptionString.write(value.error, into: &buf)
+        FfiConverterOptionString.write(value.service, into: &buf)
+        FfiConverterUInt16.write(value.remotePermille, into: &buf)
+        FfiConverterUInt32.write(value.fileIndex, into: &buf)
+        FfiConverterUInt32.write(value.fileCount, into: &buf)
     }
 }
 
@@ -942,6 +1218,79 @@ public func FfiConverterTypeJobView_lift(_ buf: RustBuffer) throws -> JobView {
 #endif
 public func FfiConverterTypeJobView_lower(_ value: JobView) -> RustBuffer {
     return FfiConverterTypeJobView.lower(value)
+}
+
+
+/**
+ * A debrid service this build offers.
+ */
+public struct ServiceView {
+    public var id: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+}
+
+#if compiler(>=6)
+extension ServiceView: Sendable {}
+#endif
+
+
+extension ServiceView: Equatable, Hashable {
+    public static func ==(lhs: ServiceView, rhs: ServiceView) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(label)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeServiceView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ServiceView {
+        return
+            try ServiceView(
+                id: FfiConverterString.read(from: &buf), 
+                label: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ServiceView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceView_lift(_ buf: RustBuffer) throws -> ServiceView {
+    return try FfiConverterTypeServiceView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeServiceView_lower(_ value: ServiceView) -> RustBuffer {
+    return FfiConverterTypeServiceView.lower(value)
 }
 
 
@@ -1027,6 +1376,10 @@ public enum Kind {
     
     case magnet
     case http
+    /**
+     * A magnet routed through a debrid provider.
+     */
+    case debrid
 }
 
 
@@ -1048,6 +1401,8 @@ public struct FfiConverterTypeKind: FfiConverterRustBuffer {
         
         case 2: return .http
         
+        case 3: return .debrid
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -1062,6 +1417,10 @@ public struct FfiConverterTypeKind: FfiConverterRustBuffer {
         
         case .http:
             writeInt(&buf, Int32(2))
+        
+        
+        case .debrid:
+            writeInt(&buf, Int32(3))
         
         }
     }
@@ -1089,6 +1448,30 @@ extension Kind: Equatable, Hashable {}
 
 
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
+    typealias SwiftType = UInt8?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt8.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt8.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1163,9 +1546,40 @@ fileprivate struct FfiConverterSequenceTypeJobView: FfiConverterRustBuffer {
         return seq
     }
 }
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeServiceView: FfiConverterRustBuffer {
+    typealias SwiftType = [ServiceView]
+
+    public static func write(_ value: [ServiceView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeServiceView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ServiceView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ServiceView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeServiceView.read(from: &buf))
+        }
+        return seq
+    }
+}
 public func banner() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_torrenter_fn_func_banner($0
+    )
+})
+}
+public func debridServices() -> [ServiceView]  {
+    return try!  FfiConverterSequenceTypeServiceView.lift(try! rustCall() {
+    uniffi_torrenter_fn_func_debrid_services($0
     )
 })
 }
@@ -1188,13 +1602,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_func_banner() != 39202) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_func_debrid_services() != 34755) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_any_active() != 33237) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_debrid_account() != 61514) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_dest() != 29492) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_drain_notices() != 39100) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_has_debrid_key() != 63083) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_hydrate() != 18602) {
@@ -1209,13 +1632,28 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_queue() != 33011) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 31632) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_remove() != 13505) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_restart() != 54366) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_restart_route() != 4777) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_seed() != 40595) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_connections() != 19727) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_debrid_key() != 60581) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_debrid_remove_after() != 8005) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_seed() != 25898) {
