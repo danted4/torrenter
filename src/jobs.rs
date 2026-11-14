@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::progress::JobSnapshot;
 use crate::update::config_path;
@@ -40,7 +42,7 @@ impl JobKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedJob {
     pub id: u64,
@@ -63,13 +65,67 @@ pub struct PersistedJob {
     pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// HTTP parts this job was created with (resume needs the same split).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_count: Option<u8>,
+    /// Debrid route: provider id (`torbox`, …). Never a key or a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Debrid route: the provider's id for this torrent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    /// Debrid route: torrenter added it, so "remove after download" may delete it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added_by_us: bool,
+    /// Debrid route: files reported by the provider (ids and relative paths only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PersistedFile>,
+    /// Fields written by newer builds, kept so a rewrite does not drop them.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedFile {
+    pub id: String,
+    /// Relative path inside the job folder, already sanitized.
+    pub path: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JobListFile {
     #[serde(default)]
-    jobs: Vec<PersistedJob>,
+    jobs: Vec<Value>,
+}
+
+/// Jobs this build understands, plus records of kinds it does not (written by a
+/// newer build). Foreign records are written back untouched on every save.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct JobList {
+    pub jobs: Vec<PersistedJob>,
+    pub foreign: Vec<Value>,
+}
+
+impl JobList {
+    /// Highest id across known and foreign records, so new ids never collide.
+    pub fn max_id(&self) -> u64 {
+        let foreign = self
+            .foreign
+            .iter()
+            .filter_map(|value| value.get("id").and_then(Value::as_u64));
+        self.jobs
+            .iter()
+            .map(|job| job.id)
+            .chain(foreign)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +137,7 @@ pub enum RestoreAction {
 
 #[derive(Debug)]
 pub enum LoadJobs {
-    Loaded(Vec<PersistedJob>),
+    Loaded(JobList),
     Empty,
     Corrupt(String),
 }
@@ -116,12 +172,7 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
         }
     };
     match serde_json::from_slice::<JobListFile>(&bytes) {
-        Ok(file) => LoadJobs::Loaded(
-            file.jobs
-                .into_iter()
-                .filter(PersistedJob::is_valid)
-                .collect(),
-        ),
+        Ok(file) => LoadJobs::Loaded(split_records(file.jobs)),
         Err(error) => {
             quarantine(path);
             LoadJobs::Corrupt(error.to_string())
@@ -129,10 +180,41 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
     }
 }
 
+/// Known kinds must parse and validate or they are dropped (one bad record no
+/// longer quarantines the file). Unknown kinds are kept as-is for newer builds.
+fn split_records(records: Vec<Value>) -> JobList {
+    let mut list = JobList::default();
+    for record in records {
+        let known = record
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| JobKind::parse(kind).is_some());
+        if !known {
+            if record.get("id").and_then(Value::as_u64).is_some() {
+                list.foreign.push(record);
+            }
+            continue;
+        }
+        if let Ok(job) = serde_json::from_value::<PersistedJob>(record) {
+            if job.is_valid() {
+                list.jobs.push(job);
+            }
+        }
+    }
+    list
+}
+
 pub fn save_jobs_to(path: &Path, jobs: &[PersistedJob]) -> Result<()> {
-    let file = JobListFile {
-        jobs: jobs.to_vec(),
-    };
+    save_job_list_to(path, jobs, &[])
+}
+
+pub fn save_job_list_to(path: &Path, jobs: &[PersistedJob], foreign: &[Value]) -> Result<()> {
+    let mut records = Vec::with_capacity(jobs.len() + foreign.len());
+    for job in jobs {
+        records.push(serde_json::to_value(job).context("failed to serialize jobs")?);
+    }
+    records.extend(foreign.iter().cloned());
+    let file = JobListFile { jobs: records };
     let bytes = serde_json::to_vec_pretty(&file).context("failed to serialize jobs")?;
     atomic_write(path, &bytes)
 }
@@ -306,6 +388,7 @@ mod tests {
             status: status.into(),
             paused: status == "paused",
             error: None,
+            ..Default::default()
         }
     }
 
@@ -316,16 +399,81 @@ mod tests {
         let job = sample("magnet", "downloading", 10);
         save_jobs_to(&path, std::slice::from_ref(&job)).unwrap();
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![job]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![job]),
             other => panic!("expected loaded, got {other:?}"),
         }
-        let parsed: JobListFile = serde_json::from_str(
-            r#"{"jobs":[{"id":2,"kind":"http","source":"https://example.com/a","dest":"/tmp/a","extra":true}]}"#,
+        let parsed: PersistedJob = serde_json::from_str(
+            r#"{"id":2,"kind":"http","source":"https://example.com/a","dest":"/tmp/a","extra":true}"#,
         )
         .unwrap();
-        assert_eq!(parsed.jobs[0].id, 2);
-        assert!(!parsed.jobs[0].paused);
-        assert_eq!(parsed.jobs[0].downloaded, 0);
+        assert_eq!(parsed.id, 2);
+        assert!(!parsed.paused);
+        assert_eq!(parsed.downloaded, 0);
+        // Unknown fields survive a rewrite.
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back["extra"], Value::Bool(true));
+    }
+
+    #[test]
+    fn unknown_kinds_survive_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        std::fs::write(
+            &path,
+            r#"{"jobs":[
+                {"id":7,"kind":"future","source":"x","dest":"/tmp/a","newField":{"a":1}},
+                {"id":3,"kind":"http","source":"https://example.com/a","dest":"/tmp/a"},
+                {"id":4,"kind":"http","source":"https://example.com/b","dest":"/tmp/a","downloaded":"oops"}
+            ]}"#,
+        )
+        .unwrap();
+        let list = match load_jobs_from(&path) {
+            LoadJobs::Loaded(list) => list,
+            other => panic!("expected loaded, got {other:?}"),
+        };
+        assert_eq!(
+            list.jobs.len(),
+            1,
+            "malformed known record is dropped alone"
+        );
+        assert_eq!(list.foreign.len(), 1);
+        assert_eq!(list.max_id(), 7);
+        save_job_list_to(&path, &list.jobs, &list.foreign).unwrap();
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let kinds: Vec<_> = raw["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|job| job["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["http", "future"]);
+        assert_eq!(raw["jobs"][1]["newField"]["a"], 1);
+    }
+
+    #[test]
+    fn debrid_fields_roundtrip_without_links_or_keys() {
+        let job = PersistedJob {
+            part_count: Some(8),
+            service: Some("torbox".into()),
+            remote_id: Some("123".into()),
+            added_by_us: true,
+            files: vec![PersistedFile {
+                id: "0".into(),
+                path: "Album/01.flac".into(),
+                size: 10,
+                done: false,
+            }],
+            ..sample("magnet", "downloading", 0)
+        };
+        let text = serde_json::to_string(&job).unwrap();
+        assert!(text.contains("\"remoteId\":\"123\""));
+        assert!(text.contains("\"addedByUs\":true"));
+        let back: PersistedJob = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, job);
+        let plain = serde_json::to_string(&sample("http", "queued", 0)).unwrap();
+        assert!(
+            !plain.contains("service") && !plain.contains("addedByUs") && !plain.contains("files")
+        );
     }
 
     #[test]
@@ -340,7 +488,7 @@ mod tests {
         assert!(path.exists());
         assert!(!path.with_extension("json.tmp").exists());
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![second]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![second]),
             other => panic!("expected loaded, got {other:?}"),
         }
     }
@@ -354,7 +502,7 @@ mod tests {
         std::fs::rename(&path, path.with_extension("json.tmp")).unwrap();
         assert!(!path.exists());
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![job]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![job]),
             other => panic!("expected recovered, got {other:?}"),
         }
         assert!(path.exists());
@@ -384,7 +532,7 @@ mod tests {
         )
         .unwrap();
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert!(jobs.is_empty()),
+            LoadJobs::Loaded(list) => assert!(list.jobs.is_empty()),
             other => panic!("expected loaded empty, got {other:?}"),
         }
     }

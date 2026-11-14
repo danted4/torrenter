@@ -11,7 +11,7 @@ use crate::http::{
 use crate::jobs::{self, JobKind, LoadJobs, PersistedJob, RestoreAction};
 use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
-    magnet_display_name, magnet_info_hash, magnet_payload_present, start_download_reported,
+    magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
 };
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -54,6 +54,7 @@ pub fn persist_record(job: &Job) -> PersistedJob {
         status: job.snapshot.status(),
         paused: job.snapshot.is_paused(),
         error: job.snapshot.error(),
+        ..Default::default()
     }
 }
 
@@ -123,6 +124,8 @@ struct Inner {
     seed: bool,
     leech_only: bool,
     jobs: Vec<Job>,
+    /// Records of kinds this build does not know, written back untouched.
+    foreign: Vec<serde_json::Value>,
     next_id: u64,
     persist_at: Instant,
     saved_fingerprint: String,
@@ -155,6 +158,7 @@ impl Session {
                 seed: seed && !leech_only,
                 leech_only,
                 jobs: Vec::new(),
+                foreign: Vec::new(),
                 next_id: 1,
                 persist_at: Instant::now(),
                 saved_fingerprint: String::new(),
@@ -190,10 +194,12 @@ impl Session {
         match jobs::load_jobs_from(&inner.jobs_path) {
             LoadJobs::Empty => Hydrate::Empty,
             LoadJobs::Corrupt(error) => Hydrate::Corrupt(error),
-            LoadJobs::Loaded(records) => {
+            LoadJobs::Loaded(list) => {
                 let leech_only = inner.leech_only;
                 let mut probes = Vec::new();
-                for record in records {
+                inner.next_id = inner.next_id.max(list.max_id() + 1);
+                inner.foreign = list.foreign;
+                for record in list.jobs {
                     let Some(kind) = record.kind_id() else {
                         continue;
                     };
@@ -527,8 +533,8 @@ fn duplicate_note(jobs: &[Job], kind: JobKind, source: &str) -> Option<String> {
             return false;
         }
         match kind {
-            JobKind::Magnet => magnet_info_hash(source).is_some_and(|hash| {
-                magnet_info_hash(&job.source).as_deref() == Some(hash.as_str())
+            JobKind::Magnet => magnet_info_hash_hex(source).is_some_and(|hash| {
+                magnet_info_hash_hex(&job.source).as_deref() == Some(hash.as_str())
             }),
             JobKind::Http => job.source == source,
         }
@@ -548,7 +554,7 @@ fn persist_inner(inner: &mut Inner, force: bool) {
         return;
     }
     let records: Vec<_> = inner.jobs.iter().map(persist_record).collect();
-    if jobs::save_jobs_to(&inner.jobs_path, &records).is_ok() {
+    if jobs::save_job_list_to(&inner.jobs_path, &records, &inner.foreign).is_ok() {
         inner.saved_fingerprint = fingerprint;
         inner.persist_at = Instant::now();
     }
@@ -782,9 +788,9 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(!jobs[0].seed, "leech session must not keep GUI share seed");
         match jobs::load_jobs_from(&jobs_path) {
-            jobs::LoadJobs::Loaded(records) => {
-                assert_eq!(records.len(), 1);
-                assert!(!records[0].seed);
+            jobs::LoadJobs::Loaded(list) => {
+                assert_eq!(list.jobs.len(), 1);
+                assert!(!list.jobs[0].seed);
             }
             jobs::LoadJobs::Empty | jobs::LoadJobs::Corrupt(_) => panic!("expected rewritten jobs"),
         }
