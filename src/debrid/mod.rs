@@ -8,9 +8,13 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+mod alldebrid;
 pub(crate) mod api;
+mod debridlink;
 #[cfg(test)]
 pub(crate) mod fake;
+mod premiumize;
+mod realdebrid;
 pub mod run;
 pub(crate) mod torbox;
 
@@ -309,6 +313,10 @@ pub(crate) fn inside(root: &Path, relative: &Path) -> bool {
 /// merged on its own once verified against a real account.
 pub(crate) enum Provider {
     TorBox(torbox::TorBox),
+    RealDebrid(realdebrid::RealDebrid),
+    AllDebrid(alldebrid::AllDebrid),
+    Premiumize(premiumize::Premiumize),
+    DebridLink(debridlink::DebridLink),
 }
 
 impl Provider {
@@ -317,30 +325,42 @@ impl Provider {
         key: Secret,
         base: Option<url::Url>,
     ) -> Result<Provider, DebridError> {
-        match service {
-            Service::TorBox => Ok(Provider::TorBox(torbox::TorBox::new(key, base)?)),
-            other => Err(DebridError::Service(format!(
-                "{} is not available in this build",
-                other.label()
-            ))),
-        }
+        Ok(match service {
+            Service::TorBox => Provider::TorBox(torbox::TorBox::new(key, base)?),
+            Service::RealDebrid => Provider::RealDebrid(realdebrid::RealDebrid::new(key, base)?),
+            Service::AllDebrid => Provider::AllDebrid(alldebrid::AllDebrid::new(key, base)?),
+            Service::Premiumize => Provider::Premiumize(premiumize::Premiumize::new(key, base)?),
+            Service::DebridLink => Provider::DebridLink(debridlink::DebridLink::new(key, base)?),
+        })
     }
 
     pub(crate) async fn account(&self) -> Result<Account, DebridError> {
         match self {
             Provider::TorBox(api) => api.account().await,
+            Provider::RealDebrid(api) => api.account().await,
+            Provider::AllDebrid(api) => api.account().await,
+            Provider::Premiumize(api) => api.account().await,
+            Provider::DebridLink(api) => api.account().await,
         }
     }
 
     pub(crate) async fn add(&self, magnet: &str, hash_hex: &str) -> Result<Added, DebridError> {
         match self {
             Provider::TorBox(api) => api.add(magnet, hash_hex).await,
+            Provider::RealDebrid(api) => api.add(magnet, hash_hex).await,
+            Provider::AllDebrid(api) => api.add(magnet, hash_hex).await,
+            Provider::Premiumize(api) => api.add(magnet, hash_hex).await,
+            Provider::DebridLink(api) => api.add(magnet, hash_hex).await,
         }
     }
 
     pub(crate) async fn status(&self, remote_id: &str) -> Result<Remote, DebridError> {
         match self {
             Provider::TorBox(api) => api.status(remote_id).await,
+            Provider::RealDebrid(api) => api.status(remote_id).await,
+            Provider::AllDebrid(api) => api.status(remote_id).await,
+            Provider::Premiumize(api) => api.status(remote_id).await,
+            Provider::DebridLink(api) => api.status(remote_id).await,
         }
     }
 
@@ -351,12 +371,20 @@ impl Provider {
     ) -> Result<String, DebridError> {
         match self {
             Provider::TorBox(api) => api.link(remote_id, file).await,
+            Provider::RealDebrid(api) => api.link(remote_id, file).await,
+            Provider::AllDebrid(api) => api.link(remote_id, file).await,
+            Provider::Premiumize(api) => api.link(remote_id, file).await,
+            Provider::DebridLink(api) => api.link(remote_id, file).await,
         }
     }
 
     pub(crate) async fn delete(&self, remote_id: &str) -> Result<(), DebridError> {
         match self {
             Provider::TorBox(api) => api.delete(remote_id).await,
+            Provider::RealDebrid(api) => api.delete(remote_id).await,
+            Provider::AllDebrid(api) => api.delete(remote_id).await,
+            Provider::Premiumize(api) => api.delete(remote_id).await,
+            Provider::DebridLink(api) => api.delete(remote_id).await,
         }
     }
 }
