@@ -1,6 +1,7 @@
 package com.danted4.torrenter
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
@@ -40,7 +41,20 @@ class FormatTest {
                     speed = 1024.0,
                 ),
             )
-        assertEquals("downloading  peers 0  D 1.00 KB @ 1.00 KB/s  2.00 KB  eta 1 second", line)
+        assertEquals("downloading  D 1.00 KB @ 1.00 KB/s  2.00 KB  eta 1 second", line)
+    }
+
+    @Test
+    fun debridLinesShowPhasesWithoutPeers() {
+        val base = sample(kind = Kind.DEBRID, seed = false, downloaded = 1024uL, total = 2048uL, speed = 1024.0)
+        // JVM tests cannot load the native library, so the label falls back to the id.
+        val fetching = base.copy(status = "fetching", service = "torbox", remotePermille = 452u)
+        assertTrue(jobIsFetching(fetching))
+        assertEquals("fetching  torbox fetching 45.2%", jobStatsLine(fetching))
+        assertEquals("MAGNET → torbox", jobBadge(fetching))
+        val downloading = base.copy(service = "torbox", fileIndex = 2u, fileCount = 7u)
+        assertEquals("downloading  file 2/7  D 1.00 KB @ 1.00 KB/s  2.00 KB  eta 1 second", jobStatsLine(downloading))
+        assertEquals("HTTP · via torbox", jobBadge(downloading))
     }
 
     @Test
@@ -94,5 +108,9 @@ class FormatTest {
             finished = false,
             active = true,
             error = null,
+            service = null,
+            remotePermille = 0u,
+            fileIndex = 0u,
+            fileCount = 0u,
         )
 }

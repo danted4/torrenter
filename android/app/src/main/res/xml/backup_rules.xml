@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 (API 30): never back up encrypted debrid keys. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="torrenter_keys.xml" />
+</full-backup-content>

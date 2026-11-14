@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: encrypted debrid keys stay on this device (cloud backup and device transfer). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="torrenter_keys.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="torrenter_keys.xml" />
+    </device-transfer>
+</data-extraction-rules>

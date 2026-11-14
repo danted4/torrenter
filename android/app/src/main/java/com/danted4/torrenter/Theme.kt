@@ -94,6 +94,41 @@ object Prefs {
 
     fun seed(prefs: SharedPreferences): Boolean = prefs.getBoolean(SEED, true)
 
+    const val DEBRID_ROUTE = "debridRoute"
+    const val CONNECTIONS = "connections"
+    const val REMOVE_AFTER = "debridRemoveAfter"
+
+    /** Remembered debrid service for magnet jobs; null is off. */
+    fun debridRoute(prefs: SharedPreferences): String? = prefs.getString(DEBRID_ROUTE, null)
+
+    fun saveDebridRoute(
+        prefs: SharedPreferences,
+        id: String?,
+    ) {
+        prefs.edit().apply { if (id == null) remove(DEBRID_ROUTE) else putString(DEBRID_ROUTE, id) }.apply()
+    }
+
+    /** Connections per download; 0 is Auto (4). */
+    fun connections(prefs: SharedPreferences): Int = prefs.getInt(CONNECTIONS, 0)
+
+    fun saveConnections(
+        prefs: SharedPreferences,
+        parts: Int,
+    ) {
+        prefs.edit().putInt(CONNECTIONS, parts).apply()
+    }
+
+    fun removeAfter(prefs: SharedPreferences): Boolean = prefs.getBoolean(REMOVE_AFTER, false)
+
+    fun saveRemoveAfter(
+        prefs: SharedPreferences,
+        on: Boolean,
+    ) {
+        prefs.edit().putBoolean(REMOVE_AFTER, on).apply()
+    }
+
+    fun connectionsArg(parts: Int): UByte? = if (parts > 0) parts.coerceAtMost(16).toUByte() else null
+
     fun saveSeed(
         prefs: SharedPreferences,
         seed: Boolean,

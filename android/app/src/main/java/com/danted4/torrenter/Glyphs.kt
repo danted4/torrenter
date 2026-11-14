@@ -233,3 +233,76 @@ private fun SwapArrows(color: Color) {
         drawLine(color, Offset(left + head, botY + head), Offset(left, botY), stroke.width, StrokeCap.Round)
     }
 }
+
+/** Header cog: opens the settings screen. */
+@Composable
+fun CogGlyph(
+    color: Color,
+    onClick: () -> Unit,
+) {
+    Canvas(
+        Modifier
+            .size(28.dp)
+            .clickable(onClick = onClick),
+    ) {
+        val c = Offset(size.width / 2f, size.height / 2f)
+        val unit = size.minDimension / 28f
+        val stroke = 1.6f * unit * 1.4f
+        drawCircle(color, radius = 4.8f * unit * 1.2f, center = c, style = Stroke(width = stroke))
+        drawCircle(color, radius = 1.6f * unit * 1.2f, center = c)
+        for (step in 0 until 6) {
+            val rad = Math.toRadians(step * 60.0)
+            val dx = kotlin.math.cos(rad).toFloat()
+            val dy = kotlin.math.sin(rad).toFloat()
+            drawLine(
+                color,
+                Offset(c.x + dx * 6.4f * unit * 1.2f, c.y + dy * 6.4f * unit * 1.2f),
+                Offset(c.x + dx * 8.8f * unit * 1.2f, c.y + dy * 8.8f * unit * 1.2f),
+                stroke,
+                StrokeCap.Round,
+            )
+        }
+    }
+}
+
+/** "debrid" (off) or "via TorBox" (on); a tap cycles through services with a key. */
+@Composable
+fun DebridControl(
+    label: String?,
+    palette: Palette,
+    onClick: () -> Unit,
+) {
+    val on = label != null
+    Text(
+        if (on) "via $label" else "debrid",
+        color = if (on) palette.fg else palette.dim,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp,
+        modifier =
+            Modifier
+                .border(1.dp, if (on) palette.fg else palette.dim, RoundedCornerShape(4.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
+}
+
+/** Small selectable text chip (settings choices). */
+@Composable
+fun Chip(
+    text: String,
+    on: Boolean,
+    palette: Palette,
+    onClick: () -> Unit,
+) {
+    Text(
+        text,
+        color = if (on) palette.fg else palette.dim,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp,
+        modifier =
+            Modifier
+                .then(if (on) Modifier.border(1.dp, palette.fg, RoundedCornerShape(4.dp)) else Modifier)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+    )
+}

@@ -5,6 +5,7 @@ import kotlin.math.floor
 import kotlin.math.ln
 import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
+import uniffi.torrenter.debridServices
 
 fun formatSize(size: ULong): String {
     if (size == 0uL) {
@@ -45,6 +46,18 @@ fun formatEta(seconds: Double?): String {
     }
 }
 
+/** The debrid service is still fetching (before files download). */
+fun jobIsFetching(job: JobView): Boolean = job.service != null && job.status in setOf("fetching", "queued", "starting")
+
+fun serviceLabel(id: String?): String =
+    id?.let { wanted -> runCatching { debridServices().firstOrNull { it.id == wanted }?.label }.getOrNull() ?: wanted } ?: ""
+
+/** Row badge: MAGNET, HTTP, or the debrid phase. */
+fun jobBadge(job: JobView): String {
+    val service = job.service ?: return if (job.kind == Kind.HTTP) "HTTP" else "MAGNET"
+    return if (jobIsFetching(job)) "MAGNET → ${serviceLabel(service)}" else "HTTP · via ${serviceLabel(service)}"
+}
+
 fun jobStatsLine(job: JobView): String {
     val downloaded = job.downloaded
     val total = job.total
@@ -54,6 +67,17 @@ fun jobStatsLine(job: JobView): String {
         } else {
             "N/A"
         }
+    job.service?.let { service ->
+        if (jobIsFetching(job)) {
+            val pct = String.format(java.util.Locale.US, "%.1f", job.remotePermille.toDouble() / 10.0)
+            return "${job.status}  ${serviceLabel(service)} fetching $pct%"
+        }
+        val files = if (job.fileCount > 0u) "  file ${maxOf(job.fileIndex, 1u)}/${job.fileCount}" else ""
+        return "${job.status}$files  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"
+    }
+    if (job.kind == Kind.HTTP) {
+        return "${job.status}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"
+    }
     val sharing = job.kind == Kind.MAGNET && job.seed
     val seeding = sharing && job.active && total > 0uL && downloaded >= total
     val upSpeed = if (job.upSpeed > 0.0) job.upSpeed else job.uploadBps.toDouble()

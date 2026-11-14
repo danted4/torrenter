@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import uniffi.torrenter.Engine
+import uniffi.torrenter.debridServices
 
 class TorrenterApp : Application() {
     private val lock = Any()
@@ -41,6 +42,13 @@ class TorrenterApp : Application() {
                     Paths.jobsFile(filesDir).absolutePath,
                     seed,
                 )
+            // Keys go in before hydrate so restored debrid jobs can start.
+            for (service in debridServices()) {
+                SecureKeys.read(this, service.id)?.let { created.setDebridKey(service.id, it) }
+            }
+            val prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
+            created.setConnections(Prefs.connectionsArg(Prefs.connections(prefs)))
+            created.setDebridRemoveAfter(Prefs.removeAfter(prefs))
             created.hydrate()
             engine = created
             startTicker()
