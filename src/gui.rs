@@ -201,7 +201,7 @@ impl Mode {
 
 fn mode_from_kind(kind: jobs::JobKind) -> Mode {
     match kind {
-        jobs::JobKind::Magnet => Mode::Magnet,
+        jobs::JobKind::Magnet | jobs::JobKind::Debrid => Mode::Magnet,
         jobs::JobKind::Http => Mode::Http,
     }
 }
@@ -2199,6 +2199,8 @@ mod tests {
             up_speed: 0.0,
             seed: false,
             dest: PathBuf::from(dest),
+            part_count: 4,
+            debrid: None,
         }
     }
 

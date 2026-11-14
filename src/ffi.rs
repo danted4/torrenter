@@ -36,6 +36,8 @@ impl From<String> for EngineError {
 pub enum Kind {
     Magnet,
     Http,
+    /// A magnet routed through a debrid provider.
+    Debrid,
 }
 
 impl From<JobKind> for Kind {
@@ -43,6 +45,7 @@ impl From<JobKind> for Kind {
         match kind {
             JobKind::Magnet => Self::Magnet,
             JobKind::Http => Self::Http,
+            JobKind::Debrid => Self::Debrid,
         }
     }
 }
@@ -52,6 +55,7 @@ impl From<Kind> for JobKind {
         match kind {
             Kind::Magnet => Self::Magnet,
             Kind::Http => Self::Http,
+            Kind::Debrid => Self::Debrid,
         }
     }
 }
@@ -216,6 +220,8 @@ mod tests {
             up_speed: 0.0,
             seed: false,
             dest: PathBuf::from("/tmp/films"),
+            part_count: 4,
+            debrid: None,
         }
     }
 

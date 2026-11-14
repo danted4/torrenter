@@ -49,6 +49,11 @@ pub struct DownloadLayout {
     pub directory: PathBuf,
     pub part_count: usize,
     parts: PartPlacement,
+    /// `.resume/` lives here instead of under `directory` (debrid: job root).
+    resume_root: Option<PathBuf>,
+    /// Resume identity used instead of the request URL (debrid links change and
+    /// may carry the API key, so they must never key or enter the manifest).
+    identity: Option<String>,
 }
 
 impl DownloadLayout {
@@ -57,7 +62,35 @@ impl DownloadLayout {
             directory,
             part_count: PART_COUNT,
             parts: PartPlacement::Resume,
+            resume_root: None,
+            identity: None,
         }
+    }
+
+    pub fn with_part_count(mut self, part_count: usize) -> Self {
+        self.part_count = part_count.max(1);
+        self
+    }
+
+    /// One file of a multi-file job: output in `directory`, parts and manifest
+    /// under `<resume_root>/.resume/`, keyed by `identity` (no URL).
+    pub(crate) fn for_job_file(
+        directory: PathBuf,
+        resume_root: PathBuf,
+        identity: String,
+        part_count: usize,
+    ) -> Self {
+        Self {
+            directory,
+            part_count: part_count.max(1),
+            parts: PartPlacement::Resume,
+            resume_root: Some(resume_root),
+            identity: Some(identity),
+        }
+    }
+
+    fn resume_identity<'a>(&'a self, download_url: &'a str) -> &'a str {
+        self.identity.as_deref().unwrap_or(download_url)
     }
 
     pub fn beside_file(dest: &Path) -> Self {
@@ -75,6 +108,8 @@ impl DownloadLayout {
             directory,
             part_count: PART_COUNT,
             parts: PartPlacement::Beside { stem },
+            resume_root: None,
+            identity: None,
         }
     }
 }
@@ -133,7 +168,16 @@ pub(crate) async fn download_file(
             }
         }
     }
-    stream_single(client, url, dest, progress, &downloaded, Some(max_bytes)).await
+    stream_single(
+        client,
+        url,
+        dest,
+        progress,
+        &downloaded,
+        Some(max_bytes),
+        None,
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -146,6 +190,27 @@ impl std::fmt::Display for RangesNotHonored {
 }
 
 impl std::error::Error for RangesNotHonored {}
+
+/// A job-file link answered 401/403/404/410 (expired or IP-bound). Only raised
+/// for layouts with an identity, so plain HTTP keeps its old fallbacks.
+#[derive(Debug)]
+pub struct LinkRejected(pub u16);
+
+impl std::fmt::Display for LinkRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "download link rejected (HTTP {})", self.0)
+    }
+}
+
+impl std::error::Error for LinkRejected {}
+
+fn link_rejected(layout: &DownloadLayout, response: &reqwest::Response) -> Option<LinkRejected> {
+    layout.identity.as_ref()?;
+    let status = response.status().as_u16();
+    let invalid_code = response.headers().contains_key("x-error");
+    (matches!(status, 401 | 403 | 404 | 410) || (invalid_code && !response.status().is_success()))
+        .then_some(LinkRejected(status))
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,6 +226,79 @@ struct RemoteMetadata {
     filename: String,
 }
 
+/// One file of a multi-file job (debrid) whose size and name the provider
+/// reported, so no HEAD probe can silently disable resume. Parts resume under
+/// the job's `.resume/` keyed by the layout identity, so a fresh link keeps
+/// them. Never finishes the job or changes its title; the caller owns stop.
+pub(crate) async fn download_job_file(
+    client: &Client,
+    download_url: &str,
+    layout: &DownloadLayout,
+    filename: &str,
+    size: u64,
+    progress: &ProgressHandle,
+) -> Result<()> {
+    fs::create_dir_all(&layout.directory)
+        .await
+        .context("failed to create download folder")?;
+    let output_path = layout.directory.join(filename);
+    let downloaded = Arc::new(AtomicU64::new(0));
+    if size > 0 {
+        progress.set_length(size);
+    }
+    loop {
+        check_stop(progress.snapshot().map(Arc::as_ref))?;
+        wait_while_paused(progress.snapshot().map(Arc::as_ref)).await?;
+        let transfer = async {
+            if size > 1 {
+                match download_multipart(
+                    client,
+                    download_url,
+                    filename,
+                    size,
+                    progress,
+                    &downloaded,
+                    layout,
+                )
+                .await
+                {
+                    Err(error) if error.downcast_ref::<RangesNotHonored>().is_some() => {
+                        downloaded.store(0, Ordering::Relaxed);
+                        progress.set_position(0);
+                        stream_single(
+                            client,
+                            download_url,
+                            &output_path,
+                            progress,
+                            &downloaded,
+                            None,
+                            Some(layout),
+                        )
+                        .await
+                    }
+                    other => other,
+                }
+            } else {
+                stream_single(
+                    client,
+                    download_url,
+                    &output_path,
+                    progress,
+                    &downloaded,
+                    None,
+                    Some(layout),
+                )
+                .await
+            }
+        };
+        match transfer.await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_pause_abort(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 pub async fn start_url_download(download_url: &str, dest: PathBuf) -> Result<()> {
     start_url_download_in(download_url, DownloadLayout::in_dir(dest)).await
 }
@@ -169,8 +307,10 @@ pub async fn start_url_download_reported(
     download_url: &str,
     snapshot: Arc<JobSnapshot>,
     dest: PathBuf,
+    part_count: usize,
 ) -> Result<()> {
-    run_url_download(download_url, DownloadLayout::in_dir(dest), Some(snapshot)).await
+    let layout = DownloadLayout::in_dir(dest).with_part_count(part_count);
+    run_url_download(download_url, layout, Some(snapshot)).await
 }
 
 fn http_lock_key(directory: &Path, download_url: &str) -> String {
@@ -272,6 +412,7 @@ async fn run_url_download(
                                 &progress,
                                 &downloaded,
                                 None,
+                                None,
                             )
                             .await
                         }
@@ -284,6 +425,7 @@ async fn run_url_download(
                         &output_path,
                         &progress,
                         &downloaded,
+                        None,
                         None,
                     )
                     .await
@@ -519,7 +661,11 @@ fn resume_key(download_url: &str) -> String {
 }
 
 fn resume_directory(layout: &DownloadLayout) -> PathBuf {
-    layout.directory.join(RESUME_DIR_NAME)
+    layout
+        .resume_root
+        .as_deref()
+        .unwrap_or(&layout.directory)
+        .join(RESUME_DIR_NAME)
 }
 
 fn manifest_path(layout: &DownloadLayout, key: &str) -> PathBuf {
@@ -550,10 +696,16 @@ async fn save_resume_manifest(
 }
 
 async fn remove_resume_files(layout: &DownloadLayout, key: &str) -> Result<()> {
+    // A manifest from a run with more parts (the setting changed) owns the
+    // higher-index files too; remove those instead of orphaning them.
+    let mut count = layout.part_count;
     if matches!(layout.parts, PartPlacement::Resume) {
+        if let Some(manifest) = get_resume_manifest(layout, key).await {
+            count = count.max(manifest.part_count);
+        }
         let _ = fs::remove_file(manifest_path(layout, key)).await;
     }
-    for index in 0..layout.part_count {
+    for index in 0..count {
         let _ = fs::remove_file(part_path(layout, key, index)).await;
     }
     Ok(())
@@ -568,13 +720,14 @@ async fn download_multipart(
     downloaded: &Arc<AtomicU64>,
     layout: &DownloadLayout,
 ) -> Result<()> {
-    let key = resume_key(download_url);
+    let identity = layout.resume_identity(download_url);
+    let key = resume_key(identity);
     let part_size = total.div_ceil(layout.part_count as u64);
     let resume = matches!(layout.parts, PartPlacement::Resume);
     if resume {
         let manifest = get_resume_manifest(layout, &key).await;
         let can_resume = manifest.as_ref().is_some_and(|manifest| {
-            manifest.url == download_url
+            manifest.url == identity
                 && manifest.size == total
                 && manifest.part_count == layout.part_count
         });
@@ -585,7 +738,7 @@ async fn download_multipart(
             layout,
             &key,
             &ResumeManifest {
-                url: download_url.to_string(),
+                url: identity.to_string(),
                 size: total,
                 part_count: layout.part_count,
                 filename: filename.to_string(),
@@ -734,6 +887,9 @@ async fn download_part(
             bail!(DownloadPaused);
         }
     };
+    if let Some(rejected) = link_rejected(layout, &response) {
+        bail!(rejected);
+    }
     if response.status() != StatusCode::PARTIAL_CONTENT {
         bail!(RangesNotHonored);
     }
@@ -789,6 +945,7 @@ async fn stream_single(
     progress: &ProgressHandle,
     downloaded: &Arc<AtomicU64>,
     byte_cap: Option<u64>,
+    job_file: Option<&DownloadLayout>,
 ) -> Result<()> {
     let response = tokio::select! {
         response = client.get(download_url).send() => response.context("download request failed")?,
@@ -797,6 +954,9 @@ async fn stream_single(
             bail!(DownloadPaused);
         }
     };
+    if let Some(rejected) = job_file.and_then(|layout| link_rejected(layout, &response)) {
+        bail!(rejected);
+    }
     let response = match response.error_for_status() {
         Ok(response) => response,
         Err(error) => return Err(error.into()),
@@ -1631,6 +1791,164 @@ mod tests {
             fs::read(dir.path().join("payload.bin")).await.unwrap(),
             body
         );
+    }
+
+    fn job_layout(dir: &tempfile::TempDir, identity: &str, parts: usize) -> DownloadLayout {
+        DownloadLayout::for_job_file(
+            dir.path().join("Album/CD1"),
+            dir.path().to_path_buf(),
+            identity.to_string(),
+            parts,
+        )
+    }
+
+    #[tokio::test]
+    async fn job_file_resumes_parts_across_a_fresh_link() {
+        let body = pattern_body(4096);
+        let dir = tempfile::tempdir().unwrap();
+        let client = range_client("torrenter/test").unwrap();
+        let layout = job_layout(&dir, "torbox|42|0", 4);
+
+        // First link delivers short ranges: parts stay partial, the call fails.
+        let mut short = config(body.clone(), true, true);
+        short.shorten_range_to = Some(100);
+        let first = spawn_server(short).await;
+        let snapshot = Arc::new(JobSnapshot::default());
+        let progress = ProgressHandle::job_file(Arc::clone(&snapshot), 0, 4096, 4096);
+        let link_a = format!("{}?token=secret-a", first.url);
+        assert!(
+            download_job_file(&client, &link_a, &layout, "01.bin", 4096, &progress)
+                .await
+                .is_err()
+        );
+        let manifest = std::fs::read_to_string(
+            dir.path()
+                .join(".resume")
+                .join(format!("{}.json", resume_key("torbox|42|0"))),
+        )
+        .unwrap();
+        assert!(
+            !manifest.contains("secret-a"),
+            "links never enter the manifest"
+        );
+
+        // A different (fresh) link continues from the saved parts.
+        let fresh = config(body.clone(), true, true);
+        let starts = Arc::clone(&fresh.range_starts);
+        let second = spawn_server(fresh).await;
+        let link_b = format!("{}?token=secret-b", second.url);
+        download_job_file(&client, &link_b, &layout, "01.bin", 4096, &progress)
+            .await
+            .unwrap();
+        let starts = starts.lock().await.clone();
+        assert!(!starts.is_empty());
+        // Parts the first run saved are continued, not discarded; a part the
+        // failing run aborted before writing simply starts at its offset.
+        assert!(
+            starts.iter().all(|start| matches!(start % 1024, 0 | 100)),
+            "{starts:?}"
+        );
+        assert!(
+            starts.iter().filter(|start| *start % 1024 == 100).count() >= 2,
+            "parts resumed across the new link: {starts:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("Album/CD1/01.bin")).unwrap(),
+            body
+        );
+        assert!(!snapshot.is_done(), "a job file never finishes the job");
+        assert!(
+            !dir.path()
+                .join(".resume")
+                .join(format!("{}.json", resume_key("torbox|42|0")))
+                .exists(),
+            "parts and manifest are cleaned after the merge"
+        );
+    }
+
+    async fn spawn_status_server(status: &'static str) -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut stream).await;
+                    let _ = write_http(
+                        &mut stream,
+                        status,
+                        vec![("Content-Length", "0".into())],
+                        &[],
+                    )
+                    .await;
+                });
+            }
+        });
+        TestServer {
+            url: format!("http://{addr}/gone.bin"),
+            accept,
+        }
+    }
+
+    #[tokio::test]
+    async fn job_file_reports_a_rejected_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = range_client("torrenter/test").unwrap();
+        let server = spawn_status_server("HTTP/1.1 403 Forbidden").await;
+        let snapshot = Arc::new(JobSnapshot::default());
+        let progress = ProgressHandle::job_file(snapshot, 0, 10, 10);
+        let layout = job_layout(&dir, "torbox|1|0", 4);
+        let error = download_job_file(&client, &server.url, &layout, "x.bin", 10, &progress)
+            .await
+            .unwrap_err();
+        let rejected = error.downcast_ref::<LinkRejected>().expect("LinkRejected");
+        assert_eq!(rejected.0, 403);
+    }
+
+    #[tokio::test]
+    async fn fewer_parts_remove_orphans_from_a_bigger_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = job_layout(&dir, "id", 8);
+        let key = resume_key("id");
+        save_resume_manifest(
+            &big,
+            &key,
+            &ResumeManifest {
+                url: "id".into(),
+                size: 100,
+                part_count: 8,
+                filename: "f".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for index in 0..8 {
+            std::fs::write(part_path(&big, &key, index), b"x").unwrap();
+        }
+        let small = job_layout(&dir, "id", 4);
+        remove_resume_files(&small, &key).await.unwrap();
+        for index in 0..8 {
+            assert!(
+                !part_path(&small, &key, index).exists(),
+                "part {index} left behind"
+            );
+        }
+    }
+
+    #[test]
+    fn job_file_progress_adds_up_across_files() {
+        let snapshot = Arc::new(JobSnapshot::default());
+        snapshot.set_title("Album");
+        let first = ProgressHandle::job_file(Arc::clone(&snapshot), 0, 300, 100);
+        first.set_title("01.flac");
+        first.set_position(100);
+        first.finish();
+        assert_eq!(snapshot.downloaded.load(Ordering::Relaxed), 100);
+        let second = ProgressHandle::job_file(Arc::clone(&snapshot), 100, 300, 200);
+        second.inc(50);
+        assert_eq!(snapshot.downloaded.load(Ordering::Relaxed), 150);
+        assert_eq!(snapshot.total.load(Ordering::Relaxed), 300);
+        assert_eq!(snapshot.title(), "Album");
+        assert!(!snapshot.is_done());
     }
 
     /// Range server that sends `sent` bytes of every part, then stalls forever.

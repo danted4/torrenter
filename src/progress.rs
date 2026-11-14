@@ -348,6 +348,15 @@ pub struct ProgressHandle {
     bar: ProgressBar,
     snapshot: Option<Arc<JobSnapshot>>,
     announce: bool,
+    /// Set for one file of a multi-file job: the bar counts this file, the
+    /// snapshot shows `base + position` of `job_total`.
+    file: Option<FileScope>,
+}
+
+#[derive(Clone, Copy)]
+struct FileScope {
+    base: u64,
+    job_total: u64,
 }
 
 impl ProgressHandle {
@@ -361,6 +370,7 @@ impl ProgressHandle {
             bar,
             snapshot: Some(Arc::new(JobSnapshot::default())),
             announce: !cfg!(test),
+            file: None,
         }
     }
 
@@ -369,6 +379,7 @@ impl ProgressHandle {
             bar: hidden_bar(1),
             snapshot: None,
             announce: false,
+            file: None,
         }
     }
 
@@ -385,7 +396,21 @@ impl ProgressHandle {
             bar,
             snapshot: Some(snapshot),
             announce: false,
+            file: None,
         }
+    }
+
+    /// One file of a multi-file job. `base` is bytes already done in earlier
+    /// files; the job's `downloaded`/`total` keep counting the whole job.
+    pub fn job_file(snapshot: Arc<JobSnapshot>, base: u64, job_total: u64, size: u64) -> Self {
+        let handle = Self {
+            bar: hidden_bar(size.max(1)),
+            snapshot: Some(snapshot),
+            announce: false,
+            file: Some(FileScope { base, job_total }),
+        };
+        handle.sync();
+        handle
     }
 
     pub fn announce(&self) -> bool {
@@ -397,6 +422,9 @@ impl ProgressHandle {
     }
 
     pub fn set_title(&self, title: impl Into<String>) {
+        if self.file.is_some() {
+            return;
+        }
         if let Some(snapshot) = &self.snapshot {
             snapshot.set_title(title);
         }
@@ -484,7 +512,9 @@ impl ProgressHandle {
     pub fn finish(&self) {
         self.bar.finish();
         if let Some(snapshot) = &self.snapshot {
-            snapshot.mark_finished();
+            if self.file.is_none() {
+                snapshot.mark_finished();
+            }
             self.sync();
         }
     }
@@ -498,6 +528,14 @@ impl ProgressHandle {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        if let Some(scope) = self.file {
+            let position = scope.base + self.bar.position();
+            snapshot.downloaded.store(position, Ordering::Relaxed);
+            snapshot
+                .total
+                .store(scope.job_total.max(position), Ordering::Relaxed);
+            return;
+        }
         snapshot
             .downloaded
             .store(self.bar.position(), Ordering::Relaxed);

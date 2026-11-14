@@ -17,6 +17,8 @@ pub const HTTP_NOT_RESUMABLE: &str = "HTTP download cannot resume; restart to st
 pub enum JobKind {
     Magnet,
     Http,
+    /// A magnet routed through a debrid provider (downloads over HTTP).
+    Debrid,
 }
 
 impl JobKind {
@@ -24,6 +26,7 @@ impl JobKind {
         match self {
             Self::Magnet => "magnet",
             Self::Http => "http",
+            Self::Debrid => "debrid",
         }
     }
 
@@ -31,6 +34,7 @@ impl JobKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "magnet" => Some(Self::Magnet),
             "http" => Some(Self::Http),
+            "debrid" => Some(Self::Debrid),
             _ => None,
         }
     }
@@ -39,7 +43,13 @@ impl JobKind {
         match self {
             Self::Magnet => "MAGNET",
             Self::Http => "HTTP",
+            Self::Debrid => "DEBRID",
         }
+    }
+
+    /// Magnet input (plain or via a debrid provider).
+    pub fn takes_magnet(self) -> bool {
+        matches!(self, Self::Magnet | Self::Debrid)
     }
 }
 
@@ -232,6 +242,14 @@ impl PersistedJob {
         match self.kind_id() {
             Some(JobKind::Magnet) => is_valid_magnet_url(&self.source),
             Some(JobKind::Http) => is_valid_download_url(&self.source),
+            Some(JobKind::Debrid) => {
+                is_valid_magnet_url(&self.source)
+                    && self
+                        .service
+                        .as_deref()
+                        .and_then(crate::debrid::Service::parse)
+                        .is_some()
+            }
             None => false,
         }
     }
@@ -258,6 +276,8 @@ impl PersistedJob {
                     RestoreAction::Start
                 }
             }
+            // The runner re-checks every file and can fetch again from the provider.
+            Some(JobKind::Debrid) => RestoreAction::Start,
             Some(JobKind::Magnet) => {
                 if self.downloaded > 0 && !present {
                     RestoreAction::Missing
