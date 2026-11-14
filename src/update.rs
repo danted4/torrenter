@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use url::Url;
 
+use crate::fsutil::{atomic_write, quarantine, recover_incomplete_save};
 use crate::http::PART_COUNT;
 use crate::identity::{self, AppKind, VERSION, VERSION_TAG};
 use crate::progress::{JobSnapshot, ProgressHandle};
@@ -61,6 +63,18 @@ pub struct AppConfig {
     pub cached_asset_url: Option<String>,
     #[serde(default)]
     pub cached_checksums_url: Option<String>,
+    /// HTTP parts per download for new jobs; `None` is Auto (= `PART_COUNT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u8>,
+    /// Remembered debrid route for magnet jobs (`torbox`, …); `None` is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debrid_route: Option<String>,
+    /// Delete torrents torrenter added from the provider once every file landed.
+    #[serde(default)]
+    pub debrid_remove_after: bool,
+    /// Keys written by newer builds, kept so a save here does not drop them.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for AppConfig {
@@ -76,6 +90,10 @@ impl Default for AppConfig {
             cached_asset_name: None,
             cached_asset_url: None,
             cached_checksums_url: None,
+            connections: None,
+            debrid_route: None,
+            debrid_remove_after: false,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -124,20 +142,48 @@ pub fn load_config() -> AppConfig {
     let Ok(path) = config_path() else {
         return AppConfig::default();
     };
-    let Ok(bytes) = std::fs::read(path) else {
-        return AppConfig::default();
+    load_config_from(&path).unwrap_or_default()
+}
+
+/// `Err` only for a file that exists but cannot be read or parsed.
+fn load_config_from(path: &Path) -> Result<AppConfig> {
+    recover_incomplete_save(path);
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AppConfig::default())
+        }
+        Err(error) => return Err(error).context("failed to read config"),
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    serde_json::from_slice(&bytes).context("failed to parse config")
 }
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
-    let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    save_config_to(&config_path()?, config)
+}
+
+fn save_config_to(path: &Path, config: &AppConfig) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(config)?;
-    std::fs::write(path, bytes)?;
-    Ok(())
+    atomic_write(path, &bytes, false)
+}
+
+/// Read-modify-write one setting. A config that no longer parses is moved to
+/// `config.json.bak` first instead of being silently replaced by defaults.
+pub fn edit_config(change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig> {
+    edit_config_at(&config_path()?, change)
+}
+
+fn edit_config_at(path: &Path, change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig> {
+    let mut config = match load_config_from(path) {
+        Ok(config) => config,
+        Err(_) => {
+            quarantine(path);
+            AppConfig::default()
+        }
+    };
+    change(&mut config);
+    save_config_to(path, &config)?;
+    Ok(config)
 }
 
 pub fn parse_tag(tag: &str) -> Option<(u64, u64, u64)> {
@@ -400,9 +446,7 @@ fn remember_release(
 }
 
 fn persist_release_cache(etag: Option<String>, update: Option<&AvailableUpdate>) {
-    let mut config = load_config();
-    remember_release(&mut config, etag, update);
-    let _ = save_config(&config);
+    let _ = edit_config(|config| remember_release(config, etag, update));
 }
 
 fn header_etag(headers: &reqwest::header::HeaderMap) -> Option<String> {
@@ -743,17 +787,11 @@ pub async fn apply_available_update(kind: AppKind) -> Result<bool> {
 }
 
 pub fn set_auto_update(enabled: bool) -> Result<AppConfig> {
-    let mut config = load_config();
-    config.auto_update = enabled;
-    save_config(&config)?;
-    Ok(config)
+    edit_config(|config| config.auto_update = enabled)
 }
 
 pub fn set_seed(enabled: bool) -> Result<AppConfig> {
-    let mut config = load_config();
-    config.seed = enabled;
-    save_config(&config)?;
-    Ok(config)
+    edit_config(|config| config.seed = enabled)
 }
 
 pub fn normalize_theme(name: &str) -> &'static str {
@@ -767,10 +805,7 @@ pub fn normalize_theme(name: &str) -> &'static str {
 }
 
 pub fn set_theme(theme: impl AsRef<str>) -> Result<AppConfig> {
-    let mut config = load_config();
-    config.theme = normalize_theme(theme.as_ref()).to_string();
-    save_config(&config)?;
-    Ok(config)
+    edit_config(|config| config.theme = normalize_theme(theme.as_ref()).to_string())
 }
 
 pub fn normalize_glass_tint(value: u8) -> u8 {
@@ -799,10 +834,7 @@ pub fn effective_glass_tint(saved: u8, fullscreen: bool) -> u8 {
 }
 
 pub fn set_glass_tint(value: u8) -> Result<AppConfig> {
-    let mut config = load_config();
-    config.glass_tint = normalize_glass_tint(value);
-    save_config(&config)?;
-    Ok(config)
+    edit_config(|config| config.glass_tint = normalize_glass_tint(value))
 }
 
 /// Windows has no frost. Ignore a leftover slider value and use 100%.
@@ -819,17 +851,75 @@ pub fn snap_windows_glass_tint(saved: u8) -> u8 {
     max
 }
 
+pub fn set_connections(parts: Option<u8>) -> Result<AppConfig> {
+    edit_config(|config| config.connections = parts.map(clamp_connections))
+}
+
+/// Parts for a new HTTP download: the setting, or Auto (= `PART_COUNT`).
+pub fn effective_connections(config: &AppConfig) -> usize {
+    config
+        .connections
+        .map(|parts| usize::from(clamp_connections(parts)))
+        .unwrap_or(PART_COUNT)
+}
+
+pub const MAX_CONNECTIONS: u8 = 16;
+
+fn clamp_connections(parts: u8) -> u8 {
+    parts.clamp(1, MAX_CONNECTIONS)
+}
+
+pub fn set_debrid_route(service: Option<&str>) -> Result<AppConfig> {
+    let service = service.map(|id| id.trim().to_ascii_lowercase());
+    edit_config(|config| config.debrid_route = service.filter(|id| !id.is_empty()))
+}
+
+pub fn set_debrid_remove_after(enabled: bool) -> Result<AppConfig> {
+    edit_config(|config| config.debrid_remove_after = enabled)
+}
+
 pub fn set_download_dir(path: impl AsRef<Path>) -> Result<AppConfig> {
     let stored = crate::paths::persistable_dir(path)?;
-    let mut config = load_config();
-    config.download_dir = Some(stored);
-    save_config(&config)?;
-    Ok(config)
+    edit_config(|config| config.download_dir = Some(stored))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_keeps_unknown_keys_and_quarantines_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"seed":false,"future_key":{"x":1}}"#).unwrap();
+        let config = edit_config_at(&path, |config| config.auto_update = true).unwrap();
+        assert!(!config.seed);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["future_key"]["x"], 1);
+        assert_eq!(raw["auto_update"], true);
+
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(load_config_from(&path).is_err());
+        let config = edit_config_at(&path, |config| config.theme = "ice".into()).unwrap();
+        assert_eq!(config.theme, "ice");
+        assert!(
+            crate::fsutil::bak_path(&path).exists(),
+            "broken config kept aside"
+        );
+    }
+
+    #[test]
+    fn connections_default_to_auto_and_clamp() {
+        let mut config = AppConfig::default();
+        assert_eq!(effective_connections(&config), PART_COUNT);
+        config.connections = Some(0);
+        assert_eq!(effective_connections(&config), 1);
+        config.connections = Some(99);
+        assert_eq!(effective_connections(&config), usize::from(MAX_CONNECTIONS));
+        let text = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!text.contains("connections") && !text.contains("debrid_route"));
+    }
 
     #[test]
     fn parses_version_tags() {

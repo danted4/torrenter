@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::fsutil::{atomic_write, quarantine, recover_incomplete_save};
 use crate::progress::JobSnapshot;
 use crate::update::config_path;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
@@ -216,7 +217,7 @@ pub fn save_job_list_to(path: &Path, jobs: &[PersistedJob], foreign: &[Value]) -
     records.extend(foreign.iter().cloned());
     let file = JobListFile { jobs: records };
     let bytes = serde_json::to_vec_pretty(&file).context("failed to serialize jobs")?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes, false)
 }
 
 impl PersistedJob {
@@ -314,55 +315,6 @@ impl PersistedJob {
             MISSING_FILES
         }
     }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("failed to write {}", tmp.display()))?;
-    replace_file(&tmp, path)
-}
-
-/// POSIX rename replaces. Windows cannot rename over an existing file, so the
-/// live file is moved aside only for that replace, then restored if the new
-/// name fails. Never unlink the live file first.
-fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    if cfg!(windows) && to.exists() {
-        let backup = to.with_extension("json.prev");
-        let _ = std::fs::remove_file(&backup);
-        std::fs::rename(to, &backup)
-            .with_context(|| format!("failed to move aside {}", to.display()))?;
-        if let Err(error) = std::fs::rename(from, to) {
-            let _ = std::fs::rename(&backup, to);
-            return Err(error).with_context(|| format!("failed to replace {}", to.display()));
-        }
-        let _ = std::fs::remove_file(&backup);
-        return Ok(());
-    }
-    std::fs::rename(from, to).with_context(|| format!("failed to replace {}", to.display()))
-}
-
-fn recover_incomplete_save(path: &Path) {
-    if path.exists() {
-        return;
-    }
-    for aside in [
-        path.with_extension("json.tmp"),
-        path.with_extension("json.prev"),
-    ] {
-        if aside.exists() && std::fs::rename(&aside, path).is_ok() {
-            return;
-        }
-    }
-}
-
-fn quarantine(path: &Path) {
-    let bak = path.with_extension("json.bak");
-    let _ = std::fs::remove_file(&bak);
-    let _ = std::fs::rename(path, bak);
 }
 
 #[cfg(test)]

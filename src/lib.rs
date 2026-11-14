@@ -1,3 +1,6 @@
+pub mod credentials;
+pub mod debrid;
+pub(crate) mod fsutil;
 pub mod http;
 pub mod identity;
 pub mod jobs;
