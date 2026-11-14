@@ -137,6 +137,12 @@ enum EngineCmd {
         debrid: Option<DebridLaunch>,
     },
     Probe(Vec<ProbeSpec>),
+    DeleteRemote {
+        service: Service,
+        key: Secret,
+        remote_id: String,
+        base: Option<Url>,
+    },
 }
 
 struct DebridLaunch {
@@ -653,6 +659,45 @@ impl Session {
         }
     }
 
+    /// True when clearing this job should ask whether to delete it from the
+    /// provider too: a debrid job torrenter added that did not finish.
+    pub fn clear_asks_about_remote(&self, id: u64) -> bool {
+        let inner = mutex_lock(&self.inner);
+        inner.jobs.iter().any(|job| {
+            job.id == id
+                && !job.snapshot.is_done()
+                && job.debrid.as_ref().is_some_and(|debrid| {
+                    let state = debrid.view();
+                    state.added_by_us && state.remote_id.is_some()
+                })
+        })
+    }
+
+    /// Clear a job and delete its torrent from the provider (only one
+    /// torrenter added). Best effort: failures arrive as a notice.
+    pub fn remove_with_remote(&self, id: u64) {
+        let delete = {
+            let inner = mutex_lock(&self.inner);
+            inner.jobs.iter().find(|job| job.id == id).and_then(|job| {
+                let debrid = job.debrid.as_ref()?;
+                let state = debrid.view();
+                if !state.added_by_us {
+                    return None;
+                }
+                Some(EngineCmd::DeleteRemote {
+                    service: debrid.service,
+                    key: resolve_key(&inner, debrid.service)?,
+                    remote_id: state.remote_id?,
+                    base: inner.debrid_bases.get(&debrid.service).cloned(),
+                })
+            })
+        };
+        self.remove(id);
+        if let Some(cmd) = delete {
+            let _ = self.engine.send(cmd);
+        }
+    }
+
     pub fn job(&self, id: u64) -> Option<Job> {
         mutex_lock(&self.inner)
             .jobs
@@ -867,6 +912,21 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                                 error: format!("{error:#}"),
                             });
                         }
+                    }
+                }
+                EngineCmd::DeleteRemote {
+                    service,
+                    key,
+                    remote_id,
+                    base,
+                } => {
+                    if let Err(error) =
+                        crate::debrid::delete_remote(service, &key, &remote_id, base).await
+                    {
+                        let _ = tx.send(EngineEvent::DownloadFailed {
+                            id: 0,
+                            error: format!("could not remove it from {}: {error}", service.label()),
+                        });
                     }
                 }
                 EngineCmd::Probe(specs) => {
@@ -1248,6 +1308,41 @@ mod tests {
         assert!(job.debrid.is_none());
         session.stop(peers);
         assert_eq!(session.jobs().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_an_unfinished_job_can_delete_it_from_the_provider() {
+        use crate::debrid::torbox::tests::magnet;
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .unwrap();
+        let session = tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session
+        })
+        .await
+        .unwrap();
+        session.stop(id);
+        assert!(session.clear_asks_about_remote(id));
+        session.remove_with_remote(id);
+        assert!(session.jobs().is_empty());
+        let fake = Arc::clone(&fake);
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| fake.lock().unwrap().torrents.is_empty());
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

@@ -247,6 +247,16 @@ impl Engine {
         self.session.set_debrid_remove_after(enabled);
     }
 
+    /// Clearing this job should ask "also remove it from the service?".
+    pub fn clear_asks_about_remote(&self, id: u64) -> bool {
+        self.session.clear_asks_about_remote(id)
+    }
+
+    /// Clear the job and delete its torrent from the service (best effort).
+    pub fn remove_with_remote(&self, id: u64) {
+        self.session.remove_with_remote(id);
+    }
+
     pub fn hydrate(&self) -> Result<(), EngineError> {
         match self.session.hydrate() {
             session::Hydrate::Empty | session::Hydrate::Loaded => Ok(()),

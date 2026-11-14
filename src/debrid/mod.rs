@@ -389,6 +389,19 @@ impl Provider {
     }
 }
 
+/// Delete a torrent from the provider outside a running job (clearing a job
+/// that never finished). The error text is safe to show.
+pub async fn delete_remote(
+    service: Service,
+    key: &Secret,
+    remote_id: &str,
+    base: Option<url::Url>,
+) -> Result<(), DebridError> {
+    Provider::new(service, key.clone(), base)?
+        .delete(remote_id)
+        .await
+}
+
 /// Settings "Test" button / `torrenter debrid test`: ask the provider who the
 /// key belongs to. The error text is safe to show.
 pub async fn check_account(service: Service, key: &Secret) -> Result<Account, DebridError> {
