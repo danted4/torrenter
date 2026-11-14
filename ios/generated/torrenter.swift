@@ -550,6 +550,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func anyActive()  -> Bool
     
     /**
+     * Clearing this job should ask "also remove it from the service?".
+     */
+    func clearAsksAboutRemote(id: UInt64)  -> Bool
+    
+    /**
      * Settings "Test": blocking network call — run it off the UI thread.
      */
     func debridAccount(service: String, key: String) throws  -> AccountView
@@ -574,6 +579,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func queueDebrid(source: String, service: String) throws  -> UInt64
     
     func remove(id: UInt64) 
+    
+    /**
+     * Clear the job and delete its torrent from the service (best effort).
+     */
+    func removeWithRemote(id: UInt64) 
     
     func restart(id: UInt64, seed: Bool, dest: String) throws  -> UInt64
     
@@ -674,6 +684,17 @@ open func anyActive() -> Bool  {
 }
     
     /**
+     * Clearing this job should ask "also remove it from the service?".
+     */
+open func clearAsksAboutRemote(id: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_clear_asks_about_remote(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),$0
+    )
+})
+}
+    
+    /**
      * Settings "Test": blocking network call — run it off the UI thread.
      */
 open func debridAccount(service: String, key: String)throws  -> AccountView  {
@@ -750,6 +771,16 @@ open func queueDebrid(source: String, service: String)throws  -> UInt64  {
     
 open func remove(id: UInt64)  {try! rustCall() {
     uniffi_torrenter_fn_method_engine_remove(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),$0
+    )
+}
+}
+    
+    /**
+     * Clear the job and delete its torrent from the service (best effort).
+     */
+open func removeWithRemote(id: UInt64)  {try! rustCall() {
+    uniffi_torrenter_fn_method_engine_remove_with_remote(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),$0
     )
 }
@@ -1608,6 +1639,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_any_active() != 33237) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_clear_asks_about_remote() != 51139) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_debrid_account() != 61514) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1636,6 +1670,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_remove() != 13505) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_restart() != 54366) {

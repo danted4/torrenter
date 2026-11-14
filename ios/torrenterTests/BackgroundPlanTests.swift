@@ -14,7 +14,8 @@ final class BackgroundPlanTests: XCTestCase {
             id: id, kind: .http, source: "https://example.com/\(id).bin", title: "\(id).bin",
             status: status, downloaded: 0, total: 0, uploaded: 0, uploadBps: 0, peers: 0,
             speed: 0, upSpeed: 0, seed: false, dest: "/tmp", added: "2026-11-14",
-            paused: paused, finished: status == "done", active: active, error: error
+            paused: paused, finished: status == "done", active: active, error: error,
+            service: nil, remotePermille: 0, fileIndex: 0, fileCount: 0
         )
     }
 

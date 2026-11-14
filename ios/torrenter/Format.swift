@@ -37,6 +37,24 @@ func formatEta(_ seconds: Double?) -> String {
     return plural(whole, "second")
 }
 
+/// The debrid service is still fetching (before files download).
+func jobIsFetching(_ job: JobView) -> Bool {
+    job.service != nil && ["fetching", "queued", "starting"].contains(job.status)
+}
+
+func serviceLabel(_ id: String?) -> String {
+    guard let id else { return "" }
+    return debridServices().first { $0.id == id }?.label ?? id
+}
+
+/// Row badge: MAGNET, HTTP, or the debrid phase.
+func jobBadge(_ job: JobView) -> String {
+    if let service = job.service {
+        return jobIsFetching(job) ? "MAGNET → \(serviceLabel(service))" : "HTTP · via \(serviceLabel(service))"
+    }
+    return job.kind == .http ? "HTTP" : "MAGNET"
+}
+
 func jobStatsLine(_ job: JobView) -> String {
     let downloaded = job.downloaded
     let total = job.total
@@ -45,6 +63,17 @@ func jobStatsLine(_ job: JobView) -> String {
         eta = formatEta(Double(total - downloaded) / job.speed)
     } else {
         eta = "N/A"
+    }
+    if let service = job.service {
+        if jobIsFetching(job) {
+            let pct = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), Double(job.remotePermille) / 10.0)
+            return "\(job.status)  \(serviceLabel(service)) fetching \(pct)%"
+        }
+        let files = job.fileCount > 0 ? "  file \(max(job.fileIndex, 1))/\(job.fileCount)" : ""
+        return "\(job.status)\(files)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"
+    }
+    if job.kind == .http {
+        return "\(job.status)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"
     }
     let sharing = job.kind == .magnet && job.seed
     let seeding = sharing && job.active && total > 0 && downloaded >= total
@@ -60,6 +89,9 @@ func jobStatsLine(_ job: JobView) -> String {
 
 func jobBarFraction(_ job: JobView) -> Float? {
     let status = job.status
+    if job.service != nil, status == "fetching" {
+        return Float(job.remotePermille) / 1000
+    }
     if status == "queued" || status == "starting" || status.contains("Initializing") {
         return nil
     }

@@ -8,10 +8,57 @@ struct ContentView: View {
     @State private var input = ""
     @State private var magnet = true
     @State private var shareJob: JobView?
+    @State private var settingsOpen = false
 
     var colors: Palette { themePalette(themeId) }
 
     var body: some View {
+        Group {
+            if settingsOpen {
+                SettingsView(themeId: $themeId) { settingsOpen = false }
+            } else {
+                main
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(colors.bg.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .onAppear { owner.open() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background {
+                owner.leaveForeground()
+            } else if phase == .active {
+                owner.enterForeground()
+            }
+        }
+        .sheet(item: shareSheetItem) { item in
+            ShareSheet(items: owner.shareItems(for: item.job))
+        }
+        .confirmationDialog(
+            "Also remove it from \(serviceLabel(owner.clearAsk?.service))?",
+            isPresented: clearAskShown,
+            titleVisibility: .visible
+        ) {
+            if let job = owner.clearAsk {
+                Button("remove from \(serviceLabel(job.service))", role: .destructive) {
+                    owner.clearConfirmed(job: job, removeRemote: true)
+                }
+                Button("keep it on \(serviceLabel(job.service))") {
+                    owner.clearConfirmed(job: job, removeRemote: false)
+                }
+            }
+        }
+    }
+
+    private var clearAskShown: Binding<Bool> {
+        Binding(
+            get: { owner.clearAsk != nil },
+            set: { if !$0 { owner.clearAsk = nil } }
+        )
+    }
+
+    private var main: some View {
         VStack(alignment: .leading, spacing: 12) {
             header(colors)
             if let notice = owner.notice {
@@ -21,13 +68,18 @@ struct ContentView: View {
             }
             modeSwitch(colors)
             urlField(colors)
-            Button("START") {
-                let source = input.trimmingCharacters(in: .whitespacesAndNewlines)
-                if owner.queue(kind: magnet ? .magnet : .http, source: source) {
-                    input = ""
+            HStack(spacing: 12) {
+                Button("START") {
+                    let source = input.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if owner.queue(kind: magnet ? .magnet : .http, source: source) {
+                        input = ""
+                    }
+                }
+                .buttonStyle(MonoButton(palette: colors))
+                if magnet {
+                    debridControl(colors)
                 }
             }
-            .buttonStyle(MonoButton(palette: colors))
             HStack(spacing: 8) {
                 Text("On My iPhone/torrenter")
                     .font(.system(size: 12, design: .monospaced))
@@ -54,9 +106,10 @@ struct ContentView: View {
                                 palette: colors,
                                 onPause: { owner.togglePause(id: job.id) },
                                 onStop: { owner.stop(id: job.id) },
-                                onClear: { owner.remove(id: job.id) },
+                                onClear: { owner.clear(job: job) },
                                 onRestart: { owner.restart(job: job) },
-                                onShare: { shareJob = job }
+                                onShare: { shareJob = job },
+                                onAsTorrent: { owner.asTorrent(job: job) }
                             )
                         }
                     }
@@ -64,21 +117,27 @@ struct ContentView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(colors.bg.ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .onAppear { owner.open() }
-        .onChange(of: scenePhase) { phase in
-            if phase == .background {
-                owner.leaveForeground()
-            } else if phase == .active {
-                owner.enterForeground()
+    }
+
+    /// "debrid" (off) or "via TorBox"; tap cycles through services with a key.
+    private func debridControl(_ colors: Palette) -> some View {
+        let on = owner.debridRoute != nil
+        return Button {
+            owner.cycleDebridRoute()
+            if owner.keyed.isEmpty {
+                settingsOpen = true
             }
+        } label: {
+            Text(on ? "via \(serviceLabel(owner.debridRoute))" : "debrid")
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundColor(on ? colors.fg : colors.dim)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4).stroke(on ? colors.fg : colors.dim, lineWidth: 1)
+                )
         }
-        .sheet(item: shareSheetItem) { item in
-            ShareSheet(items: owner.shareItems(for: item.job))
-        }
+        .buttonStyle(.plain)
     }
 
     private var shareSheetItem: Binding<ShareIdent?> {
@@ -100,20 +159,14 @@ struct ContentView: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 6) {
-                ForEach(ThemeId.allCases, id: \.self) { id in
-                    Circle()
-                        .fill(themePalette(id).fg)
-                        .frame(width: 14, height: 14)
-                        .overlay(
-                            Circle().stroke(colors.fg, lineWidth: themeId == id ? 2 : 0)
-                        )
-                        .onTapGesture {
-                            themeId = id
-                            Prefs.saveTheme(id)
-                        }
-                }
+            Button {
+                settingsOpen = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 20))
+                    .foregroundColor(colors.dim)
             }
+            .accessibilityLabel("settings")
         }
     }
 
@@ -163,12 +216,18 @@ private struct JobCard: View {
     let onClear: () -> Void
     let onRestart: () -> Void
     let onShare: () -> Void
+    let onAsTorrent: () -> Void
 
     var body: some View {
         let fraction = jobBarFraction(job)
         let accent = job.active ? mix(palette.fg, palette.dim, 0.65) : palette.fg
         let lineColor = job.error != nil ? palette.fail : palette.dim
         VStack(alignment: .leading, spacing: 6) {
+            if job.service != nil || job.kind == .http {
+                Text(jobBadge(job))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(palette.dim)
+            }
             Text(job.title.isEmpty ? job.source : job.title)
                 .font(.system(size: 13, design: .monospaced))
                 .foregroundColor(accent)
@@ -189,6 +248,10 @@ private struct JobCard: View {
                         .buttonStyle(MonoButton(palette: palette))
                     Button("stop", action: onStop)
                         .buttonStyle(MonoButton(palette: palette))
+                    if jobIsFetching(job) {
+                        Button("as torrent", action: onAsTorrent)
+                            .buttonStyle(MonoButton(palette: palette))
+                    }
                 } else {
                     Button("restart", action: onRestart)
                         .buttonStyle(MonoButton(palette: palette))
@@ -206,7 +269,7 @@ private struct JobCard: View {
 }
 
 /// Compact switch sized to the 12 pt monospaced labels (the system switch is too tall).
-private struct MiniSwitch: ToggleStyle {
+struct MiniSwitch: ToggleStyle {
     let palette: Palette
 
     func makeBody(configuration: Configuration) -> some View {
@@ -234,7 +297,7 @@ private struct MiniSwitch: ToggleStyle {
     }
 }
 
-private struct MonoButton: ButtonStyle {
+struct MonoButton: ButtonStyle {
     let palette: Palette
 
     func makeBody(configuration: Configuration) -> some View {

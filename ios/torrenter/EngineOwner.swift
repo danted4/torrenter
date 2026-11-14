@@ -16,6 +16,29 @@ final class EngineOwner: ObservableObject {
             syncKeepAlive()
         }
     }
+    /// Remembered debrid service for magnet jobs (nil = from peers).
+    @Published var debridRoute: String? = Prefs.debridRoute() {
+        didSet { Prefs.saveDebridRoute(debridRoute) }
+    }
+    /// Connections per download; 0 = Auto (4).
+    @Published var connections: Int = Prefs.connections() {
+        didSet {
+            Prefs.saveConnections(connections)
+            engine?.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
+        }
+    }
+    @Published var removeAfter: Bool = Prefs.removeAfter() {
+        didSet {
+            Prefs.saveRemoveAfter(removeAfter)
+            engine?.setDebridRemoveAfter(enabled: removeAfter)
+        }
+    }
+    /// Services with a key in the Keychain.
+    @Published private(set) var keyed: Set<String> = []
+    /// Last account check per service ("premium until …" or the error).
+    @Published private(set) var accountNotes: [String: String] = [:]
+    /// A cleared debrid job that may still be on the service: ask first.
+    @Published var clearAsk: JobView?
 
     private var engine: Engine?
     private var ticker: Task<Void, Never>?
@@ -40,6 +63,18 @@ final class EngineOwner: ObservableObject {
             jobsPath: Paths.jobsFile().path,
             seed: false
         )
+        // Keys go in before hydrate so restored debrid jobs can start.
+        for service in debridServices() {
+            if let key = Keychain.read(service.id) {
+                try? created.setDebridKey(service: service.id, key: key)
+                keyed.insert(service.id)
+            }
+        }
+        if let route = debridRoute, !keyed.contains(route) {
+            debridRoute = nil
+        }
+        created.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
+        created.setDebridRemoveAfter(enabled: removeAfter)
         do {
             try created.hydrate()
         } catch {
@@ -65,7 +100,11 @@ final class EngineOwner: ObservableObject {
     func queue(kind: Kind, source: String) -> Bool {
         guard let engine else { return false }
         do {
-            _ = try engine.queue(kind: kind, source: source)
+            if kind == .magnet, let service = debridRoute {
+                _ = try engine.queueDebrid(source: source, service: service)
+            } else {
+                _ = try engine.queue(kind: kind, source: source)
+            }
             notice = nil
             refresh()
             return true
@@ -88,6 +127,94 @@ final class EngineOwner: ObservableObject {
     func remove(id: UInt64) {
         engine?.remove(id: id)
         refresh()
+    }
+
+    /// Clear button: ask first when the job is a debrid torrent we added that
+    /// never finished (it may still sit on the service).
+    func clear(job: JobView) {
+        if engine?.clearAsksAboutRemote(id: job.id) == true {
+            clearAsk = job
+        } else {
+            remove(id: job.id)
+        }
+    }
+
+    func clearConfirmed(job: JobView, removeRemote: Bool) {
+        if removeRemote {
+            engine?.removeWithRemote(id: job.id)
+        } else {
+            engine?.remove(id: job.id)
+        }
+        clearAsk = nil
+        refresh()
+    }
+
+    /// Stop waiting for the service and download the same torrent from peers.
+    func asTorrent(job: JobView) {
+        guard let engine else { return }
+        do {
+            _ = try engine.restartRoute(id: job.id, service: nil, seed: false, dest: Paths.publicDest().path)
+            notice = nil
+            refresh()
+        } catch {
+            notice = engineMessage(error)
+        }
+    }
+
+    /// Debrid control: off → first service with a key → next → off.
+    func cycleDebridRoute() {
+        let ready = debridServices().map(\.id).filter { keyed.contains($0) }
+        guard !ready.isEmpty else {
+            notice = "add a debrid API key in settings first"
+            return
+        }
+        if let current = debridRoute, let index = ready.firstIndex(of: current) {
+            debridRoute = index + 1 < ready.count ? ready[index + 1] : nil
+        } else {
+            debridRoute = ready.first
+        }
+    }
+
+    func saveKey(service: String, key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard Keychain.save(service, key: trimmed) else {
+            notice = "could not save the key in the Keychain"
+            return
+        }
+        try? engine?.setDebridKey(service: service, key: trimmed)
+        keyed.insert(service)
+        testAccount(service: service, key: trimmed)
+    }
+
+    func removeKey(service: String) {
+        Keychain.delete(service)
+        try? engine?.setDebridKey(service: service, key: nil)
+        keyed.remove(service)
+        accountNotes[service] = nil
+        if debridRoute == service {
+            debridRoute = nil
+        }
+    }
+
+    /// Ask the service who the key belongs to, off the main thread.
+    func testAccount(service: String, key: String? = nil) {
+        guard let engine, let key = key ?? Keychain.read(service) else { return }
+        accountNotes[service] = "checking…"
+        Task.detached { [weak self] in
+            let note: String
+            do {
+                let account = try engine.debridAccount(service: service, key: key)
+                if account.premium {
+                    note = "premium" + (account.expires.map { " until \($0)" } ?? "")
+                } else {
+                    note = "key works, but the account is not premium"
+                }
+            } catch {
+                note = engineMessage(error)
+            }
+            await MainActor.run { self?.accountNotes[service] = note }
+        }
     }
 
     func restart(job: JobView) {

@@ -82,6 +82,40 @@ enum Prefs {
         UserDefaults.standard.set(id.rawValue, forKey: themeKey)
     }
 
+    static let debridRouteKey = "debridRoute"
+    static let connectionsKey = "connections"
+    static let removeAfterKey = "debridRemoveAfter"
+
+    /// Remembered debrid service for magnet jobs; nil is off.
+    static func debridRoute() -> String? {
+        UserDefaults.standard.string(forKey: debridRouteKey)
+    }
+
+    static func saveDebridRoute(_ id: String?) {
+        if let id {
+            UserDefaults.standard.set(id, forKey: debridRouteKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: debridRouteKey)
+        }
+    }
+
+    /// Connections per download; 0 is Auto (4).
+    static func connections() -> Int {
+        UserDefaults.standard.integer(forKey: connectionsKey)
+    }
+
+    static func saveConnections(_ parts: Int) {
+        UserDefaults.standard.set(parts, forKey: connectionsKey)
+    }
+
+    static func removeAfter() -> Bool {
+        UserDefaults.standard.bool(forKey: removeAfterKey)
+    }
+
+    static func saveRemoveAfter(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: removeAfterKey)
+    }
+
     static let keepAliveKey = "keepAlive"
     static let parkedKey = "parkedJobs"
 

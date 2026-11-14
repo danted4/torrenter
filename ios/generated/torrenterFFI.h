@@ -271,6 +271,11 @@ void*_Nonnull uniffi_torrenter_fn_constructor_engine_open(RustBuffer dest, RustB
 int8_t uniffi_torrenter_fn_method_engine_any_active(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_CLEAR_ASKS_ABOUT_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_CLEAR_ASKS_ABOUT_REMOTE
+int8_t uniffi_torrenter_fn_method_engine_clear_asks_about_remote(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEBRID_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_DEBRID_ACCOUNT
 RustBuffer uniffi_torrenter_fn_method_engine_debrid_account(void*_Nonnull ptr, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
@@ -319,6 +324,11 @@ uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 void uniffi_torrenter_fn_method_engine_remove(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE_WITH_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE_WITH_REMOTE
+void uniffi_torrenter_fn_method_engine_remove_with_remote(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART
@@ -676,6 +686,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_any_active(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_CLEAR_ASKS_ABOUT_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_CLEAR_ASKS_ABOUT_REMOTE
+uint16_t uniffi_torrenter_checksum_method_engine_clear_asks_about_remote(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DEBRID_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_DEBRID_ACCOUNT
 uint16_t uniffi_torrenter_checksum_method_engine_debrid_account(void
@@ -733,6 +749,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_queue_debrid(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE
 uint16_t uniffi_torrenter_checksum_method_engine_remove(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE_WITH_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE_WITH_REMOTE
+uint16_t uniffi_torrenter_checksum_method_engine_remove_with_remote(void
     
 );
 #endif

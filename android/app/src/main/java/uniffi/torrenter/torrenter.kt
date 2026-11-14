@@ -760,6 +760,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -781,6 +785,8 @@ fun uniffi_torrenter_checksum_func_debrid_services(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_any_active(
 ): Short
+fun uniffi_torrenter_checksum_method_engine_clear_asks_about_remote(
+): Short
 fun uniffi_torrenter_checksum_method_engine_debrid_account(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_dest(
@@ -800,6 +806,8 @@ fun uniffi_torrenter_checksum_method_engine_queue(
 fun uniffi_torrenter_checksum_method_engine_queue_debrid(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_remove(
+): Short
+fun uniffi_torrenter_checksum_method_engine_remove_with_remote(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_restart(
 ): Short
@@ -878,6 +886,8 @@ fun uniffi_torrenter_fn_constructor_engine_open(`dest`: RustBuffer.ByValue,`jobs
 ): Pointer
 fun uniffi_torrenter_fn_method_engine_any_active(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+fun uniffi_torrenter_fn_method_engine_clear_asks_about_remote(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 fun uniffi_torrenter_fn_method_engine_debrid_account(`ptr`: Pointer,`service`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_method_engine_dest(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -897,6 +907,8 @@ fun uniffi_torrenter_fn_method_engine_queue(`ptr`: Pointer,`kind`: RustBuffer.By
 fun uniffi_torrenter_fn_method_engine_queue_debrid(`ptr`: Pointer,`source`: RustBuffer.ByValue,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 fun uniffi_torrenter_fn_method_engine_remove(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_torrenter_fn_method_engine_remove_with_remote(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_restart(`ptr`: Pointer,`id`: Long,`seed`: Byte,`dest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1055,6 +1067,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_any_active() != 33237.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_clear_asks_about_remote() != 51139.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_debrid_account() != 61514.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1083,6 +1098,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_remove() != 13505.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_restart() != 54366.toShort()) {
@@ -1557,6 +1575,11 @@ public interface EngineInterface {
     fun `anyActive`(): kotlin.Boolean
     
     /**
+     * Clearing this job should ask "also remove it from the service?".
+     */
+    fun `clearAsksAboutRemote`(`id`: kotlin.ULong): kotlin.Boolean
+    
+    /**
      * Settings "Test": blocking network call — run it off the UI thread.
      */
     fun `debridAccount`(`service`: kotlin.String, `key`: kotlin.String): AccountView
@@ -1581,6 +1604,11 @@ public interface EngineInterface {
     fun `queueDebrid`(`source`: kotlin.String, `service`: kotlin.String): kotlin.ULong
     
     fun `remove`(`id`: kotlin.ULong)
+    
+    /**
+     * Clear the job and delete its torrent from the service (best effort).
+     */
+    fun `removeWithRemote`(`id`: kotlin.ULong)
     
     fun `restart`(`id`: kotlin.ULong, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong
     
@@ -1709,6 +1737,21 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 
     
     /**
+     * Clearing this job should ask "also remove it from the service?".
+     */override fun `clearAsksAboutRemote`(`id`: kotlin.ULong): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_clear_asks_about_remote(
+        it, FfiConverterULong.lower(`id`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Settings "Test": blocking network call — run it off the UI thread.
      */
     @Throws(EngineException::class)override fun `debridAccount`(`service`: kotlin.String, `key`: kotlin.String): AccountView {
@@ -1828,6 +1871,20 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_remove(
+        it, FfiConverterULong.lower(`id`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Clear the job and delete its torrent from the service (best effort).
+     */override fun `removeWithRemote`(`id`: kotlin.ULong)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_remove_with_remote(
         it, FfiConverterULong.lower(`id`),_status)
 }
     }
