@@ -14,6 +14,11 @@ fn isolate_config(dir: &Path) -> Command {
         .env("APPDATA", dir)
         .env("HOME", dir)
         .env("USERPROFILE", dir)
+        .env_remove("TORRENTER_TORBOX_KEY")
+        .env_remove("TORRENTER_REALDEBRID_KEY")
+        .env_remove("TORRENTER_ALLDEBRID_KEY")
+        .env_remove("TORRENTER_PREMIUMIZE_KEY")
+        .env_remove("TORRENTER_DEBRIDLINK_KEY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -138,6 +143,7 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
         "stop",
         "remove",
         "restart",
+        "debrid_services",
     ] {
         assert!(names.contains(&name), "missing {name} in {names:?}");
     }
@@ -174,6 +180,54 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
         "{bad_http}"
     );
 
+    let services = call_tool(&mut stdin, &mut stdout, 6, "debrid_services", json!({})).await;
+    let payload: Value = serde_json::from_str(&tool_text(&services)).unwrap();
+    assert_eq!(payload["services"][0]["id"], "torbox");
+    assert_eq!(payload["services"][0]["configured"], false);
+
+    let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
+    let no_key = call_tool(
+        &mut stdin,
+        &mut stdout,
+        7,
+        "queue_magnet",
+        json!({"uri": magnet, "debrid": "torbox"}),
+    )
+    .await;
+    assert_eq!(no_key["result"]["isError"], true);
+    assert!(
+        tool_text(&no_key).contains("add a TorBox API key in settings first"),
+        "{no_key}"
+    );
+    let unknown = call_tool(
+        &mut stdin,
+        &mut stdout,
+        8,
+        "queue_magnet",
+        json!({"uri": magnet, "debrid": "nope"}),
+    )
+    .await;
+    assert_eq!(unknown["result"]["isError"], true);
+
+    drop(stdin);
+    let _ = timeout(Duration::from_secs(5), child.wait()).await;
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn mcp_reports_env_keys_without_exposing_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = isolate_config(dir.path());
+    cmd.env("TORRENTER_TORBOX_KEY", "env-secret-key-xyz");
+    let mut child = cmd.spawn().expect("spawn torrenter mcp");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    handshake(&mut stdin, &mut stdout).await;
+    let services = call_tool(&mut stdin, &mut stdout, 2, "debrid_services", json!({})).await;
+    let text = tool_text(&services);
+    assert!(!text.contains("env-secret-key-xyz"), "{text}");
+    let payload: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(payload["services"][0]["configured"], true);
     drop(stdin);
     let _ = timeout(Duration::from_secs(5), child.wait()).await;
     let _ = child.kill().await;

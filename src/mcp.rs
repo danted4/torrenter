@@ -14,6 +14,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use torrenter::debrid::Service;
 use torrenter::identity::{self, VERSION};
 use torrenter::jobs::JobKind;
 use torrenter::paths;
@@ -34,6 +35,10 @@ struct Mcp {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct MagnetArg {
     uri: String,
+    /// Optional debrid service id (see `debrid_services`). Omit to download
+    /// from peers. Uses the user's own configured key; never ask for one.
+    #[serde(default)]
+    debrid: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -67,6 +72,28 @@ struct JobToolView {
     finished: bool,
     active: bool,
     error: Option<String>,
+    /// Debrid route only: service id, provider fetch progress (0–100) and file i/n.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debrid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debrid_progress: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DebridServiceView {
+    id: String,
+    label: String,
+    /// A key is configured (env or settings). The key itself is never exposed.
+    configured: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DebridServicesOut {
+    services: Vec<DebridServiceView>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -88,6 +115,10 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn job_view(job: &Job) -> JobToolView {
     let error = job.snapshot.error();
+    let debrid = job
+        .debrid
+        .as_ref()
+        .map(|debrid| (debrid.service, debrid.view()));
     JobToolView {
         id: job.id,
         kind: job.kind.as_str().to_string(),
@@ -108,6 +139,18 @@ fn job_view(job: &Job) -> JobToolView {
         finished: job.snapshot.is_done(),
         active: job.snapshot.is_active(),
         error,
+        debrid: debrid.as_ref().map(|(service, _)| service.id().to_string()),
+        debrid_progress: debrid
+            .as_ref()
+            .map(|(_, state)| f32::from(state.remote_permille) / 10.0),
+        file_index: debrid
+            .as_ref()
+            .filter(|(_, state)| state.file_index > 0)
+            .map(|(_, state)| state.file_index),
+        file_count: debrid
+            .as_ref()
+            .filter(|(_, state)| !state.files.is_empty())
+            .map(|(_, state)| state.files.len()),
     }
 }
 
@@ -156,6 +199,8 @@ impl Mcp {
         }
         let jobs_path = torrenter::jobs::jobs_path().unwrap_or_else(|_| dest.join("jobs.json"));
         let session = Session::open_leech(dest, jobs_path);
+        session.set_connections(config.connections);
+        session.set_debrid_remove_after(config.debrid_remove_after);
         let notices = Arc::new(Mutex::new(Vec::new()));
         match session.hydrate() {
             session::Hydrate::Empty | session::Hydrate::Loaded => {}
@@ -185,17 +230,43 @@ impl Mcp {
         self.session.dest().display().to_string()
     }
 
-    #[tool(description = "Queue a magnet download (leech)")]
+    #[tool(
+        description = "Queue a magnet download (leech). Pass `debrid` (a service id from debrid_services) only when the user asks to download through their debrid service."
+    )]
     fn queue_magnet(
         &self,
-        Parameters(MagnetArg { uri }): Parameters<MagnetArg>,
+        Parameters(MagnetArg { uri, debrid }): Parameters<MagnetArg>,
     ) -> Result<Json<QueueOut>, String> {
         if !is_valid_magnet_url(&uri) {
             return Err("Invalid magnet URL!".into());
         }
+        let via = match debrid.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            None => None,
+            Some(id) => Some(
+                Service::parse(id)
+                    .filter(|service| Service::shipped().contains(service))
+                    .ok_or_else(|| format!("unknown debrid service {id:?}; see debrid_services"))?,
+            ),
+        };
         self.session
-            .queue(JobKind::Magnet, &uri)
+            .queue_with(JobKind::Magnet, &uri, via)
             .map(|id| Json(QueueOut { id }))
+    }
+
+    #[tool(
+        description = "Debrid services this build supports and whether the user configured a key for each (keys are never shown)"
+    )]
+    fn debrid_services(&self) -> Json<DebridServicesOut> {
+        Json(DebridServicesOut {
+            services: Service::shipped()
+                .iter()
+                .map(|service| DebridServiceView {
+                    id: service.id().into(),
+                    label: service.label().into(),
+                    configured: self.session.has_debrid_key(*service),
+                })
+                .collect(),
+        })
     }
 
     #[tool(description = "Queue an HTTP(S) download")]
@@ -246,7 +317,7 @@ impl Mcp {
         Ok("ok".into())
     }
 
-    #[tool(description = "Restart a job (leech, same dest)")]
+    #[tool(description = "Restart a job (leech, same dest, same route)")]
     fn restart(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
@@ -264,7 +335,7 @@ impl ServerHandler for Mcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("torrenter", VERSION))
             .with_instructions(
-                "Magnet and HTTP downloads. Poll jobs. Do not run the GUI at the same time.",
+                "Magnet and HTTP downloads. A magnet can go through the user's own debrid service (queue_magnet `debrid`) only when they ask; keys are configured by the user, never through MCP. Poll jobs. Do not run the GUI at the same time.",
             )
     }
 }
