@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -6,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextEdit, Vec2};
 
+use crate::credentials::{self, KeySource};
+use crate::debrid::{check_account, Secret, Service};
 use crate::identity::{self, AppKind, VERSION_TAG};
 use crate::jobs::{self, JobKind};
 use crate::paths;
 use crate::progress::{format_eta, format_size, format_speed, JobSnapshot};
-use crate::session::{self, Job, Session, SessionEvent};
+use crate::session::{self, Job, Route, Session, SessionEvent};
 use crate::torrent::{magnet_info_hash, magnet_sub_folder};
 use crate::update::{self, AvailableUpdate};
 
@@ -240,6 +243,8 @@ struct RestartDraft {
     kind: Mode,
     seed: bool,
     dest: PathBuf,
+    /// Magnet jobs: `None` from peers, or through a debrid service.
+    route: Option<Service>,
 }
 
 struct GuiApp {
@@ -265,6 +270,18 @@ struct GuiApp {
     settings_open: bool,
     glass_applied: bool,
     viewport_fullscreen: bool,
+    /// Remembered debrid route for magnet jobs (decision: remembered like seed).
+    debrid_route: Option<Service>,
+    debrid_remove_after: bool,
+    connections: Option<u8>,
+    /// Settings page: key being typed per service (never shown back).
+    key_drafts: HashMap<Service, String>,
+    /// Settings page: last account check per service.
+    account_notes: HashMap<Service, String>,
+    account_tx: Sender<(Service, String)>,
+    account_rx: Receiver<(Service, String)>,
+    /// A cleared debrid job that may still sit on the service: ask first.
+    clear_confirm: Option<u64>,
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -318,6 +335,14 @@ impl GuiApp {
             .map(|error| format!("{error:#}"));
         let jobs_path = jobs::jobs_path().unwrap_or_else(|_| dest.join("jobs.json"));
         let session = Session::open(dest.clone(), jobs_path, seed);
+        session.set_connections(config.connections);
+        session.set_debrid_remove_after(config.debrid_remove_after);
+        let debrid_route = config
+            .debrid_route
+            .as_deref()
+            .and_then(Service::parse)
+            .filter(|service| Service::shipped().contains(service));
+        let (account_tx, account_rx) = mpsc::channel();
         let _ = cmd_tx.send(WorkerCmd::Check);
         let mut app = Self {
             theme,
@@ -342,6 +367,14 @@ impl GuiApp {
             settings_open: false,
             glass_applied: false,
             viewport_fullscreen: false,
+            debrid_route,
+            debrid_remove_after: config.debrid_remove_after,
+            connections: config.connections,
+            key_drafts: HashMap::new(),
+            account_notes: HashMap::new(),
+            account_tx,
+            account_rx,
+            clear_confirm: None,
         };
         if let Some(error) = launch_error {
             app.toast_fatal(error);
@@ -412,18 +445,81 @@ impl GuiApp {
     }
 
     fn queue_job(&mut self) {
-        let kind = match self.mode {
-            Mode::Magnet => JobKind::Magnet,
-            Mode::Http => JobKind::Http,
+        let (kind, via) = match self.mode {
+            Mode::Magnet => (JobKind::Magnet, self.debrid_route),
+            Mode::Http => (JobKind::Http, None),
         };
-        match self.session.queue(kind, &self.input) {
+        match self.session.queue_with(kind, &self.input, via) {
             Ok(_) => self.input.clear(),
             Err(error) => self.toast_fail(error),
         }
     }
 
-    fn restart_job(&mut self, id: u64, seed: bool, dest: PathBuf) -> bool {
-        match self.session.restart(id, seed, dest) {
+    /// Services with a key, in settings order.
+    fn ready_services(&self) -> Vec<Service> {
+        Service::shipped()
+            .iter()
+            .copied()
+            .filter(|service| self.session.has_debrid_key(*service))
+            .collect()
+    }
+
+    /// Debrid control click: off → first service with a key → next → off.
+    fn cycle_debrid_route(&mut self) {
+        let ready = self.ready_services();
+        if ready.is_empty() {
+            self.toast_fail("add a debrid API key in settings first");
+            self.settings_open = true;
+            return;
+        }
+        let next = match self
+            .debrid_route
+            .and_then(|now| ready.iter().position(|service| *service == now))
+        {
+            None => ready.first().copied(),
+            Some(index) => ready.get(index + 1).copied(),
+        };
+        self.debrid_route = next;
+        let _ = update::set_debrid_route(next.map(Service::id));
+    }
+
+    fn start_account_check(&mut self, service: Service, key: Secret) {
+        self.account_notes.insert(service, "checking…".into());
+        let tx = self.account_tx.clone();
+        thread::spawn(move || {
+            let note = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => match runtime.block_on(check_account(service, &key)) {
+                    Ok(account) if account.premium => format!(
+                        "premium{}",
+                        account
+                            .expires
+                            .map(|until| format!(" until {until}"))
+                            .unwrap_or_default()
+                    ),
+                    Ok(_) => "key works, but the account is not premium".into(),
+                    Err(error) => error.to_string(),
+                },
+                Err(error) => error.to_string(),
+            };
+            let _ = tx.send((service, note));
+        });
+    }
+
+    fn restart_job(&mut self, id: u64, route: Option<Service>, seed: bool, dest: PathBuf) -> bool {
+        let route = match route {
+            Some(service) => Route::Via(service),
+            None => Route::Peers,
+        };
+        let kind = self.session.job(id).map(|job| job.kind);
+        let route = if kind == Some(JobKind::Http) {
+            Route::Keep
+        } else {
+            route
+        };
+        match self.session.restart_with(id, route, seed, dest) {
             Ok(_) => true,
             Err(error) => {
                 self.toast_fail(error);
@@ -635,7 +731,14 @@ impl eframe::App for GuiApp {
         const URL_H: f32 = 28.0;
         const DEST_H: f32 = 22.0;
         const GUTTER: f32 = 12.0;
-        let header_h = 16.0 + CONTROLS_H + GUTTER + URL_H + GUTTER + DEST_H + 16.0;
+        while let Ok((service, note)) = self.account_rx.try_recv() {
+            self.account_notes.insert(service, note);
+        }
+        let header_h = if self.settings_open {
+            16.0 + CONTROLS_H + 16.0
+        } else {
+            16.0 + CONTROLS_H + GUTTER + URL_H + GUTTER + DEST_H + 16.0
+        };
         egui::TopBottomPanel::top("header")
             .exact_height(header_h)
             .resizable(false)
@@ -695,6 +798,9 @@ impl eframe::App for GuiApp {
                         );
                     },
                 );
+                if self.settings_open {
+                    return;
+                }
                 ui.add_space(GUTTER);
                 let (url_row, _) =
                     ui.allocate_exact_size(egui::vec2(width, URL_H), egui::Sense::hover());
@@ -709,7 +815,8 @@ impl eframe::App for GuiApp {
                         }
                         let button_w = 80.0_f32;
                         let gap = 10.0_f32;
-                        let glyphs_w = 42.0_f32;
+                        let debrid_w = DEBRID_CONTROL_W;
+                        let glyphs_w = 42.0_f32 + debrid_w + gap;
                         let edit_margin = 16.0_f32;
                         ui.add_space(gap);
                         let field_w = (ui.available_width() - gap - glyphs_w - gap - button_w)
@@ -745,8 +852,14 @@ impl eframe::App for GuiApp {
                             },
                         );
                         ui.add_space(gap);
+                        let magnet = self.mode == Mode::Magnet;
+                        let via = self.debrid_route.filter(|_| magnet);
+                        if debrid_control(ui, via, magnet, palette).clicked() && magnet {
+                            self.cycle_debrid_route();
+                        }
+                        ui.add_space(gap);
                         if let Some(seed) =
-                            seed_toggle(ui, self.seed, palette, self.mode == Mode::Magnet)
+                            seed_toggle(ui, self.seed, palette, magnet && via.is_none())
                         {
                             self.seed = seed;
                             self.session.set_seed(seed);
@@ -794,6 +907,10 @@ impl eframe::App for GuiApp {
                     .inner_margin(12.0),
             )
             .show(ctx, |ui| {
+                if self.settings_open {
+                    self.show_settings_page(ui, palette);
+                    return;
+                }
                 if let Some(tag) = self.installed_tag.clone() {
                     let fill = Color32::from_rgba_unmultiplied(
                         palette.fg.r(),
@@ -957,6 +1074,7 @@ impl eframe::App for GuiApp {
                 let mut open_restart = None;
                 let mut reveal = None;
                 let mut copy_source = None;
+                let mut as_torrent = None;
                 let mut persist_now = false;
                 let row_fill = self.surface(palette.row);
                 let row_alt_fill = self.surface(palette.row_alt);
@@ -1003,8 +1121,19 @@ impl eframe::App for GuiApp {
                             .stroke(Stroke::new(1.0_f32, palette.dim))
                             .inner_margin(10.0);
                         card.show(ui, |ui| {
+                                let debrid_view =
+                                    job.debrid.as_ref().map(|debrid| (debrid.service, debrid.view()));
+                                let fetching = debrid_view.is_some()
+                                    && matches!(status.as_str(), "fetching" | "queued" | "starting");
                                 ui.horizontal(|ui| {
-                                    glass_label(ui, job.kind.label(), 13.0, palette.dim);
+                                    let badge = match &debrid_view {
+                                        Some((service, _)) if fetching => {
+                                            format!("MAGNET → {}", service.label())
+                                        }
+                                        Some((service, _)) => format!("HTTP · via {}", service.label()),
+                                        None => job.kind.label().to_string(),
+                                    };
+                                    glass_label(ui, badge, 13.0, palette.dim);
                                     if job.kind == JobKind::Magnet {
                                         ui.add_space(6.0);
                                         seed_glyph(ui, job.seed, true, false, false, palette);
@@ -1050,6 +1179,16 @@ impl eframe::App for GuiApp {
                                                     job.snapshot.toggle_pause();
                                                     persist_now = true;
                                                 }
+                                                if fetching
+                                                    && ui
+                                                        .button(ink("as torrent", 12.0, palette.dim))
+                                                        .on_hover_text(
+                                                            "stop waiting for the service and download from peers",
+                                                        )
+                                                        .clicked()
+                                                {
+                                                    as_torrent = Some(index);
+                                                }
                                             } else {
                                                 if ui
                                                     .button(ink("clear", 12.0, palette.dim))
@@ -1057,7 +1196,7 @@ impl eframe::App for GuiApp {
                                                 {
                                                     clear_index = Some(index);
                                                 }
-                                                if (job.kind == JobKind::Magnet
+                                                if (job.kind.takes_magnet()
                                                     || job.snapshot.is_stopped())
                                                     && ui
                                                         .button(ink("restart", 12.0, palette.fg))
@@ -1069,7 +1208,12 @@ impl eframe::App for GuiApp {
                                         },
                                     );
                                 });
-                                let fraction = job_bar_fraction(&status, downloaded, total);
+                                let fraction = match &debrid_view {
+                                    Some((_, state)) if fetching && status == "fetching" => {
+                                        Some(f32::from(state.remote_permille) / 1000.0)
+                                    }
+                                    _ => job_bar_fraction(&status, downloaded, total),
+                                };
                                 paint_job_progress(ui, accent, palette.row_alt, fraction, None);
                                 let eta = if !job.snapshot.is_paused()
                                     && job.speed > 1.0
@@ -1105,6 +1249,37 @@ impl eframe::App for GuiApp {
                                             format_size(total),
                                         )
                                     }
+                                } else if let Some((service, state)) = &debrid_view {
+                                    if fetching {
+                                        format!(
+                                            "{status}  {} fetching {:.1}%",
+                                            service.label(),
+                                            f32::from(state.remote_permille) / 10.0
+                                        )
+                                    } else {
+                                        let files = if state.files.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(
+                                                "  file {}/{}",
+                                                state.file_index.max(1),
+                                                state.files.len()
+                                            )
+                                        };
+                                        format!(
+                                            "{status}{files}  D {} @ {}  {}  eta {eta}",
+                                            format_size(downloaded),
+                                            format_speed(job.speed),
+                                            format_size(total),
+                                        )
+                                    }
+                                } else if job.kind == JobKind::Http {
+                                    format!(
+                                        "{status}  D {} @ {}  {}  eta {eta}",
+                                        format_size(downloaded),
+                                        format_speed(job.speed),
+                                        format_size(total),
+                                    )
                                 } else {
                                     format!(
                                         "{status}  peers {peers}  D {} @ {}  {}  eta {eta}",
@@ -1135,6 +1310,12 @@ impl eframe::App for GuiApp {
                         self.toast_info("copied");
                     }
                 }
+                if let Some(index) = as_torrent {
+                    if let Some(job) = jobs.get(index) {
+                        let (id, dest) = (job.id, job.dest.clone());
+                        self.restart_job(id, None, self.seed, dest);
+                    }
+                }
                 if let Some(index) = open_restart {
                     if let Some(job) = jobs.get(index) {
                         self.restart = Some(RestartDraft {
@@ -1142,6 +1323,7 @@ impl eframe::App for GuiApp {
                             kind: mode_from_kind(job.kind),
                             seed: job.seed,
                             dest: job.dest.clone(),
+                            route: job.debrid.as_ref().map(|debrid| debrid.service),
                         });
                     }
                 } else if let Some(index) = clear_index {
@@ -1149,7 +1331,11 @@ impl eframe::App for GuiApp {
                         if self.restart.as_ref().is_some_and(|draft| draft.id == job.id) {
                             self.restart = None;
                         }
-                        self.session.remove(job.id);
+                        if self.session.clear_asks_about_remote(job.id) {
+                            self.clear_confirm = Some(job.id);
+                        } else {
+                            self.session.remove(job.id);
+                        }
                     }
                     persist_now = true;
                 }
@@ -1158,25 +1344,272 @@ impl eframe::App for GuiApp {
                 }
             });
 
-        self.show_settings(ctx, palette);
+        self.show_clear_confirm(ctx, palette);
         self.show_restart_popup(ctx, palette);
         self.show_toasts(ctx, palette);
     }
 }
 
 impl GuiApp {
-    fn show_settings(&mut self, ctx: &egui::Context, palette: Theme) {
-        if !self.settings_open {
-            return;
-        }
+    /// Full settings page in place of the input row and jobs (the cog turns
+    /// into a back arrow). Downloads keep running underneath.
+    fn show_settings_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
         #[cfg(target_os = "macos")]
         let mut persist_tint = false;
-        let mut close = false;
-        egui::Window::new("settings")
-            .title_bar(false)
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_max_width(640.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                settings_heading(ui, "appearance", palette);
+                ui.horizontal(|ui| {
+                    glass_label(ui, "theme", 12.0, palette.dim);
+                    ui.add_space(12.0);
+                    ui.scope(|ui| {
+                        ui.style_mut().interaction.interact_radius = 0.0;
+                        for (id, name) in [
+                            (ThemeId::Phosphor, "phosphor"),
+                            (ThemeId::Amber, "amber"),
+                            (ThemeId::Ice, "ice"),
+                            (ThemeId::Scarlet, "scarlet"),
+                            (ThemeId::Violet, "violet"),
+                        ] {
+                            if theme_swatch(ui, theme(id).fg, self.theme == id, name).clicked()
+                                && self.theme != id
+                            {
+                                self.theme = id;
+                                let _ = update::set_theme(id.as_str());
+                            }
+                        }
+                    });
+                });
+                #[cfg(target_os = "macos")]
+                {
+                    let locked = self.viewport_fullscreen;
+                    let shown = update::effective_glass_tint(self.glass_tint, locked);
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        glass_label(ui, "tint", 12.0, palette.dim);
+                        ui.add_space(12.0);
+                        glass_label(
+                            ui,
+                            format!("{}%", update::glass_tint_percent(shown)),
+                            12.0,
+                            palette.fg,
+                        );
+                    });
+                    ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+                        if locked {
+                            let mut locked_tint = shown;
+                            tint_slider(ui, &mut locked_tint, palette, true);
+                        } else {
+                            let response = tint_slider(ui, &mut self.glass_tint, palette, false);
+                            if response.drag_stopped()
+                                || (response.changed() && !response.dragged())
+                            {
+                                persist_tint = true;
+                            }
+                        }
+                    });
+                }
+
+                settings_heading(ui, "updates", palette);
+                if labeled_switch(ui, "auto-update", self.auto_update, palette)
+                    .on_hover_text(
+                        "check GitHub Releases and replace this app when a newer version exists",
+                    )
+                    .clicked()
+                {
+                    self.auto_update = !self.auto_update;
+                    let _ = update::set_auto_update(self.auto_update);
+                    if self.auto_update {
+                        let _ = self.tx.send(WorkerCmd::Check);
+                        self.toast_hold(CHECKING_UPDATES);
+                    }
+                }
+
+                settings_heading(ui, "debrid accounts", palette);
+                glass_label(
+                    ui,
+                    "Uses your own account. The provider's terms apply.",
+                    12.0,
+                    palette.dim,
+                );
+                ui.add_space(4.0);
+                for service in Service::shipped().iter().copied() {
+                    self.debrid_account_card(ui, service, palette);
+                    ui.add_space(6.0);
+                }
+
+                settings_heading(ui, "downloads", palette);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    glass_label(ui, "connections per download", 12.0, palette.dim);
+                    let auto = self.connections.is_none();
+                    if route_chip(ui, "auto (4)", auto, palette).clicked() && !auto {
+                        self.set_connections(None);
+                    }
+                    for parts in [1u8, 2, 4, 8, 16] {
+                        let label = parts.to_string();
+                        let on = self.connections == Some(parts);
+                        if route_chip(ui, &label, on, palette).clicked() && !on {
+                            self.set_connections(Some(parts));
+                        }
+                    }
+                });
+                glass_label(
+                    ui,
+                    "applies to new HTTP and debrid downloads; each service caps it (Premiumize 1)",
+                    11.0,
+                    palette.dim,
+                );
+                ui.add_space(4.0);
+                if labeled_switch(
+                    ui,
+                    "remove from service after download",
+                    self.debrid_remove_after,
+                    palette,
+                )
+                .on_hover_text("only torrents torrenter added, and only once every file landed")
+                .clicked()
+                {
+                    self.debrid_remove_after = !self.debrid_remove_after;
+                    self.session
+                        .set_debrid_remove_after(self.debrid_remove_after);
+                    let _ = update::set_debrid_remove_after(self.debrid_remove_after);
+                }
+            });
+        #[cfg(target_os = "macos")]
+        if persist_tint {
+            let _ = update::set_glass_tint(self.glass_tint);
+        }
+    }
+
+    fn set_connections(&mut self, parts: Option<u8>) {
+        self.connections = parts;
+        self.session.set_connections(parts);
+        let _ = update::set_connections(parts);
+    }
+
+    fn debrid_account_card(&mut self, ui: &mut egui::Ui, service: Service, palette: Theme) {
+        let source = credentials::key_for(service).map(|(_, source)| source);
+        let fill = self.card_fill(palette.row);
+        egui::Frame::NONE
+            .fill(fill)
+            .corner_radius(8)
+            .stroke(Stroke::new(1.0_f32, palette.dim))
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    glass_label(ui, service.label(), 14.0, palette.fg);
+                    ui.add_space(8.0);
+                    let (text, color) = match source {
+                        Some(KeySource::Env) => {
+                            (format!("key from {}", service.env_var()), palette.fg)
+                        }
+                        Some(KeySource::File) => ("key saved".to_string(), palette.fg),
+                        None => ("no key".to_string(), palette.dim),
+                    };
+                    glass_label(ui, text, 12.0, color);
+                });
+                if let Some(note) = self.account_notes.get(&service) {
+                    glass_label(ui, note, 12.0, palette.dim);
+                }
+                ui.add_space(4.0);
+                let mut save = false;
+                let mut test = false;
+                let mut remove = false;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    let draft = self.key_drafts.entry(service).or_default();
+                    let id = ui.make_persistent_id(("debrid-key", service.id()));
+                    let focused = ui.memory(|memory| memory.has_focus(id));
+                    let mut edit = TextEdit::singleline(draft)
+                        .id(id)
+                        .password(true)
+                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .desired_width(260.0)
+                        .margin(egui::Margin::symmetric(8, 5));
+                    if !focused {
+                        edit = edit.hint_text("paste API key");
+                    }
+                    let response = ui.add(edit);
+                    let typed = !draft.trim().is_empty();
+                    if typed
+                        && (ui.button(ink("save", 12.0, palette.fg)).clicked()
+                            || (response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))))
+                    {
+                        save = true;
+                    }
+                    if (typed || source.is_some())
+                        && ui.button(ink("test", 12.0, palette.fg)).clicked()
+                    {
+                        test = true;
+                    }
+                    if source == Some(KeySource::File)
+                        && ui.button(ink("remove", 12.0, palette.fail)).clicked()
+                    {
+                        remove = true;
+                    }
+                });
+                let draft = self.key_drafts.get(&service).cloned().unwrap_or_default();
+                if save {
+                    if let Some(key) = Secret::new(draft) {
+                        match credentials::set_key(service, &key) {
+                            Ok(()) => {
+                                self.key_drafts.remove(&service);
+                                self.toast_info(format!("{} key saved", service.label()));
+                                self.start_account_check(service, key);
+                            }
+                            Err(error) => self.toast_fail(format!("{error:#}")),
+                        }
+                    }
+                } else if test {
+                    let key = Secret::new(draft)
+                        .or_else(|| credentials::key_for(service).map(|(key, _)| key));
+                    if let Some(key) = key {
+                        self.start_account_check(service, key);
+                    }
+                } else if remove {
+                    match credentials::remove_key(service) {
+                        Ok(()) => {
+                            self.account_notes.remove(&service);
+                            if self.debrid_route == Some(service) {
+                                self.debrid_route = None;
+                                let _ = update::set_debrid_route(None);
+                            }
+                            self.toast_info(format!("{} key removed", service.label()));
+                        }
+                        Err(error) => self.toast_fail(format!("{error:#}")),
+                    }
+                }
+            });
+    }
+
+    /// Clearing a debrid job torrenter added that never finished: ask whether
+    /// it should also go from the service.
+    fn show_clear_confirm(&mut self, ctx: &egui::Context, palette: Theme) {
+        let Some(id) = self.clear_confirm else {
+            return;
+        };
+        let Some(job) = self.session.job(id) else {
+            self.clear_confirm = None;
+            return;
+        };
+        let label = job
+            .debrid
+            .as_ref()
+            .map(|debrid| debrid.service.label())
+            .unwrap_or("the service");
+        let mut open = true;
+        let mut choice = None;
+        egui::Window::new("clear")
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 52.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
             .frame(
                 egui::Frame::NONE
                     .fill(self.card_fill(palette.row))
@@ -1185,67 +1618,42 @@ impl GuiApp {
                     .corner_radius(8),
             )
             .show(ctx, |ui| {
-                ui.set_width(228.0);
-                if settings_close(ui, palette).clicked() {
-                    close = true;
-                }
+                ui.set_min_width(360.0);
+                glass_label(
+                    ui,
+                    format!("Also remove it from {label}?"),
+                    13.0,
+                    palette.fg,
+                );
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    glass_label(ui, "theme", 12.0, palette.dim);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.scope(|ui| {
-                            ui.style_mut().interaction.interact_radius = 0.0;
-                            for (id, name) in [
-                                (ThemeId::Violet, "violet"),
-                                (ThemeId::Scarlet, "scarlet"),
-                                (ThemeId::Ice, "ice"),
-                                (ThemeId::Amber, "amber"),
-                                (ThemeId::Phosphor, "phosphor"),
-                            ] {
-                                if theme_swatch(ui, theme(id).fg, self.theme == id, name).clicked()
-                                    && self.theme != id
-                                {
-                                    self.theme = id;
-                                    let _ = update::set_theme(id.as_str());
-                                }
-                            }
-                        });
-                    });
-                });
-                ui.add_space(10.0);
-                #[cfg(target_os = "macos")]
-                {
-                    let locked = self.viewport_fullscreen;
-                    let shown = update::effective_glass_tint(self.glass_tint, locked);
-                    ui.horizontal(|ui| {
-                        glass_label(ui, "tint", 12.0, palette.dim);
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            glass_label(
-                                ui,
-                                format!("{}%", update::glass_tint_percent(shown)),
-                                12.0,
-                                palette.fg,
-                            );
-                        });
-                    });
-                    ui.add_space(4.0);
-                    if locked {
-                        let mut locked_tint = shown;
-                        tint_slider(ui, &mut locked_tint, palette, true);
-                    } else {
-                        let response = tint_slider(ui, &mut self.glass_tint, palette, false);
-                        if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                            persist_tint = true;
-                        }
+                    if ui
+                        .button(ink(format!("remove from {label}"), 12.0, palette.fail))
+                        .clicked()
+                    {
+                        choice = Some(true);
                     }
-                }
+                    if ui
+                        .button(ink(format!("keep it on {label}"), 12.0, palette.fg))
+                        .clicked()
+                    {
+                        choice = Some(false);
+                    }
+                });
             });
-        #[cfg(target_os = "macos")]
-        if persist_tint || close {
-            let _ = update::set_glass_tint(self.glass_tint);
-        }
-        if close {
-            self.settings_open = false;
+        match choice {
+            Some(true) => {
+                self.session.remove_with_remote(id);
+                self.clear_confirm = None;
+                self.persist_jobs(true);
+            }
+            Some(false) => {
+                self.session.remove(id);
+                self.clear_confirm = None;
+                self.persist_jobs(true);
+            }
+            None if !open => self.clear_confirm = None,
+            None => {}
         }
     }
 
@@ -1261,8 +1669,10 @@ impl GuiApp {
         let mut picked = None;
         let mut start = false;
         let mut seed = draft.seed;
+        let mut route = draft.route;
         let dest = draft.dest.clone();
         let kind = draft.kind;
+        let ready = self.ready_services();
         egui::Window::new("restart")
             .collapsible(false)
             .resizable(false)
@@ -1279,8 +1689,23 @@ impl GuiApp {
                 ui.set_min_width(420.0);
                 if kind == Mode::Magnet {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        glass_label(ui, "route", 12.0, palette.dim);
+                        if route_chip(ui, "peers", route.is_none(), palette).clicked() {
+                            route = None;
+                        }
+                        for service in &ready {
+                            if route_chip(ui, service.label(), route == Some(*service), palette)
+                                .clicked()
+                            {
+                                route = Some(*service);
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
                         glass_label(ui, "mode", 12.0, palette.dim);
-                        if let Some(value) = seed_toggle(ui, seed, palette, true) {
+                        if let Some(value) = seed_toggle(ui, seed, palette, route.is_none()) {
                             seed = value;
                         }
                     });
@@ -1309,6 +1734,7 @@ impl GuiApp {
             });
         if let Some(draft) = self.restart.as_mut() {
             draft.seed = seed;
+            draft.route = route;
         }
         if let Some(path) = picked {
             self.apply_picked_dir(path, true);
@@ -1320,7 +1746,8 @@ impl GuiApp {
             let seed = draft.seed;
             let dest = draft.dest.clone();
             let id = draft.id;
-            if self.restart_job(id, seed, dest) {
+            let route = draft.route;
+            if self.restart_job(id, route, seed, dest) {
                 self.restart = None;
             }
         } else if !open {
@@ -1568,6 +1995,22 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     paint_brush_stroke(painter, rect.shrink(1.5));
     let stroke = Stroke::new(1.3_f32, color);
     let c = rect.center();
+    if open {
+        // Back arrow: settings replace the main screen until closed.
+        painter.line_segment(
+            [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
+            stroke,
+        );
+        painter.line_segment(
+            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
+            stroke,
+        );
+        return click_cursor(response).on_hover_text("back");
+    }
     painter.circle_stroke(c, 4.8, stroke);
     painter.circle_filled(c, 1.6, color);
     for step in 0..6 {
@@ -1576,6 +2019,94 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
         painter.line_segment([c + dir * 6.2, c + dir * 8.4], stroke);
     }
     click_cursor(response).on_hover_text("settings")
+}
+
+fn settings_heading(ui: &mut egui::Ui, text: &str, palette: Theme) {
+    ui.add_space(14.0);
+    glass_label(ui, text, 13.0, palette.fg);
+    let width = ui.available_width().min(640.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        Stroke::new(1.0_f32, palette.dim),
+    );
+    ui.add_space(4.0);
+}
+
+/// Width the input row reserves for the debrid control.
+const DEBRID_CONTROL_W: f32 = 120.0;
+
+/// "debrid" (off) or "via TorBox" (on); faded outside MAGNET mode.
+fn debrid_control(
+    ui: &mut egui::Ui,
+    via: Option<Service>,
+    enabled: bool,
+    palette: Theme,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(DEBRID_CONTROL_W, 22.0), Sense::click());
+    let painter = ui.painter();
+    let (text, color) = match via {
+        Some(service) => (format!("via {}", service.label()), palette.fg),
+        None => ("debrid".to_string(), palette.dim),
+    };
+    let color = if enabled {
+        color
+    } else {
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
+    };
+    let galley = painter.layout_no_wrap(text, FontId::new(12.0, FontFamily::Monospace), color);
+    let pos = egui::pos2(
+        rect.center().x - galley.size().x / 2.0,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    painter.galley(pos, galley, color);
+    if via.is_some() && enabled {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            4.0,
+            Stroke::new(1.0_f32, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let response = if enabled {
+        click_cursor(response)
+    } else {
+        response
+    };
+    response.on_hover_text(if !enabled {
+        "debrid applies to magnet downloads"
+    } else if via.is_some() {
+        "download through your debrid service (click to switch or turn off)"
+    } else {
+        "download from peers; click to use your debrid service"
+    })
+}
+
+fn route_chip(ui: &mut egui::Ui, text: &str, selected: bool, palette: Theme) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        text.into(),
+        FontId::new(12.0, FontFamily::Monospace),
+        if selected { palette.fg } else { palette.dim },
+    );
+    let size = galley.size() + egui::vec2(14.0, 8.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let color = if selected || response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    let painter = ui.painter();
+    painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, color);
+    if selected {
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0_f32, color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    click_cursor(response)
 }
 
 fn theme_swatch(ui: &mut egui::Ui, fill: Color32, selected: bool, name: &str) -> egui::Response {
@@ -1692,8 +2223,13 @@ fn paint_swap_arrows(painter: &egui::Painter, rect: egui::Rect, color: Color32) 
 }
 
 fn auto_update_toggle(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Response {
+    labeled_switch(ui, "auto-update", on, palette)
+        .on_hover_text("check GitHub Releases and replace this app when a newer version exists")
+}
+
+fn labeled_switch(ui: &mut egui::Ui, label: &str, on: bool, palette: Theme) -> egui::Response {
     let galley = ui.painter().layout_no_wrap(
-        "auto-update".into(),
+        label.into(),
         FontId::new(12.0, FontFamily::Monospace),
         palette.dim,
     );
@@ -1724,7 +2260,6 @@ fn auto_update_toggle(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Resp
     let knob_fill = if on { palette.bg } else { palette.dim };
     painter.circle_filled(egui::pos2(knob_x, track.center().y), knob_r, knob_fill);
     click_cursor(response)
-        .on_hover_text("check GitHub Releases and replace this app when a newer version exists")
 }
 
 fn copy_url_icon(ui: &mut egui::Ui, palette: Theme, page: Color32) -> egui::Response {
@@ -1760,65 +2295,6 @@ fn click_text(
     color: Color32,
 ) -> egui::Response {
     click_cursor(glass_text(ui, text, size, color, Sense::click()))
-}
-
-fn settings_close(ui: &mut egui::Ui, palette: Theme) -> egui::Response {
-    let height = 22.0_f32;
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-    let title = ui.painter().layout_no_wrap(
-        "settings".into(),
-        FontId::new(14.0, FontFamily::Monospace),
-        palette.fg,
-    );
-    paint_washed_galley(
-        ui.painter(),
-        egui::pos2(
-            rect.center().x - title.size().x / 2.0,
-            rect.center().y - title.size().y / 2.0,
-        ),
-        title,
-        palette.fg,
-    );
-    let close_size = egui::vec2(18.0, 18.0);
-    let close_rect = egui::Rect::from_center_size(
-        egui::pos2(rect.right() - close_size.x / 2.0, rect.center().y),
-        close_size,
-    );
-    let close =
-        ui.allocate_new_ui(
-            egui::UiBuilder::new().max_rect(close_rect).layout(
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            ),
-            |ui| {
-                let (icon, response) = ui.allocate_exact_size(close_size, Sense::click());
-                let stroke = Stroke::new(
-                    1.3_f32,
-                    if response.hovered() {
-                        palette.fg
-                    } else {
-                        palette.dim
-                    },
-                );
-                let pad = 4.5_f32;
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(icon.left() + pad, icon.top() + pad),
-                        egui::pos2(icon.right() - pad, icon.bottom() - pad),
-                    ],
-                    stroke,
-                );
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(icon.right() - pad, icon.top() + pad),
-                        egui::pos2(icon.left() + pad, icon.bottom() - pad),
-                    ],
-                    stroke,
-                );
-                click_cursor(response).on_hover_text("close")
-            },
-        );
-    close.inner
 }
 
 fn note_after_up_to_date(current: &str) -> Option<&'static str> {
