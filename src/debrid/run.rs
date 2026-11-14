@@ -23,6 +23,8 @@ const POLL_FIRST: Duration = Duration::from_secs(3);
 const POLL_MAX: Duration = Duration::from_secs(30);
 const RATE_LIMIT_WAIT: Duration = Duration::from_secs(30);
 const NETWORK_RETRIES: u32 = 5;
+/// Consecutive rate-limit / 503 waits before giving up (~10 minutes).
+const RATE_LIMIT_RETRIES: u32 = 20;
 
 /// Provider-side progress and ids for one debrid job. Shared with the session,
 /// which persists it and shows it; never holds a link or a key.
@@ -149,7 +151,7 @@ async fn drive(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
         let mut refreshed = false;
         loop {
             wait_while_paused(Some(snapshot.as_ref())).await?;
-            let link = stoppable(&snapshot, provider.link(&remote_id, &item.file)).await?;
+            let link = retrying(&snapshot, || provider.link(&remote_id, &item.file)).await?;
             match download_job_file(
                 &client,
                 &link,
@@ -252,11 +254,16 @@ where
     Fut: std::future::Future<Output = std::result::Result<T, DebridError>>,
 {
     let mut network_failures = 0;
+    let mut rate_limited = 0;
     loop {
         match stoppable(snapshot, call()).await {
             Ok(value) => return Ok(value),
             Err(error) => match error.downcast_ref::<DebridError>() {
+                Some(DebridError::RateLimited(_)) if rate_limited >= RATE_LIMIT_RETRIES => {
+                    bail!("the service kept refusing requests (rate limited or unavailable)");
+                }
                 Some(DebridError::RateLimited(wait)) => {
+                    rate_limited += 1;
                     sleep_or_stop(snapshot, wait.unwrap_or(RATE_LIMIT_WAIT)).await?;
                 }
                 Some(DebridError::Network(_)) if network_failures < NETWORK_RETRIES => {
