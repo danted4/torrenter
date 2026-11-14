@@ -29,12 +29,14 @@
    </tr>
 </table>
 
-No arguments opens the interactive menu (magnet, HTTP, auto-update, seed, download folder). Subcommands:
+No arguments opens the interactive menu (magnet, HTTP, auto-update, seed, download folder, debrid route, debrid accounts, connections). Subcommands:
 
 ```bash
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
 torrenter magnet "magnet:?xt=urn:btih:…" --dir /tmp/out   # one-shot, not saved
+torrenter magnet "magnet:?xt=urn:btih:…" --debrid torbox  # through your debrid service
+torrenter debrid add torbox      # save a key (typed hidden or piped); also test / remove / list
 torrenter --auto-update          # persist: check GitHub Releases on startup (TTY only)
 torrenter --no-auto-update
 torrenter update                 # install the latest matching CLI asset now
@@ -45,8 +47,8 @@ While a download runs, type `1` then Enter to pause/resume, or `2` then Enter to
 
 Downloader with two engines, two desktop fronts, an **Android sideload APK**, an **iOS sideload app** you build on a Mac, and **stdio MCP**. Each [GitHub Release](https://github.com/danted4/torrenter/releases) ships a **CLI** binary, a **native GUI** binary (egui), and `torrenter-android.apk`. There is no iOS IPA on Releases, no App Store listing, and no in-app updater.
 
-1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit)
-2. **Direct HTTP(S)** — 4-part parallel download with byte-range resume
+1. **Magnet / torrent** — BitTorrent via [librqbit](https://github.com/ikatson/rqbit), or optionally through **your own debrid service** (see [Debrid](#debrid-optional))
+2. **Direct HTTP(S)** — multi-part parallel download (Auto = 4 connections) with byte-range resume
 
 Output goes to `<OS Downloads>/torrenter` until you pick another folder. Both fronts show `danted4/torrenter vX.Y.Z`. Auto-update is **off** by default.
 
@@ -170,7 +172,7 @@ Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`
 4. Allow **notifications** so the foreground service can keep jobs alive when you leave the app.
 5. If Android asks to ignore battery optimizations, allow it. Denying that does not block jobs; OEMs may still freeze seeding.
 
-Leaving the app (Back) keeps live jobs in a foreground service until they finish or you Stop. Reopen the app to restore incomplete jobs (`jobs.json` in app private storage). A reboot or process kill does **not** autostart torrenter. Share mode asks the LAN gateway to forward the listen port (UPnP); phones behind CGNAT can still finish at `U 0.00` with no inbound peers. Theme and seed live in app preferences, not desktop `config.json`.
+Leaving the app (Back) keeps live jobs in a foreground service until they finish or you Stop. Reopen the app to restore incomplete jobs (`jobs.json` in app private storage). A reboot or process kill does **not** autostart torrenter. Share mode asks the LAN gateway to forward the listen port (UPnP); phones behind CGNAT can still finish at `U 0.00` with no inbound peers. The header **cog** opens settings (theme, debrid accounts, connections, remove after download); system Back returns. Theme, seed and those settings live in app preferences, not desktop `config.json`. Debrid keys are encrypted with an Android Keystore key and excluded from backups.
 
 No Rust/Cargo is needed on the phone. Building the APK is in the [Development](#development) section.
 
@@ -199,6 +201,8 @@ You need a **Mac**, **full Xcode** from the App Store (Command Line Tools are no
 
 Downloads: **Files → Browse → On My iPhone → torrenter**. If On My iPhone is missing, enable it under Browse locations. Idle job rows have **share** for Open In / VLC.
 
+The header **cog** opens settings (theme, keep alive, debrid accounts, connections, remove after download); **← back** returns. Debrid keys live in the iOS **Keychain** (this device only).
+
 Leaving the app keeps live jobs running for up to ~20 s (the iOS background grace window), then **parks** them: they stop and the app remembers which ones were running. Reopening the app (even after iOS kills it) **restarts** parked jobs on its own; jobs you paused stay stopped. Turn on **keep alive** (switch under the URL field) to keep downloading in the background: a silent audio loop that mixes with other apps keeps iOS from suspending torrenter until every job is done, at a battery cost. It is a sideload-only trick (the app declares the `audio` background mode) and is off by default. A phone call or another app grabbing audio falls back to the grace window. `jobs.json` is in Application Support (not in Files). Theme is UserDefaults. Incomplete work resumes from dest / `.resume/`. Local network permission may appear for magnet/DHT.
 
 ## MCP
@@ -220,6 +224,8 @@ Put `torrenter` on `PATH`, then:
 
 Stdout is the protocol; logs go to stderr. There is no install token and no extra binary.
 
+Debrid: `queue_magnet` takes an optional `debrid` service id, and `debrid_services` lists the services this build offers and whether a key is configured. Keys are never shown and cannot be set over MCP; configure them with `torrenter debrid add`, the GUI settings, or `TORRENTER_<SERVICE>_KEY` in the host's `env` block. Without `debrid`, a magnet downloads from peers.
+
 ## Two download modes
 
 | | **Magnet / torrent** | **Direct HTTP(S)** |
@@ -227,11 +233,13 @@ Stdout is the protocol; logs go to stderr. There is no install token and no extr
 | **Use when** | magnet P2P | CDN, mirror, or any direct file URL |
 | **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
-| **Parallelism** | piece picker | 4 byte-range parts |
+| **Parallelism** | piece picker | byte-range parts: **connections** setting, Auto = 4 (1–16) |
 | **Resume** | librqbit on disk under `<dest>/<torrent-name>/` | `<dest>/.resume/` part files |
 | **Peers** | live count in the bar | `Peers: 0` |
 | **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |
+
+A magnet can instead go **via debrid**: your debrid service fetches it and torrenter downloads the files over HTTP (see [Debrid](#debrid-optional)). It is still a magnet job, not a third mode.
 
 Magnet links need a 32-character base32 or 40-character hex info hash. `.torrent` files are not accepted. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
@@ -241,7 +249,21 @@ HTTP pause aborts the live Range body and continues from `<dest>/.resume/` on re
 
 Torrent mode uses DHT in memory only. **Share** (default, `seed: on`) uploads while downloading, opens an incoming TCP listen on a random high port, and stays connected after 100% until you press `2` or quit — `torrenter magnet` will not return when the file is complete. **Leech** (`seed: off`) never uploads and calls `session.stop()` at 100%. Each magnet writes into `<dest>/<torrent-name>/` (whitespace becomes `_`). If the magnet has no name, or that folder belongs to a different info-hash, the folder is the hash (or `name_hash`). Overwrite is allowed only inside that folder so a retry can resume. Closing the CLI drops every seed. Closing the GUI drops live sessions too, then restores the job list on the next launch (share rows that were seeding start seeding again if their files are still in that row’s dest).
 
-The GUI uses the same engines: phosphor / amber / ice / scarlet / violet (last pick saved), magnet/HTTP swap on the URL row, share/leech glyphs, dest path, pause / stop / clear per row. **Stop** immediately shows **clear** (and **restart**). Click a job title to open **that row’s** folder (the dest saved on the job, not the folder used for new START jobs). The copy icon after the title puts that job’s magnet or HTTP URL on the clipboard. Idle rows use **restart** (confirm popup with mode, dest, and share/leech). Search filters jobs (`Esc` clears). At most four downloads run at once; the same magnet or HTTP URL cannot start twice while it is already active. The job list is saved across launches (`jobs.json`). Live rows continue after a dest check (paused rows start paused and still count toward the 4-run cap). A >0% magnet whose files were moved/deleted, or a live HTTP job without `.resume` parts, comes back stopped. Seeding still needs the window open; it resumes on the next launch if that row was left seeding.
+The GUI uses the same engines: phosphor / amber / ice / scarlet / violet (last pick saved), magnet/HTTP swap on the URL row, a **debrid** control (MAGNET only; fades share/leech while on), share/leech glyphs, dest path, pause / stop / clear per row. The header **cog** swaps the URL row and job list for a scrollable settings page (theme, tint on macOS, auto-update, debrid accounts, connections, remove after download) and turns into a back arrow; auto-update also stays on the header. **Stop** immediately shows **clear** (and **restart**). Click a job title to open **that row’s** folder (the dest saved on the job, not the folder used for new START jobs). The copy icon after the title puts that job’s magnet or HTTP URL on the clipboard. Idle rows use **restart** (confirm popup with route — peers or a debrid service — dest, and share/leech). Search filters jobs (`Esc` clears). At most four downloads run at once; the same magnet or HTTP URL cannot start twice while it is already active. The job list is saved across launches (`jobs.json`). Live rows continue after a dest check (paused rows start paused and still count toward the 4-run cap). A >0% magnet whose files were moved/deleted, or a live HTTP job without `.resume` parts, comes back stopped. Seeding still needs the window open; it resumes on the next launch if that row was left seeding.
+
+## Debrid (optional)
+
+A debrid service downloads a torrent on its own servers and hands back HTTPS links. With a key configured, a magnet job can go **via debrid**: torrenter adds the magnet to **your** account, waits while the service fetches it, then downloads every file over HTTP into the same `<dest>/<torrent-name>/` folder a plain magnet would use. Your IP never joins the swarm; the service itself sees the torrent and may log it.
+
+- **Services:** TorBox in this release. Real-Debrid, AllDebrid, Premiumize and Debrid-Link are built and tested against fakes and ship once someone confirms each with a real account.
+- **Keys:** desktop `credentials.json` next to `config.json` (owner-only, never in `jobs.json` or logs), or `TORRENTER_<SERVICE>_KEY` (e.g. `TORRENTER_TORBOX_KEY`), which overrides the saved key and is never written. Android keeps keys encrypted with the Keystore, iOS in the Keychain. Add one in settings (**Test** shows "premium until …" or the error) or with `torrenter debrid add torbox`.
+- **Route:** off on a fresh install; the debrid control (or `--debrid`, or MCP `debrid`) turns it on and is remembered like seed (MCP always defaults to off). Debrid jobs never seed.
+- **While the service fetches** the row reads `MAGNET → TorBox · fetching %`, with an **as torrent** action to download from peers instead. There is no automatic fallback. Then it reads `HTTP · via TorBox` with `file i/n`, files one after another.
+- **Connections:** the setting (Auto = 4) is capped per service (Premiumize 1; AllDebrid, Debrid-Link, Real-Debrid 8; TorBox 16).
+- **Resume:** jobs keep the service's torrent id and file ids, never links. Restarting asks the service for fresh links and continues the saved parts; an expired link is refreshed once.
+- **Remove from service after download** (off by default) deletes only torrents torrenter added, after every file landed. Clearing an unfinished debrid job asks whether to remove it from the service too.
+- **Blocked content** (for example Real-Debrid's "infringing file") fails the job with the service's message. torrenter does not work around it.
+- **Downgrades:** torrenter 3.7.1 and older drop debrid jobs from the list (the files stay on disk). From this release on, unknown job kinds are kept as-is.
 
 ## Updates
 
@@ -265,6 +287,7 @@ flowchart TD
   start[torrenter] --> entry{Args?}
   entry -->|none| menu{Menu}
   entry -->|magnet| torrent
+  entry -->|magnet --debrid| debridAdd
   entry -->|http| httpStart
   entry -->|update| updater
   menu -->|1 Magnet| torrent
@@ -273,6 +296,17 @@ flowchart TD
   menu -->|4 Update now| updater
   menu -->|5 Toggle seed| menu
   menu -->|6 Change download folder| menu
+  menu -->|7 Debrid route| menu
+  menu -->|8 Debrid accounts| menu
+  menu -->|9 Connections| menu
+
+  subgraph debridFlow [Magnet via debrid]
+    debridAdd[add or reuse on the service]
+    debridAdd --> fetch{fetched?}
+    fetch -->|no| poll[poll 3s to 30s] --> fetch
+    fetch -->|yes| files[each file: fresh link]
+    files --> parts
+  end
 
   subgraph magnetFlow [Magnet]
     torrent[librqbit session]
@@ -293,7 +327,7 @@ flowchart TD
     httpStart[HEAD plus Range bytes 0-0]
     httpStart --> sized{Known size?}
     sized -->|no| single[Single GET stream]
-    sized -->|yes| parts[4 parallel Range parts]
+    sized -->|yes| parts[N parallel Range parts, Auto 4]
     parts --> resumeDir["dest/.resume hashed-url parts"]
     resumeDir --> honor{"HTTP 206?"}
     honor -->|no| wipe[Wipe parts] --> single
@@ -308,19 +342,20 @@ flowchart TD
   updater[GitHub Releases plus SHA256SUMS]
 ```
 
-HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `<dest>/.resume/`. Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
+HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under `<dest>/.resume/` (debrid files key it by service, torrent id and file id instead, under `<dest>/<torrent-name>/.resume/`). Oversized parts are truncated before append; a short 206 is an error, not a zero-filled hole. Merge writes `.{filename}.merge.tmp` then replaces the final file.
 
 ## Configuration
 
 - Download folder: `<OS Downloads>/torrenter` until `download_dir` is set (`src/paths.rs`)
-- Parallel HTTP parts: `PART_COUNT = 4` in `src/http.rs`
+- Parallel HTTP parts: `connections` in `config.json` (unset = Auto = `PART_COUNT` = 4, else 1–16), fixed per job when it is created
 - GUI concurrent jobs: 4
 - Progress format: `BAR_TEMPLATE` in `src/progress.rs`
 - HTTP and updater timeouts: 20s connect, 60s between reads
-- Auto-update, magnet seed, GUI `theme`, GUI `glass_tint` (macOS only), and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. `theme` is `phosphor`, `amber`, `ice`, `scarlet`, or `violet` (default phosphor). On macOS, `glass_tint` is 40–210 (default 60% of that range) and tints the frosted window; native fullscreen locks the wash at 100% without writing that override. Labels and the settings cog keep a light brush-stroke wash behind the glyphs so 0% tint stays readable on a light wallpaper. Windows and Linux stay opaque (no tint slider). On Windows, an existing `glass_tint` in config is rewritten to 100%. Missing `download_dir` keeps following the live OS Downloads path. Auto-update stays on the GUI header; theme sits in the cog (tint too, on macOS).
+- Auto-update, magnet seed, GUI `theme`, GUI `glass_tint` (macOS only), and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. `theme` is `phosphor`, `amber`, `ice`, `scarlet`, or `violet` (default phosphor). On macOS, `glass_tint` is 40–210 (default 60% of that range) and tints the frosted window; native fullscreen locks the wash at 100% without writing that override. Labels and the settings cog keep a light brush-stroke wash behind the glyphs so 0% tint stays readable on a light wallpaper. Windows and Linux stay opaque (no tint slider). On Windows, an existing `glass_tint` in config is rewritten to 100%. Missing `download_dir` keeps following the live OS Downloads path. Auto-update stays on the GUI header (mirrored in settings); theme and tint sit on the settings page behind the cog. `debrid_route` remembers the debrid control, `debrid_remove_after` the remove-after setting. Saves are atomic, keys from newer builds are kept, and a file that no longer parses moves to `config.json.bak`.
+- Debrid keys: `credentials.json` next to `config.json` (owner-only, atomic), or `TORRENTER_<SERVICE>_KEY`.
 - GUI job list: `jobs.json` in that same folder. Each row keeps its own dest and share/leech. Corrupt files are moved to `jobs.json.bak`. `torrenter mcp` uses that same file — see [MCP](#mcp).
-- Android: dest is always public `Download/torrenter`. Job list is `jobs.json` under the app files dir. Theme and seed are SharedPreferences (`theme`, `seed`). No `config.json`, no glass tint, no updater.
-- iOS: dest is always `Documents/torrenter` (Files: On My iPhone / torrenter). Job list is `jobs.json` under Application Support. Theme, **keep alive**, and the parked job list are UserDefaults (`theme`, `keepAlive`, `parkedJobs`). Leech only, no seed preference, no `config.json`, no glass tint, no updater.
+- Android: dest is always public `Download/torrenter`. Job list is `jobs.json` under the app files dir. Theme, seed, debrid route, connections and remove-after are SharedPreferences (`theme`, `seed`, `debridRoute`, `connections`, `debridRemoveAfter`); debrid keys are Keystore-encrypted in `torrenter_keys` (excluded from backup). No `config.json`, no glass tint, no updater.
+- iOS: dest is always `Documents/torrenter` (Files: On My iPhone / torrenter). Job list is `jobs.json` under Application Support. Theme, **keep alive**, the parked job list, debrid route, connections and remove-after are UserDefaults (`theme`, `keepAlive`, `parkedJobs`, `debridRoute`, `connections`, `debridRemoveAfter`); debrid keys are in the Keychain. Leech only, no seed preference, no `config.json`, no glass tint, no updater.
 
 ## Development
 
@@ -350,7 +385,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows (`--all-features` so the GUI compiles), the Android `ffi` `cdylib`, and on macOS the iOS xcframework plus unsigned Simulator XCTest (`FormatTests`). Linux CI (and local `--all-features` builds) need GTK 3 + xcb **dev** packages: `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
+CI on every push and pull request to `main`: fmt, clippy (`-D warnings`), tests on Linux, macOS, and Windows (`--all-features` so the GUI compiles), the Android `ffi` `cdylib` plus the app's Kotlin unit tests and debug APK, and on macOS the iOS xcframework plus unsigned Simulator XCTest (`FormatTests`). Linux CI (and local `--all-features` builds) need GTK 3 + xcb **dev** packages: `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`.
 
 Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `main`). That publishes CLI + GUI binaries, macOS `torrenter-gui-*.app.zip`, `torrenter-android.apk`, and `SHA256SUMS`. Doc-only changes on `main` do not need a tag.
 
@@ -391,10 +426,17 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | iOS: cannot install from GitHub | There is no IPA on Releases; build on a Mac (see [iOS](#ios)) |
 | iOS: jobs stop when you leave | Expected after the ~20 s grace window; reopen and they restart. Turn on **keep alive** to keep downloading in the background |
 | iOS: VLC cannot see files | Open Files → On My iPhone → torrenter, or **share** on the idle row |
+| Debrid: "add a TorBox API key in settings first" | Add a key in settings, `torrenter debrid add torbox`, or set `TORRENTER_TORBOX_KEY` |
+| Debrid: "API key rejected" | Copy the key again from the service's account page; **Test** shows the service's own message |
+| Debrid: stuck at "fetching" | The service is still downloading it (or the torrent is dead); wait, or use **as torrent** to download from peers |
+| Debrid: "refused by the provider" | The service blocks that content; torrenter shows its message and does not retry |
+| Debrid: control greyed / no services | Debrid applies to MAGNET mode only; add a key first |
 
 ## Responsible use
 
 Download only **content you have the legal right to access**. Generic tool — not affiliated with rqbit beyond using their OSS library.
+
+Debrid support uses **your own account** with a third-party service. torrenter is not affiliated with any debrid provider, and that provider's terms apply, including its content policies and its rules on sharing keys and IP addresses.
 
 ## License
 

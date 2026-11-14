@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Debrid route for magnet jobs** (desktop GUI, CLI, MCP, Android, iOS): a magnet can go through your own debrid service, which fetches it server-side; torrenter then downloads every file over HTTP into the same `<dest>/<torrent-name>/` folder. TorBox ships in this release. Real-Debrid, AllDebrid, Premiumize and Debrid-Link adapters are built and tested against fakes and ship once each is confirmed with a real account.
+- Debrid keys: desktop `credentials.json` (owner-only) or `TORRENTER_<SERVICE>_KEY`; Android Keystore encryption (excluded from backup); iOS Keychain. `torrenter debrid add|test|remove|list`, `torrenter magnet --debrid <service>`, and MCP `queue_magnet` `debrid` plus a `debrid_services` tool.
+- While the service fetches, rows read `MAGNET → service · fetching %` with an **as torrent** action; then `HTTP · via service` with `file i/n`. Optional **remove from service after download** (only torrents torrenter added). Clearing an unfinished debrid job asks whether to remove it from the service.
+- **Connections per download** setting (Auto = 4, or 1–16) for new HTTP and debrid downloads, capped per service.
+- Full **settings page** behind the cog on desktop, Android and iOS (theme, macOS tint, debrid accounts, connections, remove after download; iOS keep alive, desktop auto-update mirrored).
+
+### Changed
+
+- Theme moved from the mobile main screens and the desktop cog popup into the settings page.
+- HTTP rows no longer show a peer count.
+- `jobs.json` and `config.json` keep job kinds and keys written by newer builds instead of dropping them; `config.json` saves atomically and a file that no longer parses moves to `config.json.bak`.
+
+### Fixed
+
+- The same torrent spelled with a base32 and a hex info hash now counts as one job and shares one folder lock.
+- Lowering the part count no longer leaves orphaned `.part-N` files in `.resume/`.
+
 ## [3.7.1] - 2026-11-14
 
 ### Added
