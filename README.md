@@ -172,7 +172,7 @@ Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`
 4. Allow **notifications** so the foreground service can keep jobs alive when you leave the app.
 5. If Android asks to ignore battery optimizations, allow it. Denying that does not block jobs; OEMs may still freeze seeding.
 
-Leaving the app (Back) keeps live jobs in a foreground service until they finish or you Stop. Reopen the app to restore incomplete jobs (`jobs.json` in app private storage). A reboot or process kill does **not** autostart torrenter. Share mode asks the LAN gateway to forward the listen port (UPnP); phones behind CGNAT can still finish at `U 0.00` with no inbound peers. The header **cog** opens settings (theme, debrid accounts, connections, remove after download); system Back returns. Theme, seed and those settings live in app preferences, not desktop `config.json`. Debrid keys are encrypted with an Android Keystore key and excluded from backups.
+Leaving the app (Back) keeps live jobs in a foreground service until they finish or you Stop. Reopen the app to restore incomplete jobs (`jobs.json` in app private storage). A reboot or process kill does **not** autostart torrenter. Share mode asks the LAN gateway to forward the listen port (UPnP); phones behind CGNAT can still finish at `U 0.00` with no inbound peers. The header **cog** opens settings in place of the main screen and turns into a back arrow; tapping the title, the arrow or system Back returns. Settings use category chips (appearance · downloads · debrid accounts) with one card per setting (theme, connections, remove after download) and one per debrid account (**test** / **remove**, **+ add account**: provider, optional name, key). Next to START, a route dropdown picks **default (none)** (peers) or an account. Theme, seed and those settings live in app preferences, not desktop `config.json`. Each account's key is encrypted with an Android Keystore key and excluded from backups.
 
 No Rust/Cargo is needed on the phone. Building the APK is in the [Development](#development) section.
 
@@ -201,7 +201,7 @@ You need a **Mac**, **full Xcode** from the App Store (Command Line Tools are no
 
 Downloads: **Files → Browse → On My iPhone → torrenter**. If On My iPhone is missing, enable it under Browse locations. Idle job rows have **share** for Open In / VLC.
 
-The header **cog** opens settings (theme, keep alive, debrid accounts, connections, remove after download); **← back** returns. Debrid keys live in the iOS **Keychain** (this device only).
+The header **cog** opens settings in place of the main screen and turns into a back arrow; tapping the title or the arrow returns. Settings use category chips (appearance · downloads · debrid accounts) with one card per setting (theme, connections, remove after download, keep alive) and one per debrid account (**test** / **remove**, **+ add account**: provider, optional name, key). Next to START, a route dropdown (the native iOS menu) picks **default (none)** (peers) or an account. Each account's key lives in the iOS **Keychain** (this device only).
 
 Leaving the app keeps live jobs running for up to ~20 s (the iOS background grace window), then **parks** them: they stop and the app remembers which ones were running. Reopening the app (even after iOS kills it) **restarts** parked jobs on its own; jobs you paused stay stopped. Turn on **keep alive** (switch under the URL field) to keep downloading in the background: a silent audio loop that mixes with other apps keeps iOS from suspending torrenter until every job is done, at a battery cost. It is a sideload-only trick (the app declares the `audio` background mode) and is off by default. A phone call or another app grabbing audio falls back to the grace window. `jobs.json` is in Application Support (not in Files). Theme is UserDefaults. Incomplete work resumes from dest / `.resume/`. Local network permission may appear for magnet/DHT.
 
@@ -298,25 +298,32 @@ flowchart TD
   menu -->|4 Update now| updater
   menu -->|5 Toggle seed| menu
   menu -->|6 Change download folder| menu
-  menu -->|7 Debrid route| menu
+  menu -->|7 Debrid route, next account| menu
   menu -->|8 Debrid accounts| menu
   menu -->|9 Connections| menu
 
-  subgraph debridFlow [Magnet via debrid]
-    debridAdd[add or reuse on the service]
+  subgraph debridFlow [Magnet via a debrid account]
+    debridAdd[add or reuse on your account]
     debridAdd --> fetch{fetched?}
     fetch -->|no| poll[poll 3s to 30s] --> fetch
+    fetch -->|no progress 30 min| stalled["fail, slot freed, no fallback"]
     fetch -->|yes| files[each file: fresh link]
-    files --> parts
+    files --> debridParts["Range parts, capped per provider"]
+    debridParts --> removeAfter{remove after download?}
+    removeAfter -->|yes and torrenter added it| deleteRemote[delete from the account]
+    removeAfter -->|no| magnetDir
+    deleteRemote --> magnetDir
   end
 
   subgraph magnetFlow [Magnet]
     torrent[librqbit session]
     torrent --> dht[DHT in memory no persistence]
-    dht --> upload{share?}
+    dht --> metadata[fetching metadata from peers]
+    metadata --> verify[verifying data on disk]
+    verify --> upload{share?}
     upload -->|no| leech[disable upload]
     upload -->|yes| listen[listen TCP]
-    leech --> waitComplete[wait_until_completed]
+    leech --> waitComplete["connecting to peers, downloading: wait_until_completed"]
     listen --> waitComplete
     waitComplete --> after{share?}
     after -->|no| stopSession[session.stop]
@@ -356,8 +363,8 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - Auto-update, magnet seed, GUI `theme`, GUI `glass_tint` (macOS only), and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. `theme` is `phosphor`, `amber`, `ice`, `scarlet`, or `violet` (default phosphor). On macOS, `glass_tint` is 40–210 (default 60% of that range) and tints the frosted window; native fullscreen locks the wash at 100% without writing that override. Labels and the settings cog keep a light brush-stroke wash behind the glyphs so 0% tint stays readable on a light wallpaper. Windows and Linux stay opaque (no tint slider). On Windows, an existing `glass_tint` in config is rewritten to 100%. Missing `download_dir` keeps following the live OS Downloads path. Auto-update stays on the GUI header (mirrored in settings); theme and tint sit on the settings page behind the cog. `debrid_route` remembers the debrid control, `debrid_remove_after` the remove-after setting. Saves are atomic, keys from newer builds are kept, and a file that no longer parses moves to `config.json.bak`.
 - Debrid accounts: `credentials.json` next to `config.json` (owner-only, atomic; `{"accounts":[{"id","name","service","key"}]}`), plus a read-only account per `TORRENTER_<SERVICE>_KEY`. `debrid_route` in `config.json` holds the chosen account's id.
 - GUI job list: `jobs.json` in that same folder. Each row keeps its own dest and share/leech. Corrupt files are moved to `jobs.json.bak`. `torrenter mcp` uses that same file — see [MCP](#mcp).
-- Android: dest is always public `Download/torrenter`. Job list is `jobs.json` under the app files dir. Theme, seed, debrid route, connections and remove-after are SharedPreferences (`theme`, `seed`, `debridRoute`, `connections`, `debridRemoveAfter`); debrid keys are Keystore-encrypted in `torrenter_keys` (excluded from backup). No `config.json`, no glass tint, no updater.
-- iOS: dest is always `Documents/torrenter` (Files: On My iPhone / torrenter). Job list is `jobs.json` under Application Support. Theme, **keep alive**, the parked job list, debrid route, connections and remove-after are UserDefaults (`theme`, `keepAlive`, `parkedJobs`, `debridRoute`, `connections`, `debridRemoveAfter`); debrid keys are in the Keychain. Leech only, no seed preference, no `config.json`, no glass tint, no updater.
+- Android: dest is always public `Download/torrenter`. Job list is `jobs.json` under the app files dir. Theme, seed, the chosen debrid account, the account list (names and providers only), connections and remove-after are SharedPreferences (`theme`, `seed`, `debridRoute` = account id, `debridAccounts`, `connections`, `debridRemoveAfter`); each account's key is Keystore-encrypted in `torrenter_keys` under the account id (excluded from backup). No `config.json`, no glass tint, no updater.
+- iOS: dest is always `Documents/torrenter` (Files: On My iPhone / torrenter). Job list is `jobs.json` under Application Support. Theme, **keep alive**, the parked job list, the chosen debrid account, the account list (names and providers only), connections and remove-after are UserDefaults (`theme`, `keepAlive`, `parkedJobs`, `debridRoute` = account id, `debridAccounts`, `connections`, `debridRemoveAfter`); each account's key is a Keychain item under the account id. Leech only, no seed preference, no `config.json`, no glass tint, no updater.
 
 ## Development
 
