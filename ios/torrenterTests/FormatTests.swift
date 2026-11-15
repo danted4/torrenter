@@ -29,14 +29,15 @@ final class FormatTests: XCTestCase {
         service: String? = nil,
         permille: UInt16 = 0,
         fileIndex: UInt32 = 0,
-        fileCount: UInt32 = 0
+        fileCount: UInt32 = 0,
+        account: String? = nil
     ) -> JobView {
         JobView(
             id: 1, kind: kind, source: "magnet:?xt=urn:btih:x", title: "x", status: status,
             downloaded: 0, total: 0, uploaded: 0, uploadBps: 0, peers: 3, speed: 0, upSpeed: 0,
             seed: false, dest: "/tmp", added: "2026-11-14", paused: false, finished: false,
             active: true, error: nil, service: service, remotePermille: permille,
-            fileIndex: fileIndex, fileCount: fileCount
+            fileIndex: fileIndex, fileCount: fileCount, account: account
         )
     }
 
@@ -57,5 +58,15 @@ final class FormatTests: XCTestCase {
         XCTAssertFalse(jobStatsLine(http).contains("peers"))
         XCTAssertEqual(jobBadge(http), "HTTP")
         XCTAssertTrue(jobStatsLine(job(kind: .magnet, status: "downloading")).contains("peers 3"))
+    }
+
+    func testDebridRowsUseTheAccountName() {
+        let names = ["torbox-1a2b3c": "work"]
+        let fetching = job(kind: .debrid, status: "fetching", service: "torbox", permille: 100, account: "torbox-1a2b3c")
+        XCTAssertEqual(jobBadge(fetching, names: names), "MAGNET → work")
+        XCTAssertEqual(jobStatsLine(fetching, names: names), "fetching  work fetching 10.0%")
+        // An unknown account (removed since) falls back to the provider.
+        let orphan = job(kind: .debrid, status: "downloading", service: "torbox", account: "gone")
+        XCTAssertEqual(jobBadge(orphan, names: names), "HTTP · via TorBox")
     }
 }

@@ -766,6 +766,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -795,6 +799,8 @@ fun uniffi_torrenter_checksum_method_engine_dest(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_drain_notices(
 ): Short
+fun uniffi_torrenter_checksum_method_engine_has_account(
+): Short
 fun uniffi_torrenter_checksum_method_engine_has_debrid_key(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_hydrate(
@@ -820,6 +826,8 @@ fun uniffi_torrenter_checksum_method_engine_restart_route(
 fun uniffi_torrenter_checksum_method_engine_seed(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_connections(
+): Short
+fun uniffi_torrenter_checksum_method_engine_set_debrid_account(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_debrid_key(
 ): Short
@@ -898,6 +906,8 @@ fun uniffi_torrenter_fn_method_engine_dest(`ptr`: Pointer,uniffi_out_err: Uniffi
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_method_engine_drain_notices(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_torrenter_fn_method_engine_has_account(`ptr`: Pointer,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 fun uniffi_torrenter_fn_method_engine_has_debrid_key(`ptr`: Pointer,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 fun uniffi_torrenter_fn_method_engine_hydrate(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -908,21 +918,23 @@ fun uniffi_torrenter_fn_method_engine_persist(`ptr`: Pointer,`force`: Byte,uniff
 ): Unit
 fun uniffi_torrenter_fn_method_engine_queue(`ptr`: Pointer,`kind`: RustBuffer.ByValue,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-fun uniffi_torrenter_fn_method_engine_queue_debrid(`ptr`: Pointer,`source`: RustBuffer.ByValue,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_torrenter_fn_method_engine_queue_debrid(`ptr`: Pointer,`source`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 fun uniffi_torrenter_fn_method_engine_remove(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_remove_with_remote(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-fun uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(`ptr`: Pointer,`id`: Long,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(`ptr`: Pointer,`id`: Long,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 fun uniffi_torrenter_fn_method_engine_restart(`ptr`: Pointer,`id`: Long,`seed`: Byte,`dest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-fun uniffi_torrenter_fn_method_engine_restart_route(`ptr`: Pointer,`id`: Long,`service`: RustBuffer.ByValue,`seed`: Byte,`dest`: RustBuffer.ByValue,`removeFromService`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_torrenter_fn_method_engine_restart_route(`ptr`: Pointer,`id`: Long,`account`: RustBuffer.ByValue,`seed`: Byte,`dest`: RustBuffer.ByValue,`removeFromService`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 fun uniffi_torrenter_fn_method_engine_seed(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 fun uniffi_torrenter_fn_method_engine_set_connections(`ptr`: Pointer,`parts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_torrenter_fn_method_engine_set_debrid_account(`ptr`: Pointer,`id`: RustBuffer.ByValue,`service`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_set_debrid_key(`ptr`: Pointer,`service`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1085,6 +1097,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_drain_notices() != 39100.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_has_account() != 2350.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_has_debrid_key() != 63083.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1100,7 +1115,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_queue() != 33011.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 31632.toShort()) {
+    if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 53234.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_remove() != 13505.toShort()) {
@@ -1109,19 +1124,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 36487.toShort()) {
+    if (lib.uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 60983.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_restart() != 54366.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_restart_route() != 32989.toShort()) {
+    if (lib.uniffi_torrenter_checksum_method_engine_restart_route() != 37013.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_seed() != 40595.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_connections() != 19727.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_account() != 34681.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_key() != 60581.toShort()) {
@@ -1597,6 +1615,8 @@ public interface EngineInterface {
     
     fun `drainNotices`(): List<kotlin.String>
     
+    fun `hasAccount`(`id`: kotlin.String): kotlin.Boolean
+    
     fun `hasDebridKey`(`service`: kotlin.String): kotlin.Boolean
     
     fun `hydrate`()
@@ -1608,9 +1628,10 @@ public interface EngineInterface {
     fun `queue`(`kind`: Kind, `source`: kotlin.String): kotlin.ULong
     
     /**
-     * Queue a magnet through a debrid service.
+     * Queue a magnet through a debrid account (its id; an account set with
+     * `set_debrid_key` uses the service id).
      */
-    fun `queueDebrid`(`source`: kotlin.String, `service`: kotlin.String): kotlin.ULong
+    fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong
     
     fun `remove`(`id`: kotlin.ULong)
     
@@ -1623,16 +1644,16 @@ public interface EngineInterface {
      * This re-route should ask "also remove it from the service?" first
      * (the job leaves a service holding a torrent torrenter added).
      */
-    fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `service`: kotlin.String?): kotlin.Boolean
+    fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `account`: kotlin.String?): kotlin.Boolean
     
     fun `restart`(`id`: kotlin.ULong, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong
     
     /**
-     * Restart re-routed: `service = None` downloads from peers ("as torrent").
-     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
-     * pass false when it did not ask.
+     * Restart re-routed: `account = None` downloads from peers ("as
+     * torrent"). `remove_from_service` is the answer to
+     * `reroute_asks_about_remote`; pass false when it did not ask.
      */
-    fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong
+    fun `restartRoute`(`id`: kotlin.ULong, `account`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong
     
     fun `seed`(): kotlin.Boolean
     
@@ -1640,6 +1661,13 @@ public interface EngineInterface {
      * Connections per download for new jobs (`None` = Auto = 4).
      */
     fun `setConnections`(`parts`: kotlin.UByte?)
+    
+    /**
+     * Hand a named account's key from the platform keychain to the engine
+     * (memory only), or `None` to forget it. `id` is the app's stable account
+     * id; call before `hydrate` so restored jobs can start.
+     */
+    fun `setDebridAccount`(`id`: kotlin.String, `service`: kotlin.String, `key`: kotlin.String?)
     
     /**
      * Hand a key from the platform keychain to the engine (memory only), or
@@ -1807,6 +1835,18 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     }
     
 
+    override fun `hasAccount`(`id`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_has_account(
+        it, FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `hasDebridKey`(`service`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -1869,14 +1909,15 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 
     
     /**
-     * Queue a magnet through a debrid service.
+     * Queue a magnet through a debrid account (its id; an account set with
+     * `set_debrid_key` uses the service id).
      */
-    @Throws(EngineException::class)override fun `queueDebrid`(`source`: kotlin.String, `service`: kotlin.String): kotlin.ULong {
+    @Throws(EngineException::class)override fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithPointer {
     uniffiRustCallWithError(EngineException) { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_queue_debrid(
-        it, FfiConverterString.lower(`source`),FfiConverterString.lower(`service`),_status)
+        it, FfiConverterString.lower(`source`),FfiConverterString.lower(`account`),_status)
 }
     }
     )
@@ -1912,12 +1953,12 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     /**
      * This re-route should ask "also remove it from the service?" first
      * (the job leaves a service holding a torrent torrenter added).
-     */override fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `service`: kotlin.String?): kotlin.Boolean {
+     */override fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `account`: kotlin.String?): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(
-        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`service`),_status)
+        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`account`),_status)
 }
     }
     )
@@ -1939,16 +1980,16 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 
     
     /**
-     * Restart re-routed: `service = None` downloads from peers ("as torrent").
-     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
-     * pass false when it did not ask.
+     * Restart re-routed: `account = None` downloads from peers ("as
+     * torrent"). `remove_from_service` is the answer to
+     * `reroute_asks_about_remote`; pass false when it did not ask.
      */
-    @Throws(EngineException::class)override fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong {
+    @Throws(EngineException::class)override fun `restartRoute`(`id`: kotlin.ULong, `account`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithPointer {
     uniffiRustCallWithError(EngineException) { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_restart_route(
-        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`service`),FfiConverterBoolean.lower(`seed`),FfiConverterString.lower(`dest`),FfiConverterBoolean.lower(`removeFromService`),_status)
+        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`account`),FfiConverterBoolean.lower(`seed`),FfiConverterString.lower(`dest`),FfiConverterBoolean.lower(`removeFromService`),_status)
 }
     }
     )
@@ -1976,6 +2017,23 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_connections(
         it, FfiConverterOptionalUByte.lower(`parts`),_status)
+}
+    }
+    
+    
+
+    
+    /**
+     * Hand a named account's key from the platform keychain to the engine
+     * (memory only), or `None` to forget it. `id` is the app's stable account
+     * id; call before `hydrate` so restored jobs can start.
+     */
+    @Throws(EngineException::class)override fun `setDebridAccount`(`id`: kotlin.String, `service`: kotlin.String, `key`: kotlin.String?)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(EngineException) { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_debrid_account(
+        it, FfiConverterString.lower(`id`),FfiConverterString.lower(`service`),FfiConverterOptionalString.lower(`key`),_status)
 }
     }
     
@@ -2157,7 +2215,11 @@ data class JobView (
      * 1-based file being downloaded and the file count (0 before downloading).
      */
     var `fileIndex`: kotlin.UInt, 
-    var `fileCount`: kotlin.UInt
+    var `fileCount`: kotlin.UInt, 
+    /**
+     * Debrid route only: the account id the job runs through.
+     */
+    var `account`: kotlin.String? = null
 ) {
     
     companion object
@@ -2192,6 +2254,7 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterUShort.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -2218,7 +2281,8 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterOptionalString.allocationSize(value.`service`) +
             FfiConverterUShort.allocationSize(value.`remotePermille`) +
             FfiConverterUInt.allocationSize(value.`fileIndex`) +
-            FfiConverterUInt.allocationSize(value.`fileCount`)
+            FfiConverterUInt.allocationSize(value.`fileCount`) +
+            FfiConverterOptionalString.allocationSize(value.`account`)
     )
 
     override fun write(value: JobView, buf: ByteBuffer) {
@@ -2245,6 +2309,7 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterUShort.write(value.`remotePermille`, buf)
             FfiConverterUInt.write(value.`fileIndex`, buf)
             FfiConverterUInt.write(value.`fileCount`, buf)
+            FfiConverterOptionalString.write(value.`account`, buf)
     }
 }
 

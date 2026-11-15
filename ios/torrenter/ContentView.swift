@@ -9,13 +9,17 @@ struct ContentView: View {
     @State private var magnet = true
     @State private var shareJob: JobView?
     @State private var settingsOpen = false
+    @State private var settingsTab: SettingsTab = .appearance
 
     var colors: Palette { themePalette(themeId) }
 
     var body: some View {
-        Group {
+        // The header stays on both screens: its cog turns into a back arrow
+        // while settings fill the rest, and the title goes home.
+        VStack(alignment: .leading, spacing: 12) {
+            header(colors)
             if settingsOpen {
-                SettingsView(themeId: $themeId) { settingsOpen = false }
+                SettingsView(themeId: $themeId, tab: $settingsTab)
             } else {
                 main
             }
@@ -36,17 +40,18 @@ struct ContentView: View {
             ShareSheet(items: owner.shareItems(for: item.job))
         }
         .confirmationDialog(
-            "Also remove it from \(serviceLabel(owner.remoteAsk?.service))?",
+            "Also remove it from \(owner.remoteAsk.map { owner.accountTitle($0) } ?? "the service")?",
             isPresented: remoteAskShown,
             titleVisibility: .visible
         ) {
             // Clear or "as torrent" on a debrid job torrenter added.
             if let job = owner.remoteAsk {
                 let rerouting = owner.clearAsk == nil
-                Button("remove from \(serviceLabel(job.service))", role: .destructive) {
+                let title = owner.accountTitle(job)
+                Button("remove from \(title)", role: .destructive) {
                     owner.remoteAnswered(job: job, rerouting: rerouting, removeRemote: true)
                 }
-                Button("keep it on \(serviceLabel(job.service))") {
+                Button("keep it on \(title)") {
                     owner.remoteAnswered(job: job, rerouting: rerouting, removeRemote: false)
                 }
             }
@@ -62,7 +67,6 @@ struct ContentView: View {
 
     private var main: some View {
         VStack(alignment: .leading, spacing: 12) {
-            header(colors)
             if let notice = owner.notice {
                 Text(notice)
                     .font(.system(.footnote, design: .monospaced))
@@ -71,6 +75,9 @@ struct ContentView: View {
             modeSwitch(colors)
             urlField(colors)
             HStack(spacing: 12) {
+                if magnet {
+                    routeMenu(colors)
+                }
                 Button("START") {
                     let source = input.trimmingCharacters(in: .whitespacesAndNewlines)
                     if owner.queue(kind: magnet ? .magnet : .http, source: source) {
@@ -78,9 +85,6 @@ struct ContentView: View {
                     }
                 }
                 .buttonStyle(MonoButton(palette: colors))
-                if magnet {
-                    debridControl(colors)
-                }
             }
             HStack(spacing: 8) {
                 Text("On My iPhone/torrenter")
@@ -105,6 +109,7 @@ struct ContentView: View {
                         ForEach(owner.jobs, id: \.id) { job in
                             JobCard(
                                 job: job,
+                                names: owner.accountNames,
                                 palette: colors,
                                 onPause: { owner.togglePause(id: job.id) },
                                 onStop: { owner.stop(id: job.id) },
@@ -121,26 +126,62 @@ struct ContentView: View {
         }
     }
 
-    /// "debrid" (off) or "via TorBox"; tap cycles through services with a key.
-    private func debridControl(_ colors: Palette) -> some View {
-        let on = owner.debridRoute != nil
-        return Button {
-            owner.cycleDebridRoute()
-            if owner.keyed.isEmpty {
+    /// Fixed-width route dropdown: "default (none)" (peers) or an account by
+    /// name, shortened with "…"; the menu lists each account with its
+    /// provider and ends with "manage accounts…".
+    private func routeMenu(_ colors: Palette) -> some View {
+        let current = owner.account(owner.debridRoute)
+        let on = current != nil
+        return Menu {
+            Button {
+                owner.debridRoute = nil
+            } label: {
+                if on {
+                    Text("default (none)")
+                } else {
+                    Label("default (none)", systemImage: "checkmark")
+                }
+                Text("from peers")
+            }
+            ForEach(owner.accounts) { account in
+                Button {
+                    owner.debridRoute = account.id
+                } label: {
+                    if current?.id == account.id {
+                        Label(account.name, systemImage: "checkmark")
+                    } else {
+                        Text(account.name)
+                    }
+                    Text(serviceLabel(account.service))
+                }
+            }
+            Divider()
+            Button(owner.accounts.isEmpty ? "add a debrid account…" : "manage accounts…") {
+                settingsTab = .accounts
                 settingsOpen = true
             }
         } label: {
-            Text(on ? "via \(serviceLabel(owner.debridRoute))" : "debrid")
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundColor(on ? colors.fg : colors.dim)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4).stroke(on ? colors.fg : colors.dim, lineWidth: 1)
-                )
+            ZStack {
+                Text(current?.name ?? "default (none)")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 20)
+                HStack {
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .padding(.trailing, 10)
+            }
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundColor(on ? colors.fg : colors.dim)
+            .frame(width: Self.routeWidth, height: 34)
+            .overlay(RoundedRectangle(cornerRadius: 2).stroke(on ? colors.fg : colors.dim, lineWidth: 1))
         }
-        .buttonStyle(.plain)
     }
+
+    /// Room for "default (none)" plus the chevron.
+    static let routeWidth: CGFloat = 170
 
     private var shareSheetItem: Binding<ShareIdent?> {
         Binding(
@@ -151,24 +192,35 @@ struct ContentView: View {
 
     private func header(_ colors: Palette) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            Image("Brand")
-                .resizable()
-                .frame(width: 28, height: 28)
-            Text(owner.bannerText.isEmpty ? "torrenter" : owner.bannerText)
-                .font(.system(.title3, design: .monospaced))
-                .foregroundColor(colors.fg)
-                .multilineTextAlignment(.leading)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // The title doubles as "home": back to the main screen.
             Button {
-                settingsOpen = true
+                settingsOpen = false
             } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 20))
-                    .foregroundColor(colors.dim)
+                HStack(spacing: 10) {
+                    Image("Brand")
+                        .resizable()
+                        .frame(width: 28, height: 28)
+                    Text(owner.bannerText.isEmpty ? "torrenter" : owner.bannerText)
+                        .font(.system(.title3, design: .monospaced))
+                        .foregroundColor(colors.fg)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .accessibilityLabel("settings")
+            .buttonStyle(.plain)
+            .accessibilityLabel("main screen")
+            Button {
+                settingsOpen.toggle()
+            } label: {
+                Image(systemName: settingsOpen ? "arrow.left" : "gearshape")
+                    .font(.system(size: 20))
+                    .foregroundColor(settingsOpen ? colors.fg : colors.dim)
+                    .frame(width: 32, height: 32)
+            }
+            .accessibilityLabel(settingsOpen ? "back" : "settings")
         }
     }
 
@@ -212,6 +264,7 @@ private struct ShareIdent: Identifiable {
 
 private struct JobCard: View {
     let job: JobView
+    let names: [String: String]
     let palette: Palette
     let onPause: () -> Void
     let onStop: () -> Void
@@ -226,7 +279,7 @@ private struct JobCard: View {
         let lineColor = job.error != nil ? palette.fail : palette.dim
         VStack(alignment: .leading, spacing: 6) {
             if job.service != nil || job.kind == .http {
-                Text(jobBadge(job))
+                Text(jobBadge(job, names: names))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(palette.dim)
             }
@@ -241,7 +294,7 @@ private struct JobCard: View {
                 ProgressView()
                     .tint(accent)
             }
-            Text(jobStatsLine(job))
+            Text(jobStatsLine(job, names: names))
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(lineColor)
             HStack(spacing: 8) {
@@ -301,14 +354,24 @@ struct MiniSwitch: ToggleStyle {
 
 struct MonoButton: ButtonStyle {
     let palette: Palette
+    /// Text size; nil keeps the body size.
+    var size: CGFloat?
+    /// Text colour (remove / cancel use `palette.fail`).
+    var tint: Color?
+    /// A bright border, for the primary action once it can run.
+    var outlined = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(.body, design: .monospaced))
-            .foregroundColor(palette.fg)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .font(size.map { .system(size: $0, design: .monospaced) } ?? .system(.body, design: .monospaced))
+            .foregroundColor(tint ?? palette.fg)
+            .padding(.horizontal, size == nil ? 12 : 10)
+            .padding(.vertical, size == nil ? 8 : 6)
             .background(palette.rowAlt)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(outlined ? (tint ?? palette.fg) : Color.clear, lineWidth: 1)
+            )
             .clipShape(RoundedRectangle(cornerRadius: 2))
             .opacity(configuration.isPressed ? 0.7 : 1)
     }

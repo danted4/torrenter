@@ -16,7 +16,7 @@ final class EngineOwner: ObservableObject {
             syncKeepAlive()
         }
     }
-    /// Remembered debrid service for magnet jobs (nil = from peers).
+    /// Remembered debrid account id for magnet jobs (nil = default, peers).
     @Published var debridRoute: String? = Prefs.debridRoute() {
         didSet { Prefs.saveDebridRoute(debridRoute) }
     }
@@ -33,9 +33,9 @@ final class EngineOwner: ObservableObject {
             engine?.setDebridRemoveAfter(enabled: removeAfter)
         }
     }
-    /// Services with a key in the Keychain.
-    @Published private(set) var keyed: Set<String> = []
-    /// Last account check per service ("premium until …" or the error).
+    /// Debrid accounts with a key in the Keychain, in the order added.
+    @Published private(set) var accounts: [DebridAccount] = []
+    /// Last account check per account id ("premium until …" or the error).
     @Published private(set) var accountNotes: [String: String] = [:]
     /// A cleared debrid job that may still be on the service: ask first.
     @Published var clearAsk: JobView?
@@ -69,13 +69,13 @@ final class EngineOwner: ObservableObject {
             seed: false
         )
         // Keys go in before hydrate so restored debrid jobs can start.
-        for service in debridServices() {
-            if let key = Keychain.read(service.id) {
-                try? created.setDebridKey(service: service.id, key: key)
-                keyed.insert(service.id)
+        accounts = loadAccounts()
+        for account in accounts {
+            if let key = Keychain.read(account.id) {
+                try? created.setDebridAccount(id: account.id, service: account.service, key: key)
             }
         }
-        if let route = debridRoute, !keyed.contains(route) {
+        if let route = debridRoute, !accounts.contains(where: { $0.id == route }) {
             debridRoute = nil
         }
         created.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
@@ -105,8 +105,8 @@ final class EngineOwner: ObservableObject {
     func queue(kind: Kind, source: String) -> Bool {
         guard let engine else { return false }
         do {
-            if kind == .magnet, let service = debridRoute {
-                _ = try engine.queueDebrid(source: source, service: service)
+            if kind == .magnet, let account = debridRoute {
+                _ = try engine.queueDebrid(source: source, account: account)
             } else {
                 _ = try engine.queue(kind: kind, source: source)
             }
@@ -173,7 +173,7 @@ final class EngineOwner: ObservableObject {
 
     /// Stop waiting for the service and download the same torrent from peers.
     func asTorrent(job: JobView) {
-        if engine?.rerouteAsksAboutRemote(id: job.id, service: nil) == true {
+        if engine?.rerouteAsksAboutRemote(id: job.id, account: nil) == true {
             rerouteAsk = job
         } else {
             restartAsTorrent(job: job, removeRemote: false)
@@ -185,7 +185,7 @@ final class EngineOwner: ObservableObject {
         do {
             _ = try engine.restartRoute(
                 id: job.id,
-                service: nil,
+                account: nil,
                 seed: false,
                 dest: Paths.publicDest().path,
                 removeFromService: removeRemote
@@ -197,59 +197,111 @@ final class EngineOwner: ObservableObject {
         }
     }
 
-    /// Debrid control: off → first service with a key → next → off.
-    func cycleDebridRoute() {
-        let ready = debridServices().map(\.id).filter { keyed.contains($0) }
-        guard !ready.isEmpty else {
-            notice = "add a debrid API key in settings first"
-            return
+    /// Saved accounts whose key is still in the Keychain. A key saved per
+    /// provider before accounts existed becomes an account with that id.
+    private func loadAccounts() -> [DebridAccount] {
+        var list = Prefs.accounts()
+        for service in debridServices() where !list.contains(where: { $0.id == service.id }) {
+            if Keychain.read(service.id) != nil {
+                list.append(DebridAccount(id: service.id, name: service.label, service: service.id))
+            }
         }
-        if let current = debridRoute, let index = ready.firstIndex(of: current) {
-            debridRoute = index + 1 < ready.count ? ready[index + 1] : nil
-        } else {
-            debridRoute = ready.first
-        }
+        let shipped = Set(debridServices().map(\.id))
+        list = list.filter { shipped.contains($0.service) && Keychain.read($0.id) != nil }
+        Prefs.saveAccounts(list)
+        return list
     }
 
-    func saveKey(service: String, key: String) {
+    func account(_ id: String?) -> DebridAccount? {
+        guard let id else { return nil }
+        return accounts.first { $0.id == id }
+    }
+
+    /// "work (TorBox)", or just "TorBox" when the name is the provider's.
+    func accountTitle(_ job: JobView) -> String {
+        guard let account = account(job.account) else { return serviceLabel(job.service) }
+        let provider = serviceLabel(account.service)
+        return account.name == provider ? provider : "\(account.name) (\(provider))"
+    }
+
+    /// Account names by id, for job rows.
+    var accountNames: [String: String] {
+        Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0.name) })
+    }
+
+    /// The name a new account gets when none is typed: the provider's, then
+    /// "TorBox 2", …
+    func defaultName(service: String) -> String {
+        let base = serviceLabel(service)
+        if !nameTaken(base) {
+            return base
+        }
+        var n = 2
+        while nameTaken("\(base) \(n)") {
+            n += 1
+        }
+        return "\(base) \(n)"
+    }
+
+    /// Names are unique across providers, ignoring case.
+    func nameTaken(_ name: String) -> Bool {
+        let wanted = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return accounts.contains { $0.name.lowercased() == wanted }
+    }
+
+    /// Save a new account: the key to the Keychain, the name to settings.
+    /// Returns false (with a notice) when it could not be saved.
+    @discardableResult
+    func addAccount(service: String, name: String, key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        guard Keychain.save(service, key: trimmed) else {
-            notice = "could not save the key in the Keychain"
-            return
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, typed.isEmpty || !nameTaken(typed) else { return false }
+        let finalName = typed.isEmpty ? defaultName(service: service) : typed
+        var id = service
+        while accounts.contains(where: { $0.id == id }) || id == service {
+            id = "\(service)-\(String(format: "%06x", Int.random(in: 0 ..< 0xFFFFFF)))"
         }
-        try? engine?.setDebridKey(service: service, key: trimmed)
-        keyed.insert(service)
-        testAccount(service: service, key: trimmed)
+        guard Keychain.save(id, key: trimmed) else {
+            notice = "could not save the key in the Keychain"
+            return false
+        }
+        try? engine?.setDebridAccount(id: id, service: service, key: trimmed)
+        accounts.append(DebridAccount(id: id, name: finalName, service: service))
+        Prefs.saveAccounts(accounts)
+        testAccount(id: id, key: trimmed)
+        return true
     }
 
-    func removeKey(service: String) {
-        Keychain.delete(service)
-        try? engine?.setDebridKey(service: service, key: nil)
-        keyed.remove(service)
-        accountNotes[service] = nil
-        if debridRoute == service {
+    func removeAccount(id: String) {
+        guard let account = account(id) else { return }
+        Keychain.delete(id)
+        try? engine?.setDebridAccount(id: id, service: account.service, key: nil)
+        accounts.removeAll { $0.id == id }
+        Prefs.saveAccounts(accounts)
+        accountNotes[id] = nil
+        if debridRoute == id {
             debridRoute = nil
         }
     }
 
-    /// Ask the service who the key belongs to, off the main thread.
-    func testAccount(service: String, key: String? = nil) {
-        guard let engine, let key = key ?? Keychain.read(service) else { return }
-        accountNotes[service] = "checking…"
+    /// Ask the provider who the key belongs to, off the main thread.
+    func testAccount(id: String, key: String? = nil) {
+        guard let engine, let account = account(id), let key = key ?? Keychain.read(id) else { return }
+        accountNotes[id] = "checking…"
+        let service = account.service
         Task.detached { [weak self] in
             let note: String
             do {
-                let account = try engine.debridAccount(service: service, key: key)
-                if account.premium {
-                    note = "premium" + (account.expires.map { " until \($0)" } ?? "")
+                let result = try engine.debridAccount(service: service, key: key)
+                if result.premium {
+                    note = "premium" + (result.expires.map { " until \($0)" } ?? "")
                 } else {
                     note = "key works, but the account is not premium"
                 }
             } catch {
                 note = engineMessage(error)
             }
-            await MainActor.run { self?.accountNotes[service] = note }
+            await MainActor.run { self?.accountNotes[id] = note }
         }
     }
 

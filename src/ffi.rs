@@ -89,6 +89,9 @@ pub struct JobView {
     /// 1-based file being downloaded and the file count (0 before downloading).
     pub file_index: u32,
     pub file_count: u32,
+    /// Debrid route only: the account id the job runs through.
+    #[uniffi(default = None)]
+    pub account: Option<String>,
 }
 
 /// A debrid service this build offers.
@@ -149,6 +152,7 @@ impl JobView {
             active: job.snapshot.is_active(),
             error,
             service: job.debrid.as_ref().map(|d| d.service.id().to_string()),
+            account: job.debrid.as_ref().map(|d| d.account.clone()),
             remote_permille: debrid.as_ref().map(|d| d.remote_permille).unwrap_or(0),
             file_index: debrid
                 .as_ref()
@@ -190,6 +194,25 @@ impl Engine {
         service_from(&service).is_ok_and(|service| self.session.has_account(service.id()))
     }
 
+    /// Hand a named account's key from the platform keychain to the engine
+    /// (memory only), or `None` to forget it. `id` is the app's stable account
+    /// id; call before `hydrate` so restored jobs can start.
+    pub fn set_debrid_account(
+        &self,
+        id: String,
+        service: String,
+        key: Option<String>,
+    ) -> Result<(), EngineError> {
+        let service = service_from(&service)?;
+        self.session
+            .set_debrid_account(&id, service, key.and_then(Secret::new));
+        Ok(())
+    }
+
+    pub fn has_account(&self, id: String) -> bool {
+        self.session.has_account(&id)
+    }
+
     /// Settings "Test": blocking network call — run it off the UI thread.
     pub fn debrid_account(&self, service: String, key: String) -> Result<AccountView, EngineError> {
         let service = service_from(&service)?;
@@ -213,28 +236,27 @@ impl Engine {
             })
     }
 
-    /// Queue a magnet through a debrid service. On phones each service is
-    /// one account whose id is the service id.
-    pub fn queue_debrid(&self, source: String, service: String) -> Result<u64, EngineError> {
-        let service = service_from(&service)?;
+    /// Queue a magnet through a debrid account (its id; an account set with
+    /// `set_debrid_key` uses the service id).
+    pub fn queue_debrid(&self, source: String, account: String) -> Result<u64, EngineError> {
         self.session
-            .queue_with(JobKind::Magnet, &source, Some(service.id()))
+            .queue_with(JobKind::Magnet, &source, Some(&account))
             .map_err(Into::into)
     }
 
-    /// Restart re-routed: `service = None` downloads from peers ("as torrent").
-    /// `remove_from_service` is the answer to `reroute_asks_about_remote`;
-    /// pass false when it did not ask.
+    /// Restart re-routed: `account = None` downloads from peers ("as
+    /// torrent"). `remove_from_service` is the answer to
+    /// `reroute_asks_about_remote`; pass false when it did not ask.
     pub fn restart_route(
         &self,
         id: u64,
-        service: Option<String>,
+        account: Option<String>,
         seed: bool,
         dest: String,
         remove_from_service: bool,
     ) -> Result<u64, EngineError> {
-        let route = match service {
-            Some(id) => Route::Via(service_from(&id)?.id().to_string()),
+        let route = match account {
+            Some(account) => Route::Via(account),
             None => Route::Peers,
         };
         self.session
@@ -244,12 +266,9 @@ impl Engine {
 
     /// This re-route should ask "also remove it from the service?" first
     /// (the job leaves a service holding a torrent torrenter added).
-    pub fn reroute_asks_about_remote(&self, id: u64, service: Option<String>) -> bool {
-        let route = match service {
-            Some(id) => match service_from(&id) {
-                Ok(service) => Route::Via(service.id().to_string()),
-                Err(_) => return false,
-            },
+    pub fn reroute_asks_about_remote(&self, id: u64, account: Option<String>) -> bool {
+        let route = match account {
+            Some(account) => Route::Via(account),
             None => Route::Peers,
         };
         self.session.reroute_asks_about_remote(id, &route)

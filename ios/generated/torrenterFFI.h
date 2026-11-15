@@ -291,6 +291,11 @@ RustBuffer uniffi_torrenter_fn_method_engine_dest(void*_Nonnull ptr, RustCallSta
 RustBuffer uniffi_torrenter_fn_method_engine_drain_notices(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_ACCOUNT
+int8_t uniffi_torrenter_fn_method_engine_has_account(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
 int8_t uniffi_torrenter_fn_method_engine_has_debrid_key(void*_Nonnull ptr, RustBuffer service, RustCallStatus *_Nonnull out_status
@@ -318,7 +323,7 @@ uint64_t uniffi_torrenter_fn_method_engine_queue(void*_Nonnull ptr, RustBuffer k
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_DEBRID
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_DEBRID
-uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustBuffer source, RustBuffer service, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustBuffer source, RustBuffer account, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
@@ -333,7 +338,7 @@ void uniffi_torrenter_fn_method_engine_remove_with_remote(void*_Nonnull ptr, uin
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
-int8_t uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(void*_Nonnull ptr, uint64_t id, RustBuffer service, RustCallStatus *_Nonnull out_status
+int8_t uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(void*_Nonnull ptr, uint64_t id, RustBuffer account, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART
@@ -343,7 +348,7 @@ uint64_t uniffi_torrenter_fn_method_engine_restart(void*_Nonnull ptr, uint64_t i
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
-uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer service, int8_t seed, RustBuffer dest, int8_t remove_from_service, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer account, int8_t seed, RustBuffer dest, int8_t remove_from_service, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
@@ -354,6 +359,11 @@ int8_t uniffi_torrenter_fn_method_engine_seed(void*_Nonnull ptr, RustCallStatus 
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_CONNECTIONS
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_CONNECTIONS
 void uniffi_torrenter_fn_method_engine_set_connections(void*_Nonnull ptr, RustBuffer parts, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_ACCOUNT
+void uniffi_torrenter_fn_method_engine_set_debrid_account(void*_Nonnull ptr, RustBuffer id, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_KEY
@@ -715,6 +725,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_drain_notices(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_ACCOUNT
+uint16_t uniffi_torrenter_checksum_method_engine_has_account(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
 uint16_t uniffi_torrenter_checksum_method_engine_has_debrid_key(void
@@ -790,6 +806,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_seed(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_CONNECTIONS
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_CONNECTIONS
 uint16_t uniffi_torrenter_checksum_method_engine_set_connections(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_ACCOUNT
+uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_account(void
     
 );
 #endif

@@ -47,15 +47,21 @@ func serviceLabel(_ id: String?) -> String {
     return debridServices().first { $0.id == id }?.label ?? id
 }
 
-/// Row badge: MAGNET, HTTP, or the debrid phase.
-func jobBadge(_ job: JobView) -> String {
-    if let service = job.service {
-        return jobIsFetching(job) ? "MAGNET → \(serviceLabel(service))" : "HTTP · via \(serviceLabel(service))"
+/// The job's debrid account name, or its provider's when unknown.
+func jobRouteName(_ job: JobView, names: [String: String]) -> String {
+    job.account.flatMap { names[$0] } ?? serviceLabel(job.service)
+}
+
+/// Row badge: MAGNET, HTTP, or the debrid phase (by account name).
+func jobBadge(_ job: JobView, names: [String: String] = [:]) -> String {
+    if job.service != nil {
+        let name = jobRouteName(job, names: names)
+        return jobIsFetching(job) ? "MAGNET → \(name)" : "HTTP · via \(name)"
     }
     return job.kind == .http ? "HTTP" : "MAGNET"
 }
 
-func jobStatsLine(_ job: JobView) -> String {
+func jobStatsLine(_ job: JobView, names: [String: String] = [:]) -> String {
     let downloaded = job.downloaded
     let total = job.total
     let eta: String
@@ -64,10 +70,10 @@ func jobStatsLine(_ job: JobView) -> String {
     } else {
         eta = "N/A"
     }
-    if let service = job.service {
+    if job.service != nil {
         if jobIsFetching(job) {
             let pct = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), Double(job.remotePermille) / 10.0)
-            return "\(job.status)  \(serviceLabel(service)) fetching \(pct)%"
+            return "\(job.status)  \(jobRouteName(job, names: names)) fetching \(pct)%"
         }
         let files = job.fileCount > 0 ? "  file \(max(job.fileIndex, 1))/\(job.fileCount)" : ""
         return "\(job.status)\(files)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"

@@ -563,6 +563,8 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     func drainNotices()  -> [String]
     
+    func hasAccount(id: String)  -> Bool
+    
     func hasDebridKey(service: String)  -> Bool
     
     func hydrate() throws 
@@ -574,9 +576,10 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func queue(kind: Kind, source: String) throws  -> UInt64
     
     /**
-     * Queue a magnet through a debrid service.
+     * Queue a magnet through a debrid account (its id; an account set with
+     * `set_debrid_key` uses the service id).
      */
-    func queueDebrid(source: String, service: String) throws  -> UInt64
+    func queueDebrid(source: String, account: String) throws  -> UInt64
     
     func remove(id: UInt64) 
     
@@ -589,16 +592,16 @@ public protocol EngineProtocol: AnyObject, Sendable {
      * This re-route should ask "also remove it from the service?" first
      * (the job leaves a service holding a torrent torrenter added).
      */
-    func rerouteAsksAboutRemote(id: UInt64, service: String?)  -> Bool
+    func rerouteAsksAboutRemote(id: UInt64, account: String?)  -> Bool
     
     func restart(id: UInt64, seed: Bool, dest: String) throws  -> UInt64
     
     /**
-     * Restart re-routed: `service = None` downloads from peers ("as torrent").
-     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
-     * pass false when it did not ask.
+     * Restart re-routed: `account = None` downloads from peers ("as
+     * torrent"). `remove_from_service` is the answer to
+     * `reroute_asks_about_remote`; pass false when it did not ask.
      */
-    func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String, removeFromService: Bool) throws  -> UInt64
+    func restartRoute(id: UInt64, account: String?, seed: Bool, dest: String, removeFromService: Bool) throws  -> UInt64
     
     func seed()  -> Bool
     
@@ -606,6 +609,13 @@ public protocol EngineProtocol: AnyObject, Sendable {
      * Connections per download for new jobs (`None` = Auto = 4).
      */
     func setConnections(parts: UInt8?) 
+    
+    /**
+     * Hand a named account's key from the platform keychain to the engine
+     * (memory only), or `None` to forget it. `id` is the app's stable account
+     * id; call before `hydrate` so restored jobs can start.
+     */
+    func setDebridAccount(id: String, service: String, key: String?) throws 
     
     /**
      * Hand a key from the platform keychain to the engine (memory only), or
@@ -728,6 +738,14 @@ open func drainNotices() -> [String]  {
 })
 }
     
+open func hasAccount(id: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_has_account(self.uniffiClonePointer(),
+        FfiConverterString.lower(id),$0
+    )
+})
+}
+    
 open func hasDebridKey(service: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_has_debrid_key(self.uniffiClonePointer(),
@@ -766,13 +784,14 @@ open func queue(kind: Kind, source: String)throws  -> UInt64  {
 }
     
     /**
-     * Queue a magnet through a debrid service.
+     * Queue a magnet through a debrid account (its id; an account set with
+     * `set_debrid_key` uses the service id).
      */
-open func queueDebrid(source: String, service: String)throws  -> UInt64  {
+open func queueDebrid(source: String, account: String)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_queue_debrid(self.uniffiClonePointer(),
         FfiConverterString.lower(source),
-        FfiConverterString.lower(service),$0
+        FfiConverterString.lower(account),$0
     )
 })
 }
@@ -798,11 +817,11 @@ open func removeWithRemote(id: UInt64)  {try! rustCall() {
      * This re-route should ask "also remove it from the service?" first
      * (the job leaves a service holding a torrent torrenter added).
      */
-open func rerouteAsksAboutRemote(id: UInt64, service: String?) -> Bool  {
+open func rerouteAsksAboutRemote(id: UInt64, account: String?) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),
-        FfiConverterOptionString.lower(service),$0
+        FfiConverterOptionString.lower(account),$0
     )
 })
 }
@@ -818,15 +837,15 @@ open func restart(id: UInt64, seed: Bool, dest: String)throws  -> UInt64  {
 }
     
     /**
-     * Restart re-routed: `service = None` downloads from peers ("as torrent").
-     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
-     * pass false when it did not ask.
+     * Restart re-routed: `account = None` downloads from peers ("as
+     * torrent"). `remove_from_service` is the answer to
+     * `reroute_asks_about_remote`; pass false when it did not ask.
      */
-open func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String, removeFromService: Bool)throws  -> UInt64  {
+open func restartRoute(id: UInt64, account: String?, seed: Bool, dest: String, removeFromService: Bool)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_restart_route(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),
-        FfiConverterOptionString.lower(service),
+        FfiConverterOptionString.lower(account),
         FfiConverterBool.lower(seed),
         FfiConverterString.lower(dest),
         FfiConverterBool.lower(removeFromService),$0
@@ -847,6 +866,20 @@ open func seed() -> Bool  {
 open func setConnections(parts: UInt8?)  {try! rustCall() {
     uniffi_torrenter_fn_method_engine_set_connections(self.uniffiClonePointer(),
         FfiConverterOptionUInt8.lower(parts),$0
+    )
+}
+}
+    
+    /**
+     * Hand a named account's key from the platform keychain to the engine
+     * (memory only), or `None` to forget it. `id` is the app's stable account
+     * id; call before `hydrate` so restored jobs can start.
+     */
+open func setDebridAccount(id: String, service: String, key: String?)throws   {try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_set_debrid_account(self.uniffiClonePointer(),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(service),
+        FfiConverterOptionString.lower(key),$0
     )
 }
 }
@@ -1053,6 +1086,10 @@ public struct JobView {
      */
     public var fileIndex: UInt32
     public var fileCount: UInt32
+    /**
+     * Debrid route only: the account id the job runs through.
+     */
+    public var account: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1065,7 +1102,10 @@ public struct JobView {
          */remotePermille: UInt16, 
         /**
          * 1-based file being downloaded and the file count (0 before downloading).
-         */fileIndex: UInt32, fileCount: UInt32) {
+         */fileIndex: UInt32, fileCount: UInt32, 
+        /**
+         * Debrid route only: the account id the job runs through.
+         */account: String? = nil) {
         self.id = id
         self.kind = kind
         self.source = source
@@ -1089,6 +1129,7 @@ public struct JobView {
         self.remotePermille = remotePermille
         self.fileIndex = fileIndex
         self.fileCount = fileCount
+        self.account = account
     }
 }
 
@@ -1168,6 +1209,9 @@ extension JobView: Equatable, Hashable {
         if lhs.fileCount != rhs.fileCount {
             return false
         }
+        if lhs.account != rhs.account {
+            return false
+        }
         return true
     }
 
@@ -1195,6 +1239,7 @@ extension JobView: Equatable, Hashable {
         hasher.combine(remotePermille)
         hasher.combine(fileIndex)
         hasher.combine(fileCount)
+        hasher.combine(account)
     }
 }
 
@@ -1229,7 +1274,8 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
                 service: FfiConverterOptionString.read(from: &buf), 
                 remotePermille: FfiConverterUInt16.read(from: &buf), 
                 fileIndex: FfiConverterUInt32.read(from: &buf), 
-                fileCount: FfiConverterUInt32.read(from: &buf)
+                fileCount: FfiConverterUInt32.read(from: &buf), 
+                account: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1257,6 +1303,7 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
         FfiConverterUInt16.write(value.remotePermille, into: &buf)
         FfiConverterUInt32.write(value.fileIndex, into: &buf)
         FfiConverterUInt32.write(value.fileCount, into: &buf)
+        FfiConverterOptionString.write(value.account, into: &buf)
     }
 }
 
@@ -1675,6 +1722,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_drain_notices() != 39100) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_has_account() != 2350) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_has_debrid_key() != 63083) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1690,7 +1740,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_queue() != 33011) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 31632) {
+    if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 53234) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_remove() != 13505) {
@@ -1699,19 +1749,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 36487) {
+    if (uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 60983) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_restart() != 54366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_restart_route() != 32989) {
+    if (uniffi_torrenter_checksum_method_engine_restart_route() != 37013) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_seed() != 40595) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_connections() != 19727) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_debrid_account() != 34681) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_debrid_key() != 60581) {

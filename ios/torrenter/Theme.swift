@@ -71,6 +71,15 @@ func themePalette(_ id: ThemeId) -> Palette {
     }
 }
 
+/// A named key for one debrid provider; a provider can have several.
+struct DebridAccount: Codable, Identifiable, Equatable {
+    /// Stable id the engine, jobs and the remembered route use. Keys saved
+    /// before accounts existed use the provider id.
+    let id: String
+    var name: String
+    let service: String
+}
+
 enum Prefs {
     static let themeKey = "theme"
 
@@ -86,7 +95,7 @@ enum Prefs {
     static let connectionsKey = "connections"
     static let removeAfterKey = "debridRemoveAfter"
 
-    /// Remembered debrid service for magnet jobs; nil is off.
+    /// Remembered debrid account id for magnet jobs; nil is default (peers).
     static func debridRoute() -> String? {
         UserDefaults.standard.string(forKey: debridRouteKey)
     }
@@ -114,6 +123,21 @@ enum Prefs {
 
     static func saveRemoveAfter(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: removeAfterKey)
+    }
+
+    static let accountsKey = "debridAccounts"
+
+    /// Debrid accounts (names and providers only; keys live in the Keychain
+    /// under each account's id).
+    static func accounts() -> [DebridAccount] {
+        guard let data = UserDefaults.standard.data(forKey: accountsKey) else { return [] }
+        return (try? JSONDecoder().decode([DebridAccount].self, from: data)) ?? []
+    }
+
+    static func saveAccounts(_ accounts: [DebridAccount]) {
+        if let data = try? JSONEncoder().encode(accounts) {
+            UserDefaults.standard.set(data, forKey: accountsKey)
+        }
     }
 
     static let keepAliveKey = "keepAlive"
