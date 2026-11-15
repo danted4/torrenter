@@ -7,7 +7,11 @@ import UIKit
 final class EngineOwner: ObservableObject {
     static let tickMs: UInt64 = 200
 
-    @Published private(set) var jobs: [JobView] = []
+    /// The job list lives in its own object so only the job rows redraw on
+    /// the 200 ms refresh; the rest of the screen (URL field, dropdowns,
+    /// settings) does not.
+    let jobList = JobList()
+    var jobs: [JobView] { jobList.jobs }
     @Published var notice: String?
     @Published private(set) var bannerText: String = ""
     @Published var keepAliveOn: Bool = Prefs.keepAlive() {
@@ -487,21 +491,29 @@ final class EngineOwner: ObservableObject {
     private func tick() {
         guard let engine else { return }
         let notices = engine.drainNotices()
-        if let last = notices.last {
+        if let last = notices.last, last != notice {
             notice = last
         }
         engine.persist(force: !engine.anyActive())
-        // Publish only real changes: every publish redraws the screen, and a
-        // redraw mid-tap makes the dropdowns flicker and drop touches.
-        let next = engine.jobs()
-        if next != jobs {
-            jobs = next
-        }
+        jobList.update(engine.jobs())
         syncKeepAlive()
     }
 
     private func refresh() {
-        jobs = engine?.jobs() ?? []
+        jobList.update(engine?.jobs() ?? [])
+    }
+}
+
+/// The live job list, observed only by the job rows.
+@MainActor
+final class JobList: ObservableObject {
+    @Published private(set) var jobs: [JobView] = []
+
+    /// Publish only real changes: every publish redraws its observers.
+    func update(_ next: [JobView]) {
+        if next != jobs {
+            jobs = next
+        }
     }
 }
 

@@ -888,7 +888,13 @@ impl eframe::App for GuiApp {
             self.applied_glass_tint = paint_tint;
         }
         let palette = theme(self.theme);
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // Redraw often only while something moves (downloads, toasts and the
+        // update install they show, account checks); idle, once a second.
+        // Input still repaints at once; worker replies wait at most that long.
+        let busy = self.session.any_active()
+            || !self.toasts.is_empty()
+            || self.account_notes.values().any(|note| note == "checking…");
+        ctx.request_repaint_after(if busy { BUSY_REPAINT } else { IDLE_REPAINT });
 
         const CONTROLS_H: f32 = 28.0;
         const URL_H: f32 = 28.0;
@@ -2507,6 +2513,10 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     }
     click_cursor(response).on_hover_text("settings")
 }
+
+/// Repaint cadence while something moves, and when idle.
+const BUSY_REPAINT: Duration = Duration::from_millis(200);
+const IDLE_REPAINT: Duration = Duration::from_secs(1);
 
 /// Settings layout: sidebar width and the gap between cards.
 const SIDEBAR_W: f32 = 190.0;

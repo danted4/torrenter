@@ -111,29 +111,13 @@ struct ContentView: View {
                 .toggleStyle(MiniSwitch(palette: colors))
                 .fixedSize()
             }
-            if owner.jobs.isEmpty {
-                Text("no jobs yet — paste a magnet or HTTP URL")
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundColor(colors.dim)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(owner.jobs, id: \.id) { job in
-                            JobCard(
-                                job: job,
-                                names: owner.accountNames,
-                                palette: colors,
-                                onPause: { owner.togglePause(id: job.id) },
-                                onStop: { owner.stop(id: job.id) },
-                                onClear: { owner.clear(job: job) },
-                                onRestart: { owner.restart(job: job) },
-                                onShare: { shareJob = job },
-                                onAsTorrent: { owner.asTorrent(job: job) }
-                            )
-                        }
-                    }
-                }
-            }
+            JobsSection(
+                list: owner.jobList,
+                owner: owner,
+                names: owner.accountNames,
+                colors: colors,
+                shareJob: $shareJob
+            )
             Spacer(minLength: 0)
         }
     }
@@ -275,6 +259,43 @@ private struct RouteMenu: View, Equatable {
             .frame(width: Self.width, height: 34)
             .overlay(RoundedRectangle(cornerRadius: 2).stroke(on ? colors.fg : colors.dim, lineWidth: 1))
             .contentShape(Rectangle())
+        }
+    }
+}
+
+/// The job rows. Observes only the job list, so the 200 ms refresh redraws
+/// just this section, not the URL field, dropdowns or settings.
+private struct JobsSection: View {
+    @ObservedObject var list: JobList
+    /// Actions only; deliberately not observed here.
+    let owner: EngineOwner
+    let names: [String: String]
+    let colors: Palette
+    @Binding var shareJob: JobView?
+
+    var body: some View {
+        if list.jobs.isEmpty {
+            Text("no jobs yet — paste a magnet or HTTP URL")
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(colors.dim)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(list.jobs, id: \.id) { job in
+                        JobCard(
+                            job: job,
+                            names: names,
+                            palette: colors,
+                            onPause: { owner.togglePause(id: job.id) },
+                            onStop: { owner.stop(id: job.id) },
+                            onClear: { owner.clear(job: job) },
+                            onRestart: { owner.restart(job: job) },
+                            onShare: { shareJob = job },
+                            onAsTorrent: { owner.asTorrent(job: job) }
+                        )
+                    }
+                }
+            }
         }
     }
 }
