@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.8.2] - 2026-11-15
+
+### Fixed
+
+- Magnet download speed (desktop GUI, MCP, Android, iOS) reads steadily instead of jumping between `0.00 B/s` and multiples of a piece: it now comes from librqbit's live speed over bytes received, not from verified-piece progress. ETA follows it.
+
 ## [3.8.1] - 2026-11-15
 
 ### Fixed

@@ -801,9 +801,22 @@ pub(crate) fn tick_job_rates(job: &mut Job) {
     let downloaded = job.snapshot.downloaded.load(Ordering::Relaxed);
     let uploaded = job.snapshot.uploaded.load(Ordering::Relaxed);
     let engine_up = job.snapshot.upload_bps.load(Ordering::Relaxed) as f64;
+    // Magnets: librqbit's smoothed live speed. Their `downloaded` grows only
+    // by whole verified pieces, so a byte delta reads 0, then a burst. A
+    // stopped or paused job no longer updates it, so it reads 0 then.
+    let engine_down =
+        (job.kind == JobKind::Magnet && job.snapshot.is_active() && !job.snapshot.is_paused())
+            .then(|| job.snapshot.download_bps.load(Ordering::Relaxed) as f64);
+    if let Some(speed) = engine_down {
+        job.speed = speed;
+    }
     let elapsed = now.saturating_duration_since(job.last_check).as_secs_f64();
     if elapsed >= 0.4 {
-        job.speed = (downloaded.saturating_sub(job.last_bytes) as f64) / elapsed;
+        if job.kind != JobKind::Magnet {
+            job.speed = (downloaded.saturating_sub(job.last_bytes) as f64) / elapsed;
+        } else if engine_down.is_none() {
+            job.speed = 0.0;
+        }
         job.up_speed = if engine_up > 0.0 {
             engine_up
         } else {
@@ -1170,6 +1183,32 @@ mod tests {
         tick_job_rates(&mut job);
         assert!((job.speed - 1024.0).abs() < 1.0, "{}", job.speed);
         assert!((job.up_speed - 512.0).abs() < 1.0, "{}", job.up_speed);
+    }
+
+    #[test]
+    fn magnet_speed_follows_the_engine_not_piece_bursts() {
+        let mut job = sample_job("Sintel", "magnet:?xt=urn:btih:x", "/tmp/films");
+        job.kind = JobKind::Magnet;
+        job.snapshot.set_status("downloading");
+        job.snapshot
+            .download_bps
+            .store(7_000_000, Ordering::Relaxed);
+        // No verified piece landed this window: still the live speed, not 0.
+        job.last_check = Instant::now() - Duration::from_secs(1);
+        tick_job_rates(&mut job);
+        assert!((job.speed - 7_000_000.0).abs() < 1.0, "{}", job.speed);
+        // A whole piece landing does not spike it.
+        job.snapshot
+            .downloaded
+            .store(16 * 1024 * 1024, Ordering::Relaxed);
+        job.last_check = Instant::now() - Duration::from_millis(400);
+        tick_job_rates(&mut job);
+        assert!((job.speed - 7_000_000.0).abs() < 1.0, "{}", job.speed);
+        // Paused or stopped: the engine no longer updates it, so 0.
+        job.snapshot.toggle_pause();
+        job.last_check = Instant::now() - Duration::from_secs(1);
+        tick_job_rates(&mut job);
+        assert_eq!(job.speed, 0.0);
     }
 
     #[test]

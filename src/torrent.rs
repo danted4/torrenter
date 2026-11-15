@@ -351,14 +351,18 @@ fn live_peers_and_upload(stats: &librqbit::TorrentStats, session: &Session) -> (
     (peers, uploaded, up_speed)
 }
 
-fn apply_upload_stats(
-    progress: &ProgressHandle,
-    stats: &librqbit::TorrentStats,
-    session: &Session,
-) {
+fn apply_live_stats(progress: &ProgressHandle, stats: &librqbit::TorrentStats, session: &Session) {
     let (peers, uploaded, up_speed) = live_peers_and_upload(stats, session);
     progress.set_uploaded(uploaded);
     progress.set_upload_bps(up_speed);
+    // librqbit's estimator over raw bytes received: smooth, unlike the
+    // verified-piece progress (0 when the torrent is not live).
+    let down_speed = stats
+        .live
+        .as_ref()
+        .map(|live| live.download_speed.as_bytes() as f64)
+        .unwrap_or(0.0);
+    progress.set_download_bps(down_speed);
     if let Some(snapshot) = progress.snapshot() {
         snapshot
             .peers
@@ -446,7 +450,7 @@ async fn run_torrent(
                 let total = stats.total_bytes.max(1);
                 progress.set_length(total);
                 progress.set_position(total);
-                apply_upload_stats(&progress, &stats, session);
+                apply_live_stats(&progress, &stats, session);
                 if progress.is_paused() {
                     continue;
                 }
@@ -502,7 +506,7 @@ async fn run_torrent(
                     progress.finish_and_clear();
                     bail!("{error}");
                 }
-                apply_upload_stats(&progress, &stats, session);
+                apply_live_stats(&progress, &stats, session);
                 if !want_pause && download_done && !seed {
                     progress.finish();
                     if progress.announce() {

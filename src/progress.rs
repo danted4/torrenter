@@ -83,6 +83,14 @@ fn bar_keys(style: ProgressStyle) -> ProgressStyle {
         )
 }
 
+fn whole_bps(bps: f64) -> u64 {
+    if bps.is_finite() && bps > 0.0 {
+        bps.round() as u64
+    } else {
+        0
+    }
+}
+
 pub fn progress_style() -> ProgressStyle {
     bar_keys(ProgressStyle::with_template(BAR_TEMPLATE).expect("valid progress template"))
 }
@@ -127,6 +135,10 @@ pub struct JobSnapshot {
     pub total: AtomicU64,
     pub uploaded: AtomicU64,
     pub upload_bps: AtomicU64,
+    /// Magnet jobs: librqbit's smoothed live download speed (bytes/s, raw
+    /// bytes received). `downloaded` only grows by whole verified pieces, so
+    /// a rate taken from it alone jumps between 0 and multiples of a piece.
+    pub download_bps: AtomicU64,
     pub peers: AtomicU64,
     pub finished: AtomicBool,
     paused: AtomicBool,
@@ -145,6 +157,7 @@ impl Default for JobSnapshot {
             total: AtomicU64::new(0),
             uploaded: AtomicU64::new(0),
             upload_bps: AtomicU64::new(0),
+            download_bps: AtomicU64::new(0),
             peers: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -495,12 +508,15 @@ impl ProgressHandle {
 
     pub fn set_upload_bps(&self, bps: f64) {
         if let Some(snapshot) = &self.snapshot {
-            let bps = if bps.is_finite() && bps > 0.0 {
-                bps.round() as u64
-            } else {
-                0
-            };
-            snapshot.upload_bps.store(bps, Ordering::Relaxed);
+            snapshot.upload_bps.store(whole_bps(bps), Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_download_bps(&self, bps: f64) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot
+                .download_bps
+                .store(whole_bps(bps), Ordering::Relaxed);
         }
     }
 
