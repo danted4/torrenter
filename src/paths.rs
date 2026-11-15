@@ -32,16 +32,40 @@ pub fn plain_path(path: PathBuf) -> PathBuf {
         return path;
     };
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
+        if plain_keeps_meaning(rest) {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        return path;
     }
     if let Some(rest) = text.strip_prefix(r"\\?\") {
         let bytes = rest.as_bytes();
         let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-        if drive && (bytes.len() == 2 || bytes[2] == b'\\') {
+        if drive && (bytes.len() == 2 || bytes[2] == b'\\') && plain_keeps_meaning(&rest[2..]) {
             return PathBuf::from(rest);
         }
     }
     path
+}
+
+/// Without `\\?\` Windows trims a trailing dot or space from each component
+/// and treats device names (CON, NUL, COM1, …) specially, so such a path
+/// would point elsewhere: keep those verbatim.
+fn plain_keeps_meaning(rest: &str) -> bool {
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    rest.split('\\')
+        .filter(|part| !part.is_empty())
+        .all(|part| {
+            if part.ends_with('.') || part.ends_with(' ') {
+                return false;
+            }
+            let stem = part.split('.').next().unwrap_or(part).trim_end();
+            let upper = stem.to_ascii_uppercase();
+            let numbered = (upper.starts_with("COM") || upper.starts_with("LPT"))
+                && upper.len() == 4
+                && upper.as_bytes()[3].is_ascii_digit()
+                && upper.as_bytes()[3] != b'0';
+            !(RESERVED.contains(&upper.as_str()) || numbered)
+        })
 }
 
 pub fn effective_dir(config: &AppConfig) -> PathBuf {
@@ -127,6 +151,18 @@ mod tests {
         assert_eq!(plain(r"\\?\E:\my\folder"), r"E:\my\folder");
         assert_eq!(plain(r"\\?\C:\"), r"C:\");
         assert_eq!(plain(r"\\?\UNC\nas\share\dl"), r"\\nas\share\dl");
+        // Plain would mean another folder: a trailing dot or space, a device name.
+        assert_eq!(plain(r"\\?\E:\dl.\x"), r"\\?\E:\dl.\x");
+        assert_eq!(plain(r"\\?\E:\dl \x"), r"\\?\E:\dl \x");
+        assert_eq!(plain(r"\\?\E:\con\x"), r"\\?\E:\con\x");
+        assert_eq!(plain(r"\\?\E:\aux.txt"), r"\\?\E:\aux.txt");
+        assert_eq!(plain(r"\\?\E:\COM1"), r"\\?\E:\COM1");
+        assert_eq!(plain(r"\\?\UNC\nas\share\nul"), r"\\?\UNC\nas\share\nul");
+        // Look-alikes that are ordinary names stay plain.
+        assert_eq!(
+            plain(r"\\?\E:\console\COM0\com12"),
+            r"E:\console\COM0\com12"
+        );
         // No plain equivalent, or already plain: unchanged.
         assert_eq!(plain(r"\\?\Volume{abc}\dl"), r"\\?\Volume{abc}\dl");
         assert_eq!(plain(r"E:\my\folder"), r"E:\my\folder");
