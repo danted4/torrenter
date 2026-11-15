@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-11-15
+
+### Fixed
+
+- Windows: a job's own download folder (shown in the restart dialog, the job list, MCP and the apps) no longer shows the verbatim `\\?\E:\folder` form; folders saved that way are cleaned when jobs load and rewritten to `jobs.json`.
+- The close cross on the restart and "Also remove it from …?" popups now shows the pointer cursor on hover.
+
 ## [3.8.0] - 2026-11-15
 
 ### Added

@@ -15,6 +15,7 @@ use crate::http::{
     PART_COUNT,
 };
 use crate::jobs::{self, JobKind, LoadJobs, PersistedJob, RestoreAction};
+use crate::paths::plain_path;
 use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
@@ -227,7 +228,7 @@ impl Session {
         thread::spawn(move || engine_loop(engine_rx, event_tx));
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                dest,
+                dest: plain_path(dest),
                 jobs_path,
                 seed: seed && !leech_only,
                 leech_only,
@@ -252,7 +253,7 @@ impl Session {
     }
 
     pub fn set_dest(&self, dest: PathBuf) {
-        mutex_lock(&self.inner).dest = dest;
+        mutex_lock(&self.inner).dest = plain_path(dest);
     }
 
     pub fn seed(&self) -> bool {
@@ -325,6 +326,7 @@ impl Session {
             LoadJobs::Loaded(list) => {
                 let leech_only = inner.leech_only;
                 let mut probes = Vec::new();
+                let mut cleaned = false;
                 inner.next_id = inner.next_id.max(list.max_id() + 1);
                 inner.foreign = list.foreign;
                 for record in list.jobs {
@@ -333,6 +335,10 @@ impl Session {
                     };
                     let snapshot = Arc::new(JobSnapshot::default());
                     record.apply_to(&snapshot);
+                    // Folders saved verbatim by an earlier Windows build
+                    // (\\?\E:\...) come back plain everywhere they show.
+                    let dest = plain_path(record.dest.clone());
+                    cleaned |= dest != record.dest;
                     let wants_engine = record.wants_engine();
                     if record.id >= inner.next_id {
                         inner.next_id = record.id + 1;
@@ -342,7 +348,7 @@ impl Session {
                             id: record.id,
                             kind,
                             source: record.source.clone(),
-                            dest: record.dest.clone(),
+                            dest: dest.clone(),
                             filename: record.title.clone(),
                         });
                     }
@@ -375,13 +381,15 @@ impl Session {
                         speed: 0.0,
                         up_speed: 0.0,
                         seed: record.seed && !leech_only && kind == JobKind::Magnet,
-                        dest: record.dest,
+                        dest,
                         // Jobs saved before the setting existed used 4 parts.
                         part_count: record.part_count.map(usize::from).unwrap_or(PART_COUNT),
                         debrid,
                     });
                 }
-                if inner.leech_only {
+                // Rewrite now when a folder was cleaned, so jobs.json holds the
+                // plain form too (the fingerprint does not include folders).
+                if inner.leech_only || cleaned {
                     inner.saved_fingerprint.clear();
                     persist_inner(&mut inner, true);
                 } else {
@@ -586,6 +594,7 @@ impl Session {
         dest: PathBuf,
         remove_from_service: bool,
     ) -> Result<u64, String> {
+        let dest = plain_path(dest);
         let mut inner = mutex_lock(&self.inner);
         let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
             return Err("job gone".into());
@@ -1527,6 +1536,31 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn verbatim_windows_folders_come_back_plain() {
+        let dir = tempdir().unwrap();
+        let jobs_path = dir.path().join("jobs.json");
+        std::fs::write(
+            &jobs_path,
+            r#"{"jobs":[{"id":3,"kind":"magnet","source":"magnet:?xt=urn:btih:4444444444444444444444444444444444444444","dest":"\\\\?\\E:\\my\\folder","status":"stopped"}]}"#,
+        )
+        .unwrap();
+        let session = Session::open(PathBuf::from(r"\\?\E:\dl"), jobs_path.clone(), false);
+        assert_eq!(session.dest(), PathBuf::from(r"E:\dl"));
+        session.hydrate();
+        let job = session.job(3).unwrap();
+        assert_eq!(
+            job.dest,
+            PathBuf::from(r"E:\my\folder"),
+            "restart shows the plain folder"
+        );
+        session.set_dest(PathBuf::from(r"\\?\UNC\nas\share"));
+        assert_eq!(session.dest(), PathBuf::from(r"\\nas\share"));
+        // Loading rewrote jobs.json with the plain folder.
+        let saved = std::fs::read_to_string(&jobs_path).unwrap();
+        assert!(!saved.contains(r"\\\\?"), "{saved}");
     }
 
     #[test]

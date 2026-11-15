@@ -2117,8 +2117,8 @@ impl GuiApp {
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
             .frame(
                 egui::Frame::NONE
                     .fill(self.card_fill(palette.row))
@@ -2128,6 +2128,9 @@ impl GuiApp {
             )
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
+                if popup_header(ui, title, palette) {
+                    open = false;
+                }
                 glass_label(
                     ui,
                     format!("Also remove it from {label}?"),
@@ -2189,8 +2192,8 @@ impl GuiApp {
         egui::Window::new("restart")
             .collapsible(false)
             .resizable(false)
+            .title_bar(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
             .frame(
                 egui::Frame::NONE
                     .fill(self.card_fill(palette.row))
@@ -2200,6 +2203,9 @@ impl GuiApp {
             )
             .show(ctx, |ui| {
                 ui.set_min_width(420.0);
+                if popup_header(ui, "restart", palette) {
+                    open = false;
+                }
                 if kind == Mode::Magnet {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
@@ -2749,6 +2755,34 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Response 
         if on { palette.bg } else { palette.dim },
     );
     click_cursor(response)
+}
+
+/// A popup's own title row: the title, and a close cross with the pointer
+/// cursor (egui's built-in title-bar close button cannot set one). True when
+/// the cross was clicked.
+fn popup_header(ui: &mut egui::Ui, title: &str, palette: Theme) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(ink(title, 13.0, palette.fg));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), Sense::click());
+            let color = if response.hovered() {
+                palette.fg
+            } else {
+                palette.dim
+            };
+            let cross = rect.shrink(3.5);
+            let stroke = Stroke::new(1.4_f32, color);
+            let painter = ui.painter();
+            painter.line_segment([cross.left_top(), cross.right_bottom()], stroke);
+            painter.line_segment([cross.right_top(), cross.left_bottom()], stroke);
+            if click_cursor(response).on_hover_text("close").clicked() {
+                close = true;
+            }
+        });
+    });
+    ui.add_space(6.0);
+    close
 }
 
 /// What the route menu picked.
