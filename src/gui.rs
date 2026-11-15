@@ -931,7 +931,9 @@ impl eframe::App for GuiApp {
                             egui::vec2(380.0, CONTROLS_H),
                             egui::Layout::left_to_right(egui::Align::Max),
                             |ui| {
-                                glass_pair(
+                                // The title doubles as "home": back to the
+                                // main page from settings.
+                                let title = glass_pair(
                                     ui,
                                     identity::REPO,
                                     18.0,
@@ -940,6 +942,9 @@ impl eframe::App for GuiApp {
                                     10.0,
                                     palette.dim,
                                 );
+                                if click_cursor(title).on_hover_text("main page").clicked() {
+                                    self.settings_open = false;
+                                }
                             },
                         );
                         let right_w = 200.0_f32;
@@ -1776,7 +1781,6 @@ impl GuiApp {
         }
         if self.add_form.is_some() {
             settings_card(ui, fill, palette, |ui| {
-                card_title(ui, "add account", palette);
                 self.add_account_form(ui, &accounts, palette);
             });
         }
@@ -1823,11 +1827,13 @@ impl GuiApp {
         };
         let mut test = false;
         let mut remove = false;
-        ui.horizontal(|ui| {
-            ui.set_min_height(28.0);
-            glass_label(ui, &account.name, 13.0, palette.fg);
-            glass_label(ui, detail, 12.0, palette.dim);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        setting_row(
+            ui,
+            palette,
+            (&account.name, &detail),
+            160.0,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if account.source == KeySource::File
                     && ui
@@ -1844,8 +1850,8 @@ impl GuiApp {
                 {
                     test = true;
                 }
-            });
-        });
+            },
+        );
         if test {
             if let Some((service, key)) = credentials::account_key(&account.id) {
                 self.start_account_check(account.id.clone(), service, key);
@@ -1867,108 +1873,162 @@ impl GuiApp {
     }
 
     /// Provider first, then a name (optional: defaults to the provider's
-    /// name) and the key. Saving runs the account check.
+    /// name) and the key, as tile rows; cancel in the header, save at the
+    /// bottom right. Saving runs the account check.
     fn add_account_form(&mut self, ui: &mut egui::Ui, accounts: &[AccountInfo], palette: Theme) {
         let Some(mut form) = self.add_form.take() else {
             return;
         };
         let mut keep = true;
         let mut save = false;
-        inline_setting(
-            ui,
-            "provider",
-            "the debrid service this key belongs to",
-            palette,
-            |ui| {
-                let text = form
-                    .service
-                    .map(|service| service.label().to_string())
-                    .unwrap_or_else(|| "choose a provider".to_string());
-                let width = route_select_width(ui, "choose a provider");
-                let select = route_select(
+        // One width for the select and both fields, flush right: just wide
+        // enough for the select's placeholder.
+        let field_w = route_select_width(ui, "choose a provider") + 8.0;
+        card_title(ui, "add account", palette);
+        ui.label(ink(
+            "paste an API key from your provider's account page; it is stored only on this computer",
+            11.0,
+            palette.dim,
+        ));
+        ui.add_space(4.0);
+        // The fields sit in an inset panel the header owns.
+        let inset =
+            Color32::from_rgba_unmultiplied(palette.bg.r(), palette.bg.g(), palette.bg.b(), 170);
+        egui::Frame::NONE
+            .fill(inset)
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(FORM_INSET, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                setting_row(
                     ui,
-                    &text,
-                    width,
-                    26.0,
-                    form.service.is_some(),
-                    true,
                     palette,
-                );
-                let popup_id = ui.make_persistent_id("add-account-provider");
-                if select.clicked() {
-                    ui.memory_mut(|memory| memory.toggle_popup(popup_id));
-                }
-                egui::popup::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &select,
-                    egui::PopupCloseBehavior::CloseOnClick,
+                    ("provider", "the debrid service the key belongs to"),
+                    field_w,
+                    egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
-                        ui.set_min_width(width.max(200.0));
-                        for service in Service::shipped() {
-                            if menu_row(
-                                ui,
-                                service.label(),
-                                "",
-                                form.service == Some(*service),
-                                palette,
-                            )
-                            .clicked()
-                            {
-                                form.service = Some(*service);
-                            }
+                        let text = form
+                            .service
+                            .map(|service| service.label().to_string())
+                            .unwrap_or_else(|| "choose a provider".to_string());
+                        let select = route_select(
+                            ui,
+                            &text,
+                            field_w,
+                            28.0,
+                            form.service.is_some(),
+                            true,
+                            palette,
+                        );
+                        let popup_id = ui.make_persistent_id("add-account-provider");
+                        if select.clicked() {
+                            ui.memory_mut(|memory| memory.toggle_popup(popup_id));
                         }
+                        egui::popup::popup_below_widget(
+                            ui,
+                            popup_id,
+                            &select,
+                            egui::PopupCloseBehavior::CloseOnClick,
+                            |ui| {
+                                ui.set_min_width(field_w);
+                                for service in Service::shipped() {
+                                    if menu_row(
+                                        ui,
+                                        service.label(),
+                                        "",
+                                        form.service == Some(*service),
+                                        palette,
+                                    )
+                                    .clicked()
+                                    {
+                                        form.service = Some(*service);
+                                    }
+                                }
+                            },
+                        );
                     },
                 );
-            },
-        );
-        if let Some(service) = form.service {
-            let default_name = credentials::default_name(service, accounts);
-            inline_setting(
-                ui,
-                "name",
-                "shown in the download menu; optional",
-                palette,
-                |ui| {
-                    let edit = TextEdit::singleline(&mut form.name)
-                        .hint_text(default_name.as_str())
-                        .font(FontId::new(13.0, FontFamily::Monospace))
-                        .desired_width(ui.available_width().min(280.0))
-                        .margin(egui::Margin::symmetric(8, 5));
-                    form_field(ui, edit, palette);
-                },
-            );
-            let hint = format!(
-                "from your {} account settings; stored only on this computer",
-                service.label()
-            );
-            inline_setting(ui, "api key", &hint, palette, |ui| {
-                let edit = TextEdit::singleline(&mut form.key)
-                    .password(true)
-                    .hint_text("paste the key")
-                    .font(FontId::new(13.0, FontFamily::Monospace))
-                    .desired_width(ui.available_width().min(280.0))
-                    .margin(egui::Margin::symmetric(8, 5));
-                let response = form_field(ui, edit, palette);
-                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                    save = true;
+                if let Some(service) = form.service {
+                    let default_name = credentials::default_name(service, accounts);
+                    tile_divider(ui, palette);
+                    setting_row(
+                        ui,
+                        palette,
+                        ("name", "shown in the download menu; optional"),
+                        field_w,
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let edit = TextEdit::singleline(&mut form.name)
+                                .hint_text(default_name.as_str())
+                                .font(FontId::new(13.0, FontFamily::Monospace))
+                                .desired_width(field_w - 16.0)
+                                .margin(egui::Margin::symmetric(8, 5));
+                            form_field(ui, edit, palette);
+                        },
+                    );
+                    tile_divider(ui, palette);
+                    let description = format!("from your {} account settings", service.label());
+                    setting_row(
+                        ui,
+                        palette,
+                        ("api key", &description),
+                        field_w,
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let edit = TextEdit::singleline(&mut form.key)
+                                .password(true)
+                                .hint_text("paste the key")
+                                .font(FontId::new(13.0, FontFamily::Monospace))
+                                .desired_width(field_w - 16.0)
+                                .margin(egui::Margin::symmetric(8, 5));
+                            let response = form_field(ui, edit, palette);
+                            if response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                save = true;
+                            }
+                        },
+                    );
                 }
             });
-        }
-        ui.horizontal(|ui| {
-            ui.add_space(LABEL_W);
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let ready = form.service.is_some() && !form.key.trim().is_empty();
-            if ui
-                .add_enabled(ready, egui::Button::new(ink("save", 12.0, palette.fg)))
-                .clicked()
-            {
-                save = true;
-            }
-            if ui.button(ink("cancel", 12.0, palette.dim)).clicked() {
-                keep = false;
-            }
-        });
+        ui.add_space(2.0);
+        // Both actions together, centred under the panel: cancel, then save.
+        let width = ui.available_width();
+        let font = FontId::new(12.0, FontFamily::Monospace);
+        let pad = ui.spacing().button_padding.x * 2.0;
+        let gap = 8.0;
+        let text_w = |text: &str| {
+            ui.fonts(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+            })
+        };
+        let group_w = text_w("cancel") + text_w("save account") + 2.0 * pad + gap;
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 28.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_space(((width - group_w) / 2.0).max(0.0));
+                if ui.button(ink("cancel", 12.0, palette.fail)).clicked() {
+                    keep = false;
+                }
+                let ready = form.service.is_some() && !form.key.trim().is_empty();
+                let mut primary = egui::Button::new(ink(
+                    "save account",
+                    12.0,
+                    if ready { palette.fg } else { palette.dim },
+                ));
+                if ready {
+                    primary = primary.stroke(Stroke::new(1.0_f32, palette.fg));
+                }
+                if ui.add_enabled(ready, primary).clicked() {
+                    save = true;
+                }
+            },
+        );
         if save {
             if let (Some(service), Some(key)) = (form.service, Secret::new(form.key.trim())) {
                 let added = credentials::add_account(service, &form.name, &key);
@@ -2436,15 +2496,15 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     click_cursor(response).on_hover_text("settings")
 }
 
-/// Settings layout: sidebar width, gap between cards, and the label column
-/// of the add-account form.
+/// Settings layout: sidebar width and the gap between cards.
 const SIDEBAR_W: f32 = 190.0;
 /// Control boxes on the right of a setting tile: theme and tint share one so
 /// they line up; a switch needs little.
 const APPEARANCE_CONTROL_W: f32 = 260.0;
 const SWITCH_CONTROL_W: f32 = 40.0;
+/// How far the add-account fields sit inside its header.
+const FORM_INSET: i8 = 12;
 const CARD_GAP: f32 = 10.0;
-const LABEL_W: f32 = 120.0;
 
 /// The content pane's heading (the chosen category).
 fn page_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
@@ -2464,40 +2524,63 @@ fn setting_card(
     layout: egui::Layout,
     control: impl FnOnce(&mut egui::Ui),
 ) {
-    let (title, description) = text;
     settings_card(ui, fill, palette, |ui| {
-        let width = ui.available_width();
-        let text_w = (width - control_w - 24.0).max(80.0);
-        let painter = ui.painter();
-        let title = painter.layout_no_wrap(
-            title.to_string(),
-            FontId::new(13.0, FontFamily::Monospace),
-            palette.fg,
-        );
-        let description = painter.layout(
-            description.to_string(),
-            FontId::new(11.0, FontFamily::Monospace),
-            palette.dim,
-            text_w,
-        );
-        let gap = 3.0;
-        let text_h = title.size().y + gap + description.size().y;
-        let row_h = text_h.max(30.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), Sense::hover());
-        let top = rect.center().y - text_h / 2.0;
-        let title_h = title.size().y;
-        let painter = ui.painter();
-        painter.galley(egui::pos2(rect.left(), top), title, palette.fg);
-        painter.galley(
-            egui::pos2(rect.left(), top + title_h + gap),
-            description,
-            palette.dim,
-        );
-        let control_rect =
-            egui::Rect::from_min_max(egui::pos2(rect.right() - control_w, rect.top()), rect.max);
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(layout));
-        control(&mut child);
+        setting_row(ui, palette, text, control_w, layout, control);
     });
+}
+
+/// A tile's content without the frame (rows inside one card share it).
+fn setting_row(
+    ui: &mut egui::Ui,
+    palette: Theme,
+    text: (&str, &str),
+    control_w: f32,
+    layout: egui::Layout,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    let (title, description) = text;
+    let width = ui.available_width();
+    let text_w = (width - control_w - 24.0).max(80.0);
+    let painter = ui.painter();
+    let title = painter.layout_no_wrap(
+        title.to_string(),
+        FontId::new(13.0, FontFamily::Monospace),
+        palette.fg,
+    );
+    let description = painter.layout(
+        description.to_string(),
+        FontId::new(11.0, FontFamily::Monospace),
+        palette.dim,
+        text_w,
+    );
+    let gap = 3.0;
+    let text_h = title.size().y + gap + description.size().y;
+    let row_h = text_h.max(30.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), Sense::hover());
+    let top = rect.center().y - text_h / 2.0;
+    let title_h = title.size().y;
+    let painter = ui.painter();
+    painter.galley(egui::pos2(rect.left(), top), title, palette.fg);
+    painter.galley(
+        egui::pos2(rect.left(), top + title_h + gap),
+        description,
+        palette.dim,
+    );
+    let control_rect =
+        egui::Rect::from_min_max(egui::pos2(rect.right() - control_w, rect.top()), rect.max);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(layout));
+    control(&mut child);
+}
+
+/// A thin line between rows inside one card.
+fn tile_divider(ui: &mut egui::Ui, palette: Theme) {
+    let color =
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 50);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        Stroke::new(1.0_f32, color),
+    );
 }
 
 /// A settings card: the same frame as a download row.
@@ -2521,31 +2604,8 @@ fn settings_card(
 
 /// A card's title, styled like a download row's badge.
 fn card_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
-    glass_label(ui, text, 13.0, palette.fg);
-}
-
-/// A short dim label in a fixed column (help on hover), then the control.
-fn inline_setting(
-    ui: &mut egui::Ui,
-    label: &str,
-    hint: &str,
-    palette: Theme,
-    control: impl FnOnce(&mut egui::Ui),
-) {
-    ui.horizontal(|ui| {
-        ui.set_min_height(28.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(LABEL_W, 28.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                let response = glass_label(ui, label, 12.0, palette.dim);
-                if !hint.is_empty() {
-                    response.on_hover_text(hint);
-                }
-            },
-        );
-        control(ui);
-    });
+    // Inside a card the fill already keeps text readable: no glass wash.
+    ui.label(ink(text, 13.0, palette.fg));
 }
 
 /// A text field styled like the URL field (dim border, bright on hover/focus).
@@ -2655,10 +2715,10 @@ fn route_select(
     let shown = fit_text(ui, text, &font, room);
     let shortened = shown != text;
     let galley = painter.layout_no_wrap(shown, font, color);
-    let text_pos = egui::pos2(
-        rect.left() + ROUTE_PAD,
-        rect.center().y - galley.size().y / 2.0,
-    );
+    // Centred in the space left of the arrow.
+    let text_left = rect.left() + ROUTE_PAD;
+    let text_x = text_left + ((room - galley.size().x) / 2.0).max(0.0);
+    let text_pos = egui::pos2(text_x, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, color);
     let arrow = egui::pos2(
         rect.right() - ROUTE_PAD - ROUTE_ARROW / 2.0,
@@ -3110,7 +3170,7 @@ fn glass_pair(
     let inner_h = left_galley.size().y.max(right_galley.size().y);
     let inner_w = left_galley.size().x + gap + right_galley.size().x;
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(inner_w, inner_h) + pad, Sense::hover());
+        ui.allocate_exact_size(egui::vec2(inner_w, inner_h) + pad, Sense::click());
     let bottom = rect.bottom() - pad.y * 0.5;
     let left_pos = egui::pos2(rect.left() + pad.x * 0.5, bottom - left_galley.size().y);
     let title_mid = left_pos.y + left_galley.size().y * 0.5;
