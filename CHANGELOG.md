@@ -4,6 +4,8 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-11-15
+
 ### Added
 
 - **Debrid route for magnet jobs** (desktop GUI, CLI, MCP, Android, iOS): a magnet can go through your own debrid service, which fetches it server-side; torrenter then downloads every file over HTTP into the same `<dest>/<torrent-name>/` folder. TorBox ships in this release. Real-Debrid, AllDebrid, Premiumize and Debrid-Link adapters are built and tested against fakes and ship once each is confirmed with a real account.
