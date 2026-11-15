@@ -15,6 +15,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -121,9 +132,8 @@ private fun AppScreen(
     var debridRoute by remember { mutableStateOf(Prefs.debridRoute(prefs)) }
     var connections by remember { mutableStateOf(Prefs.connections(prefs)) }
     var removeAfter by remember { mutableStateOf(Prefs.removeAfter(prefs)) }
-    var keyed by remember {
-        mutableStateOf(debridServices().map { it.id }.filter { SecureKeys.read(activity, it) != null }.toSet())
-    }
+    var accounts by remember { mutableStateOf(Accounts.load(activity)) }
+    var settingsTab by remember { mutableStateOf(SettingsTab.APPEARANCE) }
     val notes = remember { mutableStateMapOf<String, String>() }
     var clearAsk by remember { mutableStateOf<JobView?>(null) }
     // "as torrent" on a debrid job torrenter added: ask before it leaves the service.
@@ -170,29 +180,27 @@ private fun AppScreen(
         Prefs.saveDebridRoute(prefs, id)
     }
 
-    /** Debrid control: off -> first service with a key -> next -> off. */
-    fun cycleRoute() {
-        val ready = debridServices().map { it.id }.filter { it in keyed }
-        if (ready.isEmpty()) {
-            notice = "add a debrid API key in settings first"
-            settingsOpen = true
-            return
-        }
-        val index = ready.indexOf(debridRoute)
-        setRoute(if (index < 0) ready.first() else ready.getOrNull(index + 1))
+    fun account(id: String?): DebridAccount? = accounts.firstOrNull { it.id == id }
+
+    /** "work (TorBox)", or just "TorBox" when the name is the provider's. */
+    fun accountTitle(job: JobView): String {
+        val account = account(job.account) ?: return serviceLabel(job.service)
+        val provider = serviceLabel(account.service)
+        return if (account.name == provider) provider else "${account.name} ($provider)"
     }
 
-    fun testKey(service: String) {
+    fun testAccount(id: String) {
         val live = engine ?: return
-        val key = SecureKeys.read(activity, service) ?: return
-        notes[service] = "checking…"
+        val service = account(id)?.service ?: return
+        val key = SecureKeys.read(activity, id) ?: return
+        notes[id] = "checking…"
         scope.launch {
             val note =
                 withContext(Dispatchers.IO) {
                     try {
-                        val account = live.debridAccount(service, key)
-                        if (account.premium) {
-                            "premium" + (account.expires?.let { " until $it" } ?: "")
+                        val result = live.debridAccount(service, key)
+                        if (result.premium) {
+                            "premium" + (result.expires?.let { " until $it" } ?: "")
                         } else {
                             "key works, but the account is not premium"
                         }
@@ -200,29 +208,39 @@ private fun AppScreen(
                         error.message ?: "check failed"
                     }
                 }
-            notes[service] = note
+            notes[id] = note
         }
     }
 
-    fun saveKey(
+    /** Save a new account: the key encrypted by id, the name in prefs. */
+    fun addAccount(
         service: String,
+        name: String,
         key: String,
-    ) {
-        if (!SecureKeys.save(activity, service, key)) {
+    ): Boolean {
+        val typed = name.trim()
+        if (key.isBlank() || (typed.isNotEmpty() && Accounts.nameTaken(typed, accounts))) return false
+        val finalName = typed.ifEmpty { Accounts.defaultName(serviceLabel(service), accounts) }
+        val id = Accounts.newId(service, accounts)
+        if (!SecureKeys.save(activity, id, key.trim())) {
             notice = "could not save the key"
-            return
+            return false
         }
-        engine?.setDebridKey(service, key)
-        keyed = keyed + service
-        testKey(service)
+        engine?.setDebridAccount(id, service, key.trim())
+        accounts = accounts + DebridAccount(id, finalName, service)
+        Accounts.save(activity, accounts)
+        testAccount(id)
+        return true
     }
 
-    fun removeKey(service: String) {
-        SecureKeys.delete(activity, service)
-        engine?.setDebridKey(service, null)
-        keyed = keyed - service
-        notes.remove(service)
-        if (debridRoute == service) {
+    fun removeAccount(id: String) {
+        val gone = account(id) ?: return
+        SecureKeys.delete(activity, id)
+        engine?.setDebridAccount(id, gone.service, null)
+        accounts = accounts.filterNot { it.id == id }
+        Accounts.save(activity, accounts)
+        notes.remove(id)
+        if (debridRoute == id) {
             setRoute(null)
         }
     }
@@ -237,7 +255,7 @@ private fun AppScreen(
             val opened = app.openEngine(seed)
             engine = opened
             seed = opened.seed()
-            if (debridRoute != null && debridRoute !in keyed) {
+            if (debridRoute != null && account(debridRoute) == null) {
                 setRoute(null)
             }
             if (!batteryWarned && !isIgnoringBattery(activity)) {
@@ -271,19 +289,30 @@ private fun AppScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Image(
-                painter = painterResource(R.drawable.ic_brand),
-                contentDescription = "torrenter",
-                modifier = Modifier.size(28.dp),
+            // The title doubles as "home": back to the main screen.
+            Row(
+                modifier = Modifier.weight(1f).clickable { settingsOpen = false },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.ic_brand),
+                    contentDescription = "torrenter",
+                    modifier = Modifier.size(28.dp),
+                )
+                Text(
+                    banner(),
+                    color = palette.fg,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+            // A back arrow while settings fill the screen.
+            CogGlyph(
+                color = if (settingsOpen) palette.fg else palette.dim,
+                open = settingsOpen,
+                onClick = { settingsOpen = !settingsOpen },
             )
-            Text(
-                banner(),
-                color = palette.fg,
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f),
-            )
-            CogGlyph(color = palette.dim, onClick = { settingsOpen = true })
         }
         if (!allowed) {
             Text("All files access is required so downloads go to Download/torrenter.", color = palette.dim)
@@ -304,7 +333,9 @@ private fun AppScreen(
                 themeId = themeId,
                 onTheme = onTheme,
                 buttons = buttons,
-                keyed = keyed,
+                tab = settingsTab,
+                onTab = { settingsTab = it },
+                accounts = accounts,
                 notes = notes,
                 connections = connections,
                 onConnections = {
@@ -318,10 +349,9 @@ private fun AppScreen(
                     Prefs.saveRemoveAfter(prefs, it)
                     engine?.setDebridRemoveAfter(it)
                 },
-                onSaveKey = { service, key -> saveKey(service, key) },
-                onTestKey = { testKey(it) },
-                onRemoveKey = { removeKey(it) },
-                onBack = { settingsOpen = false },
+                onAddAccount = { service, name, key -> addAccount(service, name, key) },
+                onTestAccount = { testAccount(it) },
+                onRemoveAccount = { removeAccount(it) },
             )
             return@Column
         }
@@ -369,7 +399,16 @@ private fun AppScreen(
                 onChange = { setShare(it) },
             )
             if (magnet) {
-                DebridControl(label = debridRoute?.let { serviceLabel(it) }, palette = palette, onClick = { cycleRoute() })
+                RouteMenu(
+                    current = account(debridRoute),
+                    accounts = accounts,
+                    palette = palette,
+                    onPick = { setRoute(it) },
+                    onManage = {
+                        settingsTab = SettingsTab.ACCOUNTS
+                        settingsOpen = true
+                    },
+                )
             }
             Button(
                 onClick = {
@@ -401,6 +440,7 @@ private fun AppScreen(
                 items(jobs, key = { it.id.toString() }) { job ->
                     JobCard(
                         job = job,
+                        names = accounts.associate { it.id to it.name },
                         palette = palette,
                         buttons = buttons,
                         onPause = {
@@ -433,7 +473,7 @@ private fun AppScreen(
         // Clear or "as torrent" on a debrid job torrenter added: same question.
         // Dismissing it does neither.
         (clearAsk ?: rerouteAsk)?.let { job ->
-            val label = serviceLabel(job.service)
+            val label = accountTitle(job)
             val rerouting = clearAsk == null
             val answer: (Boolean) -> Unit = { removeRemote ->
                 clearAsk = null
@@ -470,6 +510,7 @@ private fun AppScreen(
 @androidx.compose.runtime.Composable
 private fun JobCard(
     job: JobView,
+    names: Map<String, String>,
     palette: Palette,
     buttons: androidx.compose.material3.ButtonColors,
     onPause: () -> Unit,
@@ -489,7 +530,7 @@ private fun JobCard(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (job.kind != Kind.MAGNET) {
-            Text(jobBadge(job), color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            Text(jobBadge(job, names), color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (job.kind == Kind.MAGNET) {
@@ -522,7 +563,7 @@ private fun JobCard(
                 trackColor = palette.rowAlt,
             )
         }
-        Text(jobStatsLine(job), color = lineColor, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        Text(jobStatsLine(job, names), color = lineColor, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (job.active) {
                 Button(onClick = onPause, colors = buttons, shape = RoundedCornerShape(2.dp)) {
@@ -543,6 +584,115 @@ private fun JobCard(
             }
         }
     }
+}
+
+/**
+ * Fixed-width route dropdown: "default (none)" (peers) or an account by name,
+ * shortened with "…". The list runs edge to edge (name left, provider right,
+ * a dot on the current pick) and ends with a centred "manage accounts…".
+ */
+@androidx.compose.runtime.Composable
+private fun RouteMenu(
+    current: DebridAccount?,
+    accounts: List<DebridAccount>,
+    palette: Palette,
+    onPick: (String?) -> Unit,
+    onManage: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val on = current != null
+    Box {
+        Box(
+            modifier =
+                Modifier
+                    .width(150.dp)
+                    .height(40.dp)
+                    .border(1.dp, if (on) palette.fg else palette.dim, RoundedCornerShape(2.dp))
+                    .clickable { open = true },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                current?.name ?: "default (none)",
+                color = if (on) palette.fg else palette.dim,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 20.dp),
+            )
+            Text(
+                "▾",
+                color = if (on) palette.fg else palette.dim,
+                fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
+            )
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.background(palette.row).width(240.dp),
+        ) {
+            RouteRow("default (none)", "from peers", current == null, palette) {
+                open = false
+                onPick(null)
+            }
+            accounts.forEach { account ->
+                RouteRow(account.name, serviceLabel(account.service), current?.id == account.id, palette) {
+                    open = false
+                    onPick(account.id)
+                }
+            }
+            HorizontalDivider(color = palette.dim.copy(alpha = 0.4f))
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (accounts.isEmpty()) "add a debrid account…" else "manage accounts…",
+                        color = palette.dim,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                },
+                onClick = {
+                    open = false
+                    onManage()
+                },
+            )
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun RouteRow(
+    name: String,
+    detail: String,
+    selected: Boolean,
+    palette: Palette,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(14.dp)) {
+                    if (selected) {
+                        Box(Modifier.size(6.dp).background(palette.fg, CircleShape))
+                    }
+                }
+                Text(
+                    name,
+                    color = if (selected) palette.fg else palette.dim,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(detail, color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+        },
+        onClick = onClick,
+    )
 }
 
 private fun jobBarFraction(job: JobView): Float? {

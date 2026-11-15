@@ -52,13 +52,26 @@ fun jobIsFetching(job: JobView): Boolean = job.service != null && job.status in 
 fun serviceLabel(id: String?): String =
     id?.let { wanted -> runCatching { debridServices().firstOrNull { it.id == wanted }?.label }.getOrNull() ?: wanted } ?: ""
 
-/** Row badge: MAGNET, HTTP, or the debrid phase. */
-fun jobBadge(job: JobView): String {
-    val service = job.service ?: return if (job.kind == Kind.HTTP) "HTTP" else "MAGNET"
-    return if (jobIsFetching(job)) "MAGNET → ${serviceLabel(service)}" else "HTTP · via ${serviceLabel(service)}"
+/** The job's debrid account name, or its provider's when unknown. */
+fun jobRouteName(
+    job: JobView,
+    names: Map<String, String>,
+): String = job.account?.let { names[it] } ?: serviceLabel(job.service)
+
+/** Row badge: MAGNET, HTTP, or the debrid phase (by account name). */
+fun jobBadge(
+    job: JobView,
+    names: Map<String, String> = emptyMap(),
+): String {
+    if (job.service == null) return if (job.kind == Kind.HTTP) "HTTP" else "MAGNET"
+    val name = jobRouteName(job, names)
+    return if (jobIsFetching(job)) "MAGNET → $name" else "HTTP · via $name"
 }
 
-fun jobStatsLine(job: JobView): String {
+fun jobStatsLine(
+    job: JobView,
+    names: Map<String, String> = emptyMap(),
+): String {
     val downloaded = job.downloaded
     val total = job.total
     val eta =
@@ -67,10 +80,10 @@ fun jobStatsLine(job: JobView): String {
         } else {
             "N/A"
         }
-    job.service?.let { service ->
+    if (job.service != null) {
         if (jobIsFetching(job)) {
             val pct = String.format(java.util.Locale.US, "%.1f", job.remotePermille.toDouble() / 10.0)
-            return "${job.status}  ${serviceLabel(service)} fetching $pct%"
+            return "${job.status}  ${jobRouteName(job, names)} fetching $pct%"
         }
         val files = if (job.fileCount > 0u) "  file ${maxOf(job.fileIndex, 1u)}/${job.fileCount}" else ""
         return "${job.status}$files  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"

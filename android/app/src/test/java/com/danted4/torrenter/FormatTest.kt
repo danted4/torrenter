@@ -58,6 +58,27 @@ class FormatTest {
     }
 
     @Test
+    fun debridRowsUseTheAccountName() {
+        val names = mapOf("torbox-1a2b3c" to "work")
+        val base = sample(kind = Kind.DEBRID, seed = false, downloaded = 0uL, total = 0uL, speed = 0.0)
+        val fetching = base.copy(status = "fetching", service = "torbox", remotePermille = 100u, account = "torbox-1a2b3c")
+        assertEquals("MAGNET → work", jobBadge(fetching, names))
+        assertEquals("fetching  work fetching 10.0%", jobStatsLine(fetching, names))
+        // An unknown account (removed since) falls back to the provider id.
+        val orphan = base.copy(service = "torbox", account = "gone")
+        assertEquals("HTTP · via torbox", jobBadge(orphan, names))
+    }
+
+    @Test
+    fun accountNamesStayUniqueAndDefaultToTheProvider() {
+        val taken = listOf(DebridAccount("torbox", "TorBox", "torbox"), DebridAccount("torbox-1", "work", "torbox"))
+        assertTrue(Accounts.nameTaken("WORK", taken))
+        assertEquals("TorBox 2", Accounts.defaultName("TorBox", taken))
+        assertEquals("Real-Debrid", Accounts.defaultName("Real-Debrid", taken))
+        assertTrue(Accounts.newId("torbox", taken).startsWith("torbox-"))
+    }
+
+    @Test
     fun magnetShareLineIncludesUpload() {
         val line =
             jobStatsLine(

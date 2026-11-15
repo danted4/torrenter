@@ -43,8 +43,8 @@ class TorrenterApp : Application() {
                     seed,
                 )
             // Keys go in before hydrate so restored debrid jobs can start.
-            for (service in debridServices()) {
-                SecureKeys.read(this, service.id)?.let { created.setDebridKey(service.id, it) }
+            for (account in Accounts.load(this)) {
+                SecureKeys.read(this, account.id)?.let { created.setDebridAccount(account.id, account.service, it) }
             }
             val prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
             created.setConnections(Prefs.connectionsArg(Prefs.connections(prefs)))

@@ -234,10 +234,11 @@ private fun SwapArrows(color: Color) {
     }
 }
 
-/** Header cog: opens the settings screen. */
+/** Header cog: opens settings; a back arrow while settings are open. */
 @Composable
 fun CogGlyph(
     color: Color,
+    open: Boolean = false,
     onClick: () -> Unit,
 ) {
     Canvas(
@@ -248,6 +249,13 @@ fun CogGlyph(
         val c = Offset(size.width / 2f, size.height / 2f)
         val unit = size.minDimension / 28f
         val stroke = 1.6f * unit * 1.4f
+        if (open) {
+            val arm = 8f * unit
+            drawLine(color, Offset(c.x + arm, c.y), Offset(c.x - arm, c.y), stroke, StrokeCap.Round)
+            drawLine(color, Offset(c.x - arm, c.y), Offset(c.x - arm + 6f * unit, c.y - 6f * unit), stroke, StrokeCap.Round)
+            drawLine(color, Offset(c.x - arm, c.y), Offset(c.x - arm + 6f * unit, c.y + 6f * unit), stroke, StrokeCap.Round)
+            return@Canvas
+        }
         drawCircle(color, radius = 4.8f * unit * 1.2f, center = c, style = Stroke(width = stroke))
         drawCircle(color, radius = 1.6f * unit * 1.2f, center = c)
         for (step in 0 until 6) {
@@ -263,27 +271,6 @@ fun CogGlyph(
             )
         }
     }
-}
-
-/** "debrid" (off) or "via TorBox" (on); a tap cycles through services with a key. */
-@Composable
-fun DebridControl(
-    label: String?,
-    palette: Palette,
-    onClick: () -> Unit,
-) {
-    val on = label != null
-    Text(
-        if (on) "via $label" else "debrid",
-        color = if (on) palette.fg else palette.dim,
-        fontFamily = FontFamily.Monospace,
-        fontSize = 13.sp,
-        modifier =
-            Modifier
-                .border(1.dp, if (on) palette.fg else palette.dim, RoundedCornerShape(4.dp))
-                .clickable(onClick = onClick)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-    )
 }
 
 /** Small selectable text chip (settings choices). */
