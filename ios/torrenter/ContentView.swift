@@ -76,7 +76,19 @@ struct ContentView: View {
             urlField(colors)
             HStack(spacing: 12) {
                 if magnet {
-                    routeMenu(colors)
+                    // Its own equatable view: the 200 ms job refresh must not
+                    // rebuild the menu mid-tap (flicker, missed taps).
+                    RouteMenu(
+                        current: owner.account(owner.debridRoute),
+                        accounts: owner.accounts,
+                        colors: colors,
+                        onPick: { owner.debridRoute = $0 },
+                        onManage: {
+                            settingsTab = .accounts
+                            settingsOpen = true
+                        }
+                    )
+                    .equatable()
                 }
                 Button("START") {
                     let source = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -125,63 +137,6 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
     }
-
-    /// Fixed-width route dropdown: "default (none)" (peers) or an account by
-    /// name, shortened with "…"; the menu lists each account with its
-    /// provider and ends with "manage accounts…".
-    private func routeMenu(_ colors: Palette) -> some View {
-        let current = owner.account(owner.debridRoute)
-        let on = current != nil
-        return Menu {
-            Button {
-                owner.debridRoute = nil
-            } label: {
-                if on {
-                    Text("default (none)")
-                } else {
-                    Label("default (none)", systemImage: "checkmark")
-                }
-                Text("from peers")
-            }
-            ForEach(owner.accounts) { account in
-                Button {
-                    owner.debridRoute = account.id
-                } label: {
-                    if current?.id == account.id {
-                        Label(account.name, systemImage: "checkmark")
-                    } else {
-                        Text(account.name)
-                    }
-                    Text(serviceLabel(account.service))
-                }
-            }
-            Divider()
-            Button(owner.accounts.isEmpty ? "add a debrid account…" : "manage accounts…") {
-                settingsTab = .accounts
-                settingsOpen = true
-            }
-        } label: {
-            ZStack {
-                Text(current?.name ?? "default (none)")
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .padding(.horizontal, 20)
-                HStack {
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .padding(.trailing, 10)
-            }
-            .font(.system(size: 13, design: .monospaced))
-            .foregroundColor(on ? colors.fg : colors.dim)
-            .frame(width: Self.routeWidth, height: 34)
-            .overlay(RoundedRectangle(cornerRadius: 2).stroke(on ? colors.fg : colors.dim, lineWidth: 1))
-        }
-    }
-
-    /// Room for "default (none)" plus the chevron.
-    static let routeWidth: CGFloat = 170
 
     private var shareSheetItem: Binding<ShareIdent?> {
         Binding(
@@ -254,6 +209,73 @@ struct ContentView: View {
         .overlay(RoundedRectangle(cornerRadius: 2).stroke(colors.dim, lineWidth: 1))
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
+    }
+}
+
+/// Fixed-width route dropdown: "default (none)" (peers) or an account by
+/// name, shortened with "…"; the menu lists each account with its provider
+/// and ends with "manage accounts…". Equatable on what it shows, so job
+/// updates do not redraw it.
+private struct RouteMenu: View, Equatable {
+    let current: DebridAccount?
+    let accounts: [DebridAccount]
+    let colors: Palette
+    let onPick: (String?) -> Void
+    let onManage: () -> Void
+
+    /// Room for "default (none)" plus the chevron.
+    static let width: CGFloat = 170
+
+    static func == (lhs: RouteMenu, rhs: RouteMenu) -> Bool {
+        lhs.current == rhs.current && lhs.accounts == rhs.accounts && lhs.colors == rhs.colors
+    }
+
+    var body: some View {
+        let on = current != nil
+        Menu {
+            Button {
+                onPick(nil)
+            } label: {
+                if on {
+                    Text("default (none)")
+                } else {
+                    Label("default (none)", systemImage: "checkmark")
+                }
+                Text("from peers")
+            }
+            ForEach(accounts) { account in
+                Button {
+                    onPick(account.id)
+                } label: {
+                    if current?.id == account.id {
+                        Label(account.name, systemImage: "checkmark")
+                    } else {
+                        Text(account.name)
+                    }
+                    Text(serviceLabel(account.service))
+                }
+            }
+            Divider()
+            Button(accounts.isEmpty ? "add a debrid account…" : "manage accounts…", action: onManage)
+        } label: {
+            ZStack {
+                Text(current?.name ?? "default (none)")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 20)
+                HStack {
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .padding(.trailing, 10)
+            }
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundColor(on ? colors.fg : colors.dim)
+            .frame(width: Self.width, height: 34)
+            .overlay(RoundedRectangle(cornerRadius: 2).stroke(on ? colors.fg : colors.dim, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
     }
 }
 

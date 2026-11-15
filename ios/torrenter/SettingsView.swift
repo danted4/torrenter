@@ -205,7 +205,8 @@ struct SettingsView: View {
             // The fields sit in an inset panel the header owns.
             VStack(alignment: .leading, spacing: 10) {
                 formRow("provider", "the debrid service the key belongs to") {
-                    providerMenu(draft.service)
+                    ProviderMenu(service: draft.service, colors: colors) { form?.service = $0 }
+                        .equatable()
                 }
                 if let service = draft.service {
                     Divider().overlay(colors.dim.opacity(0.4))
@@ -259,42 +260,6 @@ struct SettingsView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(card)
-    }
-
-    /// The provider select: full field width, label centred, chevron right.
-    private func providerMenu(_ service: String?) -> some View {
-        Menu {
-            ForEach(debridServices(), id: \.id) { each in
-                Button {
-                    form?.service = each.id
-                } label: {
-                    if service == each.id {
-                        Label(each.label, systemImage: "checkmark")
-                    } else {
-                        Text(each.label)
-                    }
-                }
-            }
-        } label: {
-            ZStack {
-                Text(service.map(serviceLabel) ?? "choose a provider")
-                    .lineLimit(1)
-                    .padding(.horizontal, 22)
-                HStack {
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-                .padding(.trailing, 10)
-            }
-            .font(.system(size: 13, design: .monospaced))
-            .foregroundColor(service == nil ? colors.dim : colors.fg)
-            .frame(maxWidth: .infinity, minHeight: 36)
-            .overlay(
-                RoundedRectangle(cornerRadius: 2)
-                    .stroke(service == nil ? colors.dim : colors.fg, lineWidth: 1)
-            )
-        }
     }
 
     /// A text field styled like the URL field: placeholder centred, typed
@@ -403,5 +368,53 @@ struct SettingsView: View {
                 )
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The provider select: full field width, label centred, chevron right.
+/// Equatable on what it shows, so the job refresh does not rebuild it mid-tap.
+private struct ProviderMenu: View, Equatable {
+    let service: String?
+    let colors: Palette
+    let onPick: (String) -> Void
+
+    static func == (lhs: ProviderMenu, rhs: ProviderMenu) -> Bool {
+        lhs.service == rhs.service && lhs.colors == rhs.colors
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(debridServices(), id: \.id) { each in
+                Button {
+                    onPick(each.id)
+                } label: {
+                    if service == each.id {
+                        Label(each.label, systemImage: "checkmark")
+                    } else {
+                        Text(each.label)
+                    }
+                }
+            }
+        } label: {
+            ZStack {
+                Text(service.map(serviceLabel) ?? "choose a provider")
+                    .lineLimit(1)
+                    .padding(.horizontal, 22)
+                HStack {
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .padding(.trailing, 10)
+            }
+            .font(.system(size: 13, design: .monospaced))
+            .foregroundColor(service == nil ? colors.dim : colors.fg)
+            .frame(maxWidth: .infinity, minHeight: 36)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(service == nil ? colors.dim : colors.fg, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
     }
 }

@@ -491,7 +491,12 @@ final class EngineOwner: ObservableObject {
             notice = last
         }
         engine.persist(force: !engine.anyActive())
-        jobs = engine.jobs()
+        // Publish only real changes: every publish redraws the screen, and a
+        // redraw mid-tap makes the dropdowns flicker and drop touches.
+        let next = engine.jobs()
+        if next != jobs {
+            jobs = next
+        }
         syncKeepAlive()
     }
 

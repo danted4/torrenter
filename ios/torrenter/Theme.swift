@@ -12,7 +12,7 @@ enum ThemeId: String, CaseIterable {
     }
 }
 
-struct Palette {
+struct Palette: Equatable {
     let bg: Color
     let row: Color
     let rowAlt: Color
