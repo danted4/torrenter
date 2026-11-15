@@ -126,6 +126,8 @@ private fun AppScreen(
     }
     val notes = remember { mutableStateMapOf<String, String>() }
     var clearAsk by remember { mutableStateOf<JobView?>(null) }
+    // "as torrent" on a debrid job torrenter added: ask before it leaves the service.
+    var rerouteAsk by remember { mutableStateOf<JobView?>(null) }
     val scope = rememberCoroutineScope()
     val buttons =
         ButtonDefaults.buttonColors(
@@ -141,6 +143,19 @@ private fun AppScreen(
         jobs = live.jobs()
         if (live.anyActive()) {
             DownloadService.startFromUi(activity)
+        }
+    }
+
+    // Stop waiting for the service and download the same torrent from peers.
+    fun asTorrent(
+        job: JobView,
+        removeRemote: Boolean,
+    ) {
+        try {
+            engine?.restartRoute(job.id, null, seed, job.dest, removeRemote)
+            refresh()
+        } catch (error: Exception) {
+            notice = error.message
         }
     }
 
@@ -405,35 +420,46 @@ private fun AppScreen(
                             }
                         },
                         onAsTorrent = {
-                            try {
-                                engine?.restartRoute(job.id, null, seed, job.dest)
-                                refresh()
-                            } catch (error: Exception) {
-                                notice = error.message
+                            if (engine?.rerouteAsksAboutRemote(job.id, null) == true) {
+                                rerouteAsk = job
+                            } else {
+                                asTorrent(job, false)
                             }
                         },
                     )
                 }
             }
         }
-        clearAsk?.let { job ->
+        // Clear or "as torrent" on a debrid job torrenter added: same question.
+        // Dismissing it does neither.
+        (clearAsk ?: rerouteAsk)?.let { job ->
             val label = serviceLabel(job.service)
+            val rerouting = clearAsk == null
+            val answer: (Boolean) -> Unit = { removeRemote ->
+                clearAsk = null
+                rerouteAsk = null
+                if (rerouting) {
+                    asTorrent(job, removeRemote)
+                } else {
+                    if (removeRemote) engine?.removeWithRemote(job.id) else engine?.remove(job.id)
+                    refresh()
+                }
+            }
             AlertDialog(
-                onDismissRequest = { clearAsk = null },
+                onDismissRequest = {
+                    clearAsk = null
+                    rerouteAsk = null
+                },
                 title = { Text("Also remove it from $label?", fontFamily = FontFamily.Monospace) },
                 confirmButton = {
-                    TextButton(onClick = {
-                        engine?.removeWithRemote(job.id)
-                        clearAsk = null
-                        refresh()
-                    }) { Text("remove from $label", color = palette.fail, fontFamily = FontFamily.Monospace) }
+                    TextButton(onClick = { answer(true) }) {
+                        Text("remove from $label", color = palette.fail, fontFamily = FontFamily.Monospace)
+                    }
                 },
                 dismissButton = {
-                    TextButton(onClick = {
-                        engine?.remove(job.id)
-                        clearAsk = null
-                        refresh()
-                    }) { Text("keep it on $label", color = palette.fg, fontFamily = FontFamily.Monospace) }
+                    TextButton(onClick = { answer(false) }) {
+                        Text("keep it on $label", color = palette.fg, fontFamily = FontFamily.Monospace)
+                    }
                 },
                 containerColor = palette.row,
             )

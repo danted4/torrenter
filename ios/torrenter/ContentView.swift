@@ -36,25 +36,27 @@ struct ContentView: View {
             ShareSheet(items: owner.shareItems(for: item.job))
         }
         .confirmationDialog(
-            "Also remove it from \(serviceLabel(owner.clearAsk?.service))?",
-            isPresented: clearAskShown,
+            "Also remove it from \(serviceLabel(owner.remoteAsk?.service))?",
+            isPresented: remoteAskShown,
             titleVisibility: .visible
         ) {
-            if let job = owner.clearAsk {
+            // Clear or "as torrent" on a debrid job torrenter added.
+            if let job = owner.remoteAsk {
+                let rerouting = owner.clearAsk == nil
                 Button("remove from \(serviceLabel(job.service))", role: .destructive) {
-                    owner.clearConfirmed(job: job, removeRemote: true)
+                    owner.remoteAnswered(job: job, rerouting: rerouting, removeRemote: true)
                 }
                 Button("keep it on \(serviceLabel(job.service))") {
-                    owner.clearConfirmed(job: job, removeRemote: false)
+                    owner.remoteAnswered(job: job, rerouting: rerouting, removeRemote: false)
                 }
             }
         }
     }
 
-    private var clearAskShown: Binding<Bool> {
+    private var remoteAskShown: Binding<Bool> {
         Binding(
-            get: { owner.clearAsk != nil },
-            set: { if !$0 { owner.clearAsk = nil } }
+            get: { owner.remoteAsk != nil },
+            set: { if !$0 { owner.remoteDismissed() } }
         )
     }
 

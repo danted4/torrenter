@@ -284,8 +284,29 @@ struct GuiApp {
     account_notes: HashMap<Service, String>,
     account_tx: Sender<(Service, String)>,
     account_rx: Receiver<(Service, String)>,
-    /// A cleared debrid job that may still sit on the service: ask first.
-    clear_confirm: Option<u64>,
+    /// Clearing or re-routing a debrid job whose torrent torrenter added on
+    /// the service: ask "also remove it from …?" first.
+    remote_confirm: Option<RemoteAsk>,
+}
+
+/// What waits on the "also remove it from the service?" answer.
+#[derive(Clone)]
+enum RemoteAsk {
+    Clear(u64),
+    Reroute {
+        id: u64,
+        route: Route,
+        seed: bool,
+        dest: PathBuf,
+    },
+}
+
+impl RemoteAsk {
+    fn id(&self) -> u64 {
+        match self {
+            RemoteAsk::Clear(id) | RemoteAsk::Reroute { id, .. } => *id,
+        }
+    }
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -379,7 +400,7 @@ impl GuiApp {
             account_notes: HashMap::new(),
             account_tx,
             account_rx,
-            clear_confirm: None,
+            remote_confirm: None,
         };
         if let Some(error) = launch_error {
             app.toast_fatal(error);
@@ -533,7 +554,31 @@ impl GuiApp {
         } else {
             route
         };
-        match self.session.restart_with(id, route, seed, dest) {
+        if self.session.reroute_asks_about_remote(id, route) {
+            // Restarts once answered; closing the question cancels it.
+            self.remote_confirm = Some(RemoteAsk::Reroute {
+                id,
+                route,
+                seed,
+                dest,
+            });
+            return true;
+        }
+        self.restart_routed(id, route, seed, dest, false)
+    }
+
+    fn restart_routed(
+        &mut self,
+        id: u64,
+        route: Route,
+        seed: bool,
+        dest: PathBuf,
+        remove_from_service: bool,
+    ) -> bool {
+        match self
+            .session
+            .restart_with(id, route, seed, dest, remove_from_service)
+        {
             Ok(_) => true,
             Err(error) => {
                 self.toast_fail(error);
@@ -1347,7 +1392,7 @@ impl eframe::App for GuiApp {
                             self.restart = None;
                         }
                         if self.session.clear_asks_about_remote(job.id) {
-                            self.clear_confirm = Some(job.id);
+                            self.remote_confirm = Some(RemoteAsk::Clear(job.id));
                         } else {
                             self.session.remove(job.id);
                         }
@@ -1359,7 +1404,7 @@ impl eframe::App for GuiApp {
                 }
             });
 
-        self.show_clear_confirm(ctx, palette);
+        self.show_remote_confirm(ctx, palette);
         self.show_restart_popup(ctx, palette);
         self.show_toasts(ctx, palette);
     }
@@ -1607,14 +1652,16 @@ impl GuiApp {
             });
     }
 
-    /// Clearing a debrid job torrenter added that never finished: ask whether
-    /// it should also go from the service.
-    fn show_clear_confirm(&mut self, ctx: &egui::Context, palette: Theme) {
-        let Some(id) = self.clear_confirm else {
+    /// Clearing an unfinished debrid job torrenter added, or moving it off
+    /// its service ("as torrent", another service): ask whether the torrent
+    /// should also go from the service.
+    fn show_remote_confirm(&mut self, ctx: &egui::Context, palette: Theme) {
+        let Some(ask) = self.remote_confirm.clone() else {
             return;
         };
+        let id = ask.id();
         let Some(job) = self.session.job(id) else {
-            self.clear_confirm = None;
+            self.remote_confirm = None;
             return;
         };
         let label = job
@@ -1624,7 +1671,11 @@ impl GuiApp {
             .unwrap_or("the service");
         let mut open = true;
         let mut choice = None;
-        egui::Window::new("clear")
+        let title = match ask {
+            RemoteAsk::Clear(_) => "clear",
+            RemoteAsk::Reroute { .. } => "restart",
+        };
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1660,20 +1711,24 @@ impl GuiApp {
                     }
                 });
             });
-        match choice {
-            Some(true) => {
-                self.session.remove_with_remote(id);
-                self.clear_confirm = None;
-                self.persist_jobs(true);
+        let Some(remove_remote) = choice else {
+            if !open {
+                // Closed without an answer: neither clear nor re-route.
+                self.remote_confirm = None;
             }
-            Some(false) => {
-                self.session.remove(id);
-                self.clear_confirm = None;
-                self.persist_jobs(true);
+            return;
+        };
+        self.remote_confirm = None;
+        match ask {
+            RemoteAsk::Clear(_) if remove_remote => self.session.remove_with_remote(id),
+            RemoteAsk::Clear(_) => self.session.remove(id),
+            RemoteAsk::Reroute {
+                route, seed, dest, ..
+            } => {
+                self.restart_routed(id, route, seed, dest, remove_remote);
             }
-            None if !open => self.clear_confirm = None,
-            None => {}
         }
+        self.persist_jobs(true);
     }
 
     fn show_restart_popup(&mut self, ctx: &egui::Context, palette: Theme) {

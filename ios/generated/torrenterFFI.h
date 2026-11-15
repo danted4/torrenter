@@ -331,6 +331,11 @@ void uniffi_torrenter_fn_method_engine_remove(void*_Nonnull ptr, uint64_t id, Ru
 void uniffi_torrenter_fn_method_engine_remove_with_remote(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
+int8_t uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(void*_Nonnull ptr, uint64_t id, RustBuffer service, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART
 uint64_t uniffi_torrenter_fn_method_engine_restart(void*_Nonnull ptr, uint64_t id, int8_t seed, RustBuffer dest, RustCallStatus *_Nonnull out_status
@@ -338,7 +343,7 @@ uint64_t uniffi_torrenter_fn_method_engine_restart(void*_Nonnull ptr, uint64_t i
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESTART_ROUTE
-uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer service, int8_t seed, RustBuffer dest, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer service, int8_t seed, RustBuffer dest, int8_t remove_from_service, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
@@ -755,6 +760,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_remove(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE_WITH_REMOTE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REMOVE_WITH_REMOTE
 uint16_t uniffi_torrenter_checksum_method_engine_remove_with_remote(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_REROUTE_ASKS_ABOUT_REMOTE
+uint16_t uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote(void
     
 );
 #endif

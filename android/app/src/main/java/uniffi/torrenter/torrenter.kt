@@ -764,6 +764,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -808,6 +810,8 @@ fun uniffi_torrenter_checksum_method_engine_queue_debrid(
 fun uniffi_torrenter_checksum_method_engine_remove(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_remove_with_remote(
+): Short
+fun uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_restart(
 ): Short
@@ -910,9 +914,11 @@ fun uniffi_torrenter_fn_method_engine_remove(`ptr`: Pointer,`id`: Long,uniffi_ou
 ): Unit
 fun uniffi_torrenter_fn_method_engine_remove_with_remote(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+fun uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(`ptr`: Pointer,`id`: Long,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 fun uniffi_torrenter_fn_method_engine_restart(`ptr`: Pointer,`id`: Long,`seed`: Byte,`dest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
-fun uniffi_torrenter_fn_method_engine_restart_route(`ptr`: Pointer,`id`: Long,`service`: RustBuffer.ByValue,`seed`: Byte,`dest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+fun uniffi_torrenter_fn_method_engine_restart_route(`ptr`: Pointer,`id`: Long,`service`: RustBuffer.ByValue,`seed`: Byte,`dest`: RustBuffer.ByValue,`removeFromService`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 fun uniffi_torrenter_fn_method_engine_seed(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
@@ -1103,10 +1109,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 36487.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_restart() != 54366.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_restart_route() != 4777.toShort()) {
+    if (lib.uniffi_torrenter_checksum_method_engine_restart_route() != 32989.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_seed() != 40595.toShort()) {
@@ -1610,12 +1619,20 @@ public interface EngineInterface {
      */
     fun `removeWithRemote`(`id`: kotlin.ULong)
     
+    /**
+     * This re-route should ask "also remove it from the service?" first
+     * (the job leaves a service holding a torrent torrenter added).
+     */
+    fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `service`: kotlin.String?): kotlin.Boolean
+    
     fun `restart`(`id`: kotlin.ULong, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong
     
     /**
      * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
+     * pass false when it did not ask.
      */
-    fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong
+    fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong
     
     fun `seed`(): kotlin.Boolean
     
@@ -1892,6 +1909,22 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     
 
     
+    /**
+     * This re-route should ask "also remove it from the service?" first
+     * (the job leaves a service holding a torrent torrenter added).
+     */override fun `rerouteAsksAboutRemote`(`id`: kotlin.ULong, `service`: kotlin.String?): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(
+        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`service`),_status)
+}
+    }
+    )
+    }
+    
+
+    
     @Throws(EngineException::class)override fun `restart`(`id`: kotlin.ULong, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithPointer {
@@ -1907,13 +1940,15 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     
     /**
      * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
+     * pass false when it did not ask.
      */
-    @Throws(EngineException::class)override fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String): kotlin.ULong {
+    @Throws(EngineException::class)override fun `restartRoute`(`id`: kotlin.ULong, `service`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithPointer {
     uniffiRustCallWithError(EngineException) { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_restart_route(
-        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`service`),FfiConverterBoolean.lower(`seed`),FfiConverterString.lower(`dest`),_status)
+        it, FfiConverterULong.lower(`id`),FfiConverterOptionalString.lower(`service`),FfiConverterBoolean.lower(`seed`),FfiConverterString.lower(`dest`),FfiConverterBoolean.lower(`removeFromService`),_status)
 }
     }
     )

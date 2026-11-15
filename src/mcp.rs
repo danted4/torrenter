@@ -308,7 +308,9 @@ impl Mcp {
         Ok("ok".into())
     }
 
-    #[tool(description = "Remove a job from the list")]
+    #[tool(
+        description = "Remove a job from the list (downloaded files, and any copy on a debrid account, are left as they are)"
+    )]
     fn remove(&self, Parameters(IdArg { id }): Parameters<IdArg>) -> Result<String, String> {
         if !self.session.has_job(id) {
             return Err("job gone".into());
@@ -317,7 +319,9 @@ impl Mcp {
         Ok("ok".into())
     }
 
-    #[tool(description = "Restart a job (leech, same dest, same route)")]
+    #[tool(
+        description = "Restart a job (leech, same dest, same route; never removes anything from a debrid account)"
+    )]
     fn restart(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,

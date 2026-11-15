@@ -39,6 +39,11 @@ final class EngineOwner: ObservableObject {
     @Published private(set) var accountNotes: [String: String] = [:]
     /// A cleared debrid job that may still be on the service: ask first.
     @Published var clearAsk: JobView?
+    /// "as torrent" on a debrid job torrenter added: ask before it leaves the service.
+    @Published var rerouteAsk: JobView?
+
+    /// The job the "also remove it from …?" question is about, if any.
+    var remoteAsk: JobView? { clearAsk ?? rerouteAsk }
 
     private var engine: Engine?
     private var ticker: Task<Void, Never>?
@@ -149,11 +154,42 @@ final class EngineOwner: ObservableObject {
         refresh()
     }
 
+    /// Answer to the remote question: finish the clear or the re-route. The
+    /// dialog passes what it showed (its binding may already be cleared).
+    func remoteAnswered(job: JobView, rerouting: Bool, removeRemote: Bool) {
+        remoteDismissed()
+        if rerouting {
+            restartAsTorrent(job: job, removeRemote: removeRemote)
+        } else {
+            clearConfirmed(job: job, removeRemote: removeRemote)
+        }
+    }
+
+    /// Dismissed without an answer: neither clear nor re-route.
+    func remoteDismissed() {
+        clearAsk = nil
+        rerouteAsk = nil
+    }
+
     /// Stop waiting for the service and download the same torrent from peers.
     func asTorrent(job: JobView) {
+        if engine?.rerouteAsksAboutRemote(id: job.id, service: nil) == true {
+            rerouteAsk = job
+        } else {
+            restartAsTorrent(job: job, removeRemote: false)
+        }
+    }
+
+    private func restartAsTorrent(job: JobView, removeRemote: Bool) {
         guard let engine else { return }
         do {
-            _ = try engine.restartRoute(id: job.id, service: nil, seed: false, dest: Paths.publicDest().path)
+            _ = try engine.restartRoute(
+                id: job.id,
+                service: nil,
+                seed: false,
+                dest: Paths.publicDest().path,
+                removeFromService: removeRemote
+            )
             notice = nil
             refresh()
         } catch {

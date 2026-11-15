@@ -222,20 +222,36 @@ impl Engine {
     }
 
     /// Restart re-routed: `service = None` downloads from peers ("as torrent").
+    /// `remove_from_service` is the answer to `reroute_asks_about_remote`;
+    /// pass false when it did not ask.
     pub fn restart_route(
         &self,
         id: u64,
         service: Option<String>,
         seed: bool,
         dest: String,
+        remove_from_service: bool,
     ) -> Result<u64, EngineError> {
         let route = match service {
             Some(id) => Route::Via(service_from(&id)?),
             None => Route::Peers,
         };
         self.session
-            .restart_with(id, route, seed, PathBuf::from(dest))
+            .restart_with(id, route, seed, PathBuf::from(dest), remove_from_service)
             .map_err(Into::into)
+    }
+
+    /// This re-route should ask "also remove it from the service?" first
+    /// (the job leaves a service holding a torrent torrenter added).
+    pub fn reroute_asks_about_remote(&self, id: u64, service: Option<String>) -> bool {
+        let route = match service {
+            Some(id) => match service_from(&id) {
+                Ok(service) => Route::Via(service),
+                Err(_) => return false,
+            },
+            None => Route::Peers,
+        };
+        self.session.reroute_asks_about_remote(id, route)
     }
 
     /// Connections per download for new jobs (`None` = Auto = 4).

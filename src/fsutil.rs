@@ -1,8 +1,14 @@
+use std::cmp::Reverse;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+
+/// A temp or moved-aside file this old is left by a crashed save, not by a
+/// save in progress (those last milliseconds), so it may be removed.
+const STALE_ASIDE: Duration = Duration::from_secs(60 * 60);
 
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -10,20 +16,25 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// `<name>.<pid>.tmp`: unique per process, so a second process (the CLI's
+/// `debrid add` while the GUI is open) never writes the same temp file.
 pub(crate) fn tmp_path(path: &Path) -> PathBuf {
-    sibling(path, ".tmp")
+    sibling(path, &format!(".{}.tmp", std::process::id()))
 }
 
+/// `<name>.<pid>.prev`: where Windows moves the live file aside during a replace.
 pub(crate) fn prev_path(path: &Path) -> PathBuf {
-    sibling(path, ".prev")
+    sibling(path, &format!(".{}.prev", std::process::id()))
 }
 
 pub(crate) fn bak_path(path: &Path) -> PathBuf {
     sibling(path, ".bak")
 }
 
-/// Every save shares one `<path>.tmp` name, so writes and crash recovery in
-/// this process take turns. Threads (GUI worker vs UI) do save concurrently.
+/// Saves in this process take turns: writes, cleanup and crash recovery.
+/// Threads (GUI worker vs UI) do save concurrently. Across processes nothing
+/// is locked: temp names differ, so a file is never torn, but the later of
+/// two simultaneous edits wins.
 static FILES: Mutex<()> = Mutex::new(());
 
 fn files_lock() -> MutexGuard<'static, ()> {
@@ -39,8 +50,8 @@ pub(crate) fn edit_lock(lock: &'static Mutex<()>) -> MutexGuard<'static, ()> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Write `<path>.tmp`, then rename over `path`. With `private`, the file is
-/// created owner-only (0600) on unix before any bytes land in it.
+/// Write `<path>.<pid>.tmp`, then rename over `path`. With `private`, the file
+/// is created owner-only (0600) on unix before any bytes land in it.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     let _files = files_lock();
     if let Some(parent) = path.parent() {
@@ -65,7 +76,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8], private: bool) -> Result<(
         .and_then(|()| file.sync_all())
         .with_context(|| format!("failed to write {}", tmp.display()))?;
     drop(file);
-    replace_file(&tmp, path)
+    replace_file(&tmp, path)?;
+    remove_stale_asides(path);
+    Ok(())
 }
 
 /// POSIX rename replaces. Windows cannot rename over an existing file, so the
@@ -87,14 +100,84 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
     std::fs::rename(from, to).with_context(|| format!("failed to replace {}", to.display()))
 }
 
-/// Restore a save that crashed between the two renames.
+struct Aside {
+    path: PathBuf,
+    is_tmp: bool,
+    modified: SystemTime,
+}
+
+/// Temp and moved-aside siblings of `path` from any process: `<name>.<pid>.tmp`
+/// / `.prev`, plus the fixed `<name>.tmp` / `.prev` older builds used.
+fn asides(path: &Path) -> Vec<Aside> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name();
+            let rest = file_name.to_str()?.strip_prefix(name)?;
+            let (middle, is_tmp) = if let Some(middle) = rest.strip_suffix(".tmp") {
+                (middle, true)
+            } else {
+                (rest.strip_suffix(".prev")?, false)
+            };
+            // "" (older builds) or ".<pid>"; never another file such as
+            // `config.json5.tmp` or `config.json.backup.tmp`.
+            let ours = middle.is_empty()
+                || middle.strip_prefix('.').is_some_and(|pid| {
+                    !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+                });
+            if !ours {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            Some(Aside {
+                path: entry.path(),
+                is_tmp,
+                modified,
+            })
+        })
+        .collect()
+}
+
+/// Best effort: drop temp files a crashed process (or an older build) left.
+fn remove_stale_asides(path: &Path) {
+    let now = SystemTime::now();
+    for aside in asides(path) {
+        let age = now.duration_since(aside.modified).unwrap_or_default();
+        if age >= STALE_ASIDE {
+            let _ = std::fs::remove_file(&aside.path);
+        }
+    }
+}
+
+/// Restore a save that crashed between writing and replacing. Every file this
+/// module saves is JSON, so a candidate is restored only if it parses: a
+/// half-written temp (crash mid-write, or another process still writing) is
+/// skipped. Newest temp first, then the moved-aside original.
 pub(crate) fn recover_incomplete_save(path: &Path) {
     let _files = files_lock();
     if path.exists() {
         return;
     }
-    for aside in [tmp_path(path), prev_path(path)] {
-        if aside.exists() && std::fs::rename(&aside, path).is_ok() {
+    let mut candidates = asides(path);
+    candidates.sort_by_key(|aside| (!aside.is_tmp, Reverse(aside.modified)));
+    for aside in candidates {
+        let complete = std::fs::read(&aside.path)
+            .ok()
+            .is_some_and(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).is_ok());
+        if complete && std::fs::rename(&aside.path, path).is_ok() {
             return;
         }
     }
@@ -119,6 +202,7 @@ mod tests {
         atomic_write(&path, b"two", false).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
         assert!(!tmp_path(&path).exists());
+        assert!(asides(&path).is_empty());
     }
 
     #[cfg(unix)]
@@ -132,15 +216,98 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
+    fn age(path: &Path, ago: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - ago)
+            .unwrap();
+    }
+
+    #[test]
+    fn temp_names_are_per_process() {
+        let path = Path::new("/x/config.json");
+        let pid = std::process::id();
+        assert_eq!(
+            tmp_path(path),
+            Path::new(&format!("/x/config.json.{pid}.tmp"))
+        );
+        assert_eq!(
+            prev_path(path),
+            Path::new(&format!("/x/config.json.{pid}.prev"))
+        );
+    }
+
     #[test]
     fn recovers_tmp_and_quarantines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.json");
-        std::fs::write(tmp_path(&path), b"x").unwrap();
+        std::fs::write(tmp_path(&path), br#"{"x":1}"#).unwrap();
         recover_incomplete_save(&path);
-        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"x":1}"#);
         quarantine(&path);
         assert!(!path.exists());
         assert!(bak_path(&path).exists());
+    }
+
+    #[test]
+    fn recovery_takes_the_newest_complete_save_from_any_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        let legacy = dir.path().join("a.json.tmp");
+        let other = dir.path().join("a.json.4242.tmp");
+        let partial = dir.path().join("a.json.4343.tmp");
+        let unrelated = dir.path().join("a.json.backup.tmp");
+        let lookalike = dir.path().join("a.json5.tmp");
+        std::fs::write(&lookalike, br#"{"v":"no"}"#).unwrap();
+        std::fs::write(&legacy, br#"{"v":"legacy"}"#).unwrap();
+        age(&legacy, Duration::from_secs(300));
+        std::fs::write(&other, br#"{"v":"other"}"#).unwrap();
+        age(&other, Duration::from_secs(60));
+        // Newest, but still being written (or torn by a crash): skipped.
+        std::fs::write(&partial, br#"{"v":"par"#).unwrap();
+        std::fs::write(&unrelated, br#"{"v":"no"}"#).unwrap();
+        recover_incomplete_save(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"v":"other"}"#);
+        assert!(partial.exists() && legacy.exists() && unrelated.exists());
+        // Nothing happens while the live file exists.
+        recover_incomplete_save(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"v":"other"}"#);
+    }
+
+    #[test]
+    fn saves_clean_up_stale_temps_but_not_fresh_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        let crashed = dir.path().join("a.json.4242.tmp");
+        let legacy = dir.path().join("a.json.prev");
+        let live = dir.path().join("a.json.4343.tmp");
+        for file in [&crashed, &legacy, &live] {
+            std::fs::write(file, b"{}").unwrap();
+        }
+        age(&crashed, STALE_ASIDE + Duration::from_secs(1));
+        age(&legacy, STALE_ASIDE * 2);
+        atomic_write(&path, b"{}", false).unwrap();
+        assert!(!crashed.exists() && !legacy.exists(), "stale temps removed");
+        assert!(
+            live.exists(),
+            "another process may still be writing this one"
+        );
+        assert!(!tmp_path(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_temp_is_owner_only_before_the_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        // A stale temp of ours with loose permissions is replaced, not reused.
+        std::fs::write(tmp_path(&path), b"old").unwrap();
+        std::fs::set_permissions(tmp_path(&path), std::fs::Permissions::from_mode(0o644)).unwrap();
+        atomic_write(&path, b"{}", true).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

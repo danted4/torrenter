@@ -27,10 +27,11 @@ const NETWORK_RETRIES: u32 = 5;
 const RATE_LIMIT_RETRIES: u32 = 20;
 /// Fail a job whose provider-side progress has not moved for this long, so a
 /// dead torrent frees its download slot. Measured from the last progress
-/// change, never counting time paused. An hour leaves room for a torrent in
-/// the provider's own queue and for whole-percent progress (Real-Debrid) on a
-/// big, slow torrent.
-pub const STALL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// change, never counting time paused. 30 minutes (the user's call): a stuck
+/// slot frees sooner, at the cost that a provider reporting whole percents
+/// (Real-Debrid) can fail a big, very slow torrent between two steps, or one
+/// waiting long in the provider's own queue; restart waits again.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Granularity of the stall clock and of noticing a resume while fetching.
 const STALL_TICK: Duration = Duration::from_millis(250);
 
@@ -653,7 +654,7 @@ mod tests {
 
     #[test]
     fn stall_message_names_the_wait() {
-        assert_eq!(describe(STALL_TIMEOUT), "60 minutes");
+        assert_eq!(describe(STALL_TIMEOUT), "30 minutes");
         assert_eq!(describe(Duration::from_secs(60)), "1 minute");
         assert_eq!(describe(Duration::from_millis(600)), "1 second");
         assert_eq!(describe(Duration::from_secs(30)), "30 seconds");

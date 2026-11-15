@@ -533,18 +533,34 @@ impl Session {
     }
 
     pub fn restart(&self, id: u64, seed: bool, dest: PathBuf) -> Result<u64, String> {
-        self.restart_with(id, Route::Keep, seed, dest)
+        self.restart_with(id, Route::Keep, seed, dest, false)
+    }
+
+    /// True when this re-route should ask whether to remove the job's torrent
+    /// from the service it leaves: torrenter added it, it has a remote id, the
+    /// job is not done and `route` leaves that service. Same wording as clear.
+    pub fn reroute_asks_about_remote(&self, id: u64, route: Route) -> bool {
+        let inner = mutex_lock(&self.inner);
+        inner
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .and_then(|job| left_remote(job, route))
+            .is_some()
     }
 
     /// Restart a job, optionally re-routing a magnet (peers ⇄ a provider).
     /// Re-using the same provider keeps its torrent id and finished files, so
-    /// the download resumes instead of starting over.
+    /// the download resumes instead of starting over. Leaving a service never
+    /// deletes on its own: `remove_from_service` is the user's answer to
+    /// [`Self::reroute_asks_about_remote`] (best effort, like clear).
     pub fn restart_with(
         &self,
         id: u64,
         route: Route,
         seed: bool,
         dest: PathBuf,
+        remove_from_service: bool,
     ) -> Result<u64, String> {
         let mut inner = mutex_lock(&self.inner);
         let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
@@ -595,27 +611,16 @@ impl Session {
         // Claim the id now: a failed launch still stores the job under it.
         let new_id = inner.next_id;
         inner.next_id += 1;
-        // Leaving a service drops its torrent from this job; one torrenter
-        // added would sit on the account where clear / remove-after can no
-        // longer reach it, so delete it (best effort, like clear).
-        let leave_remote = old.debrid.as_ref().and_then(|existing| {
-            if debrid
-                .as_ref()
-                .is_some_and(|next| next.service == existing.service)
-            {
-                return None;
-            }
-            let state = existing.view();
-            if !state.added_by_us || old.snapshot.is_done() {
-                return None;
-            }
-            Some(EngineCmd::DeleteRemote {
-                service: existing.service,
-                key: resolve_key(&inner, existing.service)?,
-                remote_id: state.remote_id?,
-                base: inner.debrid_bases.get(&existing.service).cloned(),
-            })
-        });
+        let leave_remote = left_remote(&old, route)
+            .filter(|_| remove_from_service)
+            .and_then(|(service, remote_id)| {
+                Some(EngineCmd::DeleteRemote {
+                    service,
+                    key: resolve_key(&inner, service)?,
+                    remote_id,
+                    base: inner.debrid_bases.get(&service).cloned(),
+                })
+            });
         if let Some(cmd) = leave_remote {
             let _ = self.engine.send(cmd);
         }
@@ -806,6 +811,25 @@ fn duplicate_note(jobs: &[Job], kind: JobKind, source: &str) -> Option<String> {
 
 /// Memory first (mobile keychains, tests), then on desktop the env override and
 /// `credentials.json`.
+/// The provider torrent a re-route would leave behind and that is worth asking
+/// about: torrenter added it, the job is not done, and `route` leaves it.
+fn left_remote(job: &Job, route: Route) -> Option<(Service, String)> {
+    let existing = job.debrid.as_ref()?;
+    let staying = match route {
+        Route::Keep => true,
+        Route::Via(service) => service == existing.service,
+        Route::Peers => false,
+    };
+    if staying || job.snapshot.is_done() {
+        return None;
+    }
+    let state = existing.view();
+    if !state.added_by_us {
+        return None;
+    }
+    Some((existing.service, state.remote_id?))
+}
+
 fn resolve_key(inner: &Inner, service: Service) -> Option<Secret> {
     if let Some(key) = inner.keys.get(&service) {
         return Some(key.clone());
@@ -1339,21 +1363,53 @@ mod tests {
             .queue_with(JobKind::Magnet, other_magnet, Some(Service::TorBox))
             .unwrap();
         assert_ne!(other, failed, "ids stay unique after a failed restart");
-        session.stop(other);
-        session.remove(other);
-        // "as torrent": same job, now from peers (seed stays off in tests).
-        // The torrent torrenter added on the service is deleted (nothing could
-        // reach it afterwards).
+        let dest = dir.path().join("dl");
+        // Nothing to ask while staying on the service.
+        assert!(session.reroute_asks_about_remote(failed, Route::Peers));
+        assert!(!session.reroute_asks_about_remote(failed, Route::Keep));
+        assert!(!session.reroute_asks_about_remote(failed, Route::Via(Service::TorBox)));
+        // "as torrent", answer no: same job from peers (seed stays off in
+        // tests); the torrent stays on the account.
         let peers = session
-            .restart_with(failed, Route::Peers, false, dir.path().join("dl"))
+            .restart_with(failed, Route::Peers, false, dest.clone(), false)
             .unwrap();
         let job = session.job(peers).unwrap();
         assert_eq!(job.kind, JobKind::Magnet);
         assert!(job.debrid.is_none());
         session.stop(peers);
-        assert_eq!(session.jobs().len(), 1);
+        assert!(
+            !session.reroute_asks_about_remote(peers, Route::Peers),
+            "a peers job has nothing on a service"
+        );
+        // "as torrent", answer yes: the torrent torrenter added is removed.
+        let session = tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(other)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session
+        })
+        .await
+        .unwrap();
+        session.stop(other);
+        assert!(session.reroute_asks_about_remote(other, Route::Peers));
+        let other_peers = session
+            .restart_with(other, Route::Peers, false, dest, true)
+            .unwrap();
+        session.stop(other_peers);
+        assert_eq!(session.jobs().len(), 2);
         tokio::task::spawn_blocking(move || {
-            wait_for(|| !fake.lock().unwrap().torrents.contains_key(&1));
+            wait_for(|| !fake.lock().unwrap().torrents.contains_key(&2));
+            assert!(
+                fake.lock().unwrap().torrents.contains_key(&1),
+                "the job answered no keeps its torrent"
+            );
         })
         .await
         .unwrap();

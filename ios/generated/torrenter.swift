@@ -585,12 +585,20 @@ public protocol EngineProtocol: AnyObject, Sendable {
      */
     func removeWithRemote(id: UInt64) 
     
+    /**
+     * This re-route should ask "also remove it from the service?" first
+     * (the job leaves a service holding a torrent torrenter added).
+     */
+    func rerouteAsksAboutRemote(id: UInt64, service: String?)  -> Bool
+    
     func restart(id: UInt64, seed: Bool, dest: String) throws  -> UInt64
     
     /**
      * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
+     * pass false when it did not ask.
      */
-    func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String) throws  -> UInt64
+    func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String, removeFromService: Bool) throws  -> UInt64
     
     func seed()  -> Bool
     
@@ -786,6 +794,19 @@ open func removeWithRemote(id: UInt64)  {try! rustCall() {
 }
 }
     
+    /**
+     * This re-route should ask "also remove it from the service?" first
+     * (the job leaves a service holding a torrent torrenter added).
+     */
+open func rerouteAsksAboutRemote(id: UInt64, service: String?) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_reroute_asks_about_remote(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),
+        FfiConverterOptionString.lower(service),$0
+    )
+})
+}
+    
 open func restart(id: UInt64, seed: Bool, dest: String)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_restart(self.uniffiClonePointer(),
@@ -798,14 +819,17 @@ open func restart(id: UInt64, seed: Bool, dest: String)throws  -> UInt64  {
     
     /**
      * Restart re-routed: `service = None` downloads from peers ("as torrent").
+     * `remove_from_service` is the answer to `reroute_asks_about_remote`;
+     * pass false when it did not ask.
      */
-open func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String)throws  -> UInt64  {
+open func restartRoute(id: UInt64, service: String?, seed: Bool, dest: String, removeFromService: Bool)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_restart_route(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(id),
         FfiConverterOptionString.lower(service),
         FfiConverterBool.lower(seed),
-        FfiConverterString.lower(dest),$0
+        FfiConverterString.lower(dest),
+        FfiConverterBool.lower(removeFromService),$0
     )
 })
 }
@@ -1675,10 +1699,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_remove_with_remote() != 57789) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_reroute_asks_about_remote() != 36487) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_restart() != 54366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_restart_route() != 4777) {
+    if (uniffi_torrenter_checksum_method_engine_restart_route() != 32989) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_seed() != 40595) {
