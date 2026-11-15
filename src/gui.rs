@@ -259,6 +259,10 @@ struct GuiApp {
     auto_update: bool,
     seed: bool,
     toasts: Vec<Toast>,
+    /// Repaint on the busy cadence until then (see `BUSY_TAIL`).
+    busy_until: Instant,
+    /// For worker threads to wake the window.
+    repaint: egui::Context,
     next_toast: u64,
     restart: Option<RestartDraft>,
     pending: Option<AvailableUpdate>,
@@ -386,7 +390,8 @@ impl GuiApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        thread::spawn(move || worker_loop(cmd_rx, event_tx));
+        let worker_ctx = cc.egui_ctx.clone();
+        thread::spawn(move || worker_loop(cmd_rx, event_tx, worker_ctx));
         let config = update::load_config();
         let auto_update = config.auto_update;
         let seed = config.seed;
@@ -425,6 +430,8 @@ impl GuiApp {
             auto_update,
             seed,
             toasts: Vec::new(),
+            busy_until: Instant::now() + BUSY_TAIL,
+            repaint: cc.egui_ctx.clone(),
             next_toast: 1,
             restart: None,
             pending: None,
@@ -625,7 +632,9 @@ impl GuiApp {
         self.account_notes
             .insert(account.clone(), "checking…".into());
         let tx = self.account_tx.clone();
+        let wake = RepaintOnDrop(self.repaint.clone());
         thread::spawn(move || {
+            let _wake = wake;
             let note = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -891,9 +900,16 @@ impl eframe::App for GuiApp {
         // Redraw often only while something moves (downloads, toasts and the
         // update install they show, account checks); idle, once a second.
         // Input still repaints at once; worker replies wait at most that long.
-        let busy = self.session.any_active()
+        let moving = self.session.any_active()
             || !self.toasts.is_empty()
             || self.account_notes.values().any(|note| note == "checking…");
+        let now = Instant::now();
+        if moving {
+            self.busy_until = now + BUSY_TAIL;
+        }
+        // The tail covers what arrives just after: restore probes at launch, a
+        // failure notice for a job that just stopped.
+        let busy = moving || now < self.busy_until;
         ctx.request_repaint_after(if busy { BUSY_REPAINT } else { IDLE_REPAINT });
 
         const CONTROLS_H: f32 = 28.0;
@@ -2517,6 +2533,18 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
 /// Repaint cadence while something moves, and when idle.
 const BUSY_REPAINT: Duration = Duration::from_millis(200);
 const IDLE_REPAINT: Duration = Duration::from_secs(1);
+/// Stay on the busy cadence this long after launch and after the last motion.
+const BUSY_TAIL: Duration = Duration::from_secs(3);
+
+/// Requests a repaint when dropped: a worker holds one while it works, so the
+/// window wakes as soon as the reply is posted.
+struct RepaintOnDrop(egui::Context);
+
+impl Drop for RepaintOnDrop {
+    fn drop(&mut self) {
+        self.0.request_repaint();
+    }
+}
 
 /// Settings layout: sidebar width and the gap between cards.
 const SIDEBAR_W: f32 = 190.0;
@@ -3427,7 +3455,7 @@ fn paint_folder(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     painter.rect_stroke(body, 1.2, stroke, egui::StrokeKind::Inside);
 }
 
-fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
+fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>, ctx: egui::Context) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
     let _keep_alive = thread::spawn(move || {
@@ -3435,7 +3463,10 @@ fn worker_loop(rx: Receiver<WorkerCmd>, tx: Sender<WorkerEvent>) {
     });
     while let Ok(cmd) = rx.recv() {
         let tx = tx.clone();
+        let ctx = ctx.clone();
         handle.spawn(async move {
+            // Wake the window when the reply is posted (idle repaints are slow).
+            let _wake = RepaintOnDrop(ctx);
             match cmd {
                 WorkerCmd::Check => match update::check_latest(AppKind::Gui).await {
                     Ok(Some(update)) => {

@@ -83,8 +83,15 @@ class DownloadService : Service() {
             if (lastStart != 0L && now - lastStart < RESTART_EVERY_MS) {
                 return
             }
-            lastStart = now
-            context.startForegroundService(Intent(context, DownloadService::class.java))
+            // Count only a start that went through: Android 12+ refuses one
+            // while the app is in the background, and the next tick retries.
+            val started =
+                runCatching {
+                    context.startForegroundService(Intent(context, DownloadService::class.java))
+                }.isSuccess
+            if (started) {
+                lastStart = now
+            }
         }
 
         fun syncFromOwner(
