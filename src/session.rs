@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -5,13 +6,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use url::Url;
+
+use crate::debrid::run::{start_debrid_reported, DebridRun, DebridState, SharedDebridState};
+use crate::debrid::{Secret, Service};
 use crate::http::{
     filename_from_url, http_payload_present, http_resume_present, start_url_download_reported,
+    PART_COUNT,
 };
 use crate::jobs::{self, JobKind, LoadJobs, PersistedJob, RestoreAction};
 use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
-    magnet_display_name, magnet_info_hash, magnet_payload_present, start_download_reported,
+    magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
 };
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -38,9 +44,40 @@ pub struct Job {
     pub up_speed: f64,
     pub seed: bool,
     pub dest: PathBuf,
+    /// HTTP parts per file, fixed when the job was created (resume needs it).
+    pub part_count: usize,
+    /// Debrid route: provider plus shared provider-side progress.
+    pub debrid: Option<JobDebrid>,
+}
+
+#[derive(Clone)]
+pub struct JobDebrid {
+    pub service: Service,
+    /// The account (named key) the job runs through; its torrent lives there.
+    pub account: String,
+    pub state: SharedDebridState,
+}
+
+impl JobDebrid {
+    pub fn view(&self) -> DebridState {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// How a restart routes a magnet: as before, from peers, or via a debrid
+/// account (by id).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Keep,
+    Peers,
+    Via(String),
 }
 
 pub fn persist_record(job: &Job) -> PersistedJob {
+    let debrid = job.debrid.as_ref().map(JobDebrid::view);
     PersistedJob {
         id: job.id,
         kind: job.kind.as_str().to_string(),
@@ -54,6 +91,14 @@ pub fn persist_record(job: &Job) -> PersistedJob {
         status: job.snapshot.status(),
         paused: job.snapshot.is_paused(),
         error: job.snapshot.error(),
+        part_count: (job.kind != JobKind::Magnet)
+            .then(|| u8::try_from(job.part_count).unwrap_or(u8::MAX)),
+        service: job.debrid.as_ref().map(|d| d.service.id().to_string()),
+        account: job.debrid.as_ref().map(|d| d.account.clone()),
+        remote_id: debrid.as_ref().and_then(|d| d.remote_id.clone()),
+        added_by_us: debrid.as_ref().is_some_and(|d| d.added_by_us),
+        files: debrid.map(|d| d.files).unwrap_or_default(),
+        ..Default::default()
     }
 }
 
@@ -62,7 +107,7 @@ fn persist_fingerprint(jobs: &[Job]) -> String {
         .map(|job| {
             let record = persist_record(job);
             format!(
-                "{}:{}:{}:{}:{}:{}:{:?}:{}",
+                "{}:{}:{}:{}:{}:{}:{:?}:{}:{:?}:{:?}:{}",
                 record.id,
                 record.kind,
                 record.downloaded,
@@ -70,7 +115,10 @@ fn persist_fingerprint(jobs: &[Job]) -> String {
                 record.status,
                 record.paused,
                 record.error,
-                record.title
+                record.title,
+                record.remote_id,
+                record.part_count,
+                record.files.iter().filter(|file| file.done).count()
             )
         })
         .collect::<Vec<_>>()
@@ -89,8 +137,26 @@ enum EngineCmd {
         snapshot: Arc<JobSnapshot>,
         seed: bool,
         dest: PathBuf,
+        part_count: usize,
+        debrid: Option<DebridLaunch>,
     },
     Probe(Vec<ProbeSpec>),
+    DeleteRemote {
+        service: Service,
+        key: Secret,
+        remote_id: String,
+        base: Option<Url>,
+    },
+    /// A one-shot notice for every front (sent back as a job-less failure).
+    Notice(String),
+}
+
+struct DebridLaunch {
+    service: Service,
+    key: Secret,
+    state: SharedDebridState,
+    remove_after: bool,
+    base: Option<Url>,
 }
 
 struct ProbeSpec {
@@ -123,9 +189,20 @@ struct Inner {
     seed: bool,
     leech_only: bool,
     jobs: Vec<Job>,
+    /// Records of kinds this build does not know, written back untouched.
+    foreign: Vec<serde_json::Value>,
     next_id: u64,
     persist_at: Instant,
     saved_fingerprint: String,
+    /// Connections setting for new HTTP and debrid jobs.
+    part_count: usize,
+    debrid_remove_after: bool,
+    /// Keys handed in at runtime (mobile keychains, tests). Desktop also reads
+    /// `credentials.json` / env when no key is held here.
+    /// Mobile accounts held in memory: id → provider and key.
+    keys: HashMap<String, (Service, Secret)>,
+    desktop_keys: bool,
+    debrid_bases: HashMap<Service, Url>,
 }
 
 pub struct Session {
@@ -155,9 +232,15 @@ impl Session {
                 seed: seed && !leech_only,
                 leech_only,
                 jobs: Vec::new(),
+                foreign: Vec::new(),
                 next_id: 1,
                 persist_at: Instant::now(),
                 saved_fingerprint: String::new(),
+                part_count: PART_COUNT,
+                debrid_remove_after: false,
+                keys: HashMap::new(),
+                desktop_keys: true,
+                debrid_bases: HashMap::new(),
             })),
             engine: engine_tx,
             events: Mutex::new(event_rx),
@@ -185,15 +268,66 @@ impl Session {
         inner.seed = seed;
     }
 
+    /// Connections per download for new jobs (`None` = Auto = 4).
+    pub fn set_connections(&self, parts: Option<u8>) {
+        mutex_lock(&self.inner).part_count = parts
+            .map(|parts| usize::from(parts.clamp(1, crate::update::MAX_CONNECTIONS)))
+            .unwrap_or(PART_COUNT);
+    }
+
+    pub fn connections(&self) -> usize {
+        mutex_lock(&self.inner).part_count
+    }
+
+    pub fn set_debrid_remove_after(&self, enabled: bool) {
+        mutex_lock(&self.inner).debrid_remove_after = enabled;
+    }
+
+    /// Mobile: keys live only in memory (the app's keychain hands them over);
+    /// never read `credentials.json`.
+    pub fn use_memory_keys(&self) {
+        mutex_lock(&self.inner).desktop_keys = false;
+    }
+
+    /// Mobile: hold an account's key in memory (`None` forgets it).
+    pub fn set_debrid_account(&self, id: &str, service: Service, key: Option<Secret>) {
+        let mut inner = mutex_lock(&self.inner);
+        match key {
+            Some(key) => {
+                inner.keys.insert(id.to_string(), (service, key));
+            }
+            None => {
+                inner.keys.remove(id);
+            }
+        }
+    }
+
+    /// One account per provider, its id the provider id (today's phones).
+    pub fn set_debrid_key(&self, service: Service, key: Option<Secret>) {
+        self.set_debrid_account(service.id(), service, key);
+    }
+
+    pub fn has_account(&self, id: &str) -> bool {
+        resolve_account(&mutex_lock(&self.inner), id).is_some()
+    }
+
+    #[doc(hidden)]
+    /// Tests: point a provider at a fake server.
+    pub fn set_debrid_base(&self, service: Service, base: Url) {
+        mutex_lock(&self.inner).debrid_bases.insert(service, base);
+    }
+
     pub fn hydrate(&self) -> Hydrate {
         let mut inner = mutex_lock(&self.inner);
         match jobs::load_jobs_from(&inner.jobs_path) {
             LoadJobs::Empty => Hydrate::Empty,
             LoadJobs::Corrupt(error) => Hydrate::Corrupt(error),
-            LoadJobs::Loaded(records) => {
+            LoadJobs::Loaded(list) => {
                 let leech_only = inner.leech_only;
                 let mut probes = Vec::new();
-                for record in records {
+                inner.next_id = inner.next_id.max(list.max_id() + 1);
+                inner.foreign = list.foreign;
+                for record in list.jobs {
                     let Some(kind) = record.kind_id() else {
                         continue;
                     };
@@ -212,6 +346,23 @@ impl Session {
                             filename: record.title.clone(),
                         });
                     }
+                    let debrid = (kind == JobKind::Debrid)
+                        .then(|| record.service.as_deref().and_then(Service::parse))
+                        .flatten()
+                        .map(|service| JobDebrid {
+                            service,
+                            // Jobs saved before accounts used the provider id.
+                            account: record
+                                .account
+                                .clone()
+                                .unwrap_or_else(|| service.id().to_string()),
+                            state: Arc::new(Mutex::new(DebridState {
+                                remote_id: record.remote_id.clone(),
+                                added_by_us: record.added_by_us,
+                                files: record.files.clone(),
+                                ..DebridState::default()
+                            })),
+                        });
                     inner.jobs.push(Job {
                         id: record.id,
                         kind,
@@ -223,8 +374,11 @@ impl Session {
                         last_check: Instant::now(),
                         speed: 0.0,
                         up_speed: 0.0,
-                        seed: record.seed && !leech_only,
+                        seed: record.seed && !leech_only && kind == JobKind::Magnet,
                         dest: record.dest,
+                        // Jobs saved before the setting existed used 4 parts.
+                        part_count: record.part_count.map(usize::from).unwrap_or(PART_COUNT),
+                        debrid,
                     });
                 }
                 if inner.leech_only {
@@ -300,21 +454,14 @@ impl Session {
                 RestoreAction::Idle => {}
             }
         }
-        let leech_only = inner.leech_only;
-        let cmds: Vec<_> = starts
-            .into_iter()
-            .filter_map(|index| {
-                let job = inner.jobs.get(index)?;
-                Some(EngineCmd::Download {
-                    id: job.id,
-                    kind: job.kind,
-                    source: job.source.clone(),
-                    snapshot: Arc::clone(&job.snapshot),
-                    seed: job.seed && !leech_only,
-                    dest: job.dest.clone(),
-                })
-            })
-            .collect();
+        let mut cmds = Vec::new();
+        for index in starts {
+            let job = inner.jobs[index].clone();
+            match launch(&inner, &job) {
+                Ok(cmd) => cmds.push(cmd),
+                Err(error) => job.snapshot.set_error(error),
+            }
+        }
         persist_inner(&mut inner, true);
         drop(inner);
         for cmd in cmds {
@@ -328,25 +475,55 @@ impl Session {
     }
 
     pub fn queue(&self, kind: JobKind, source: &str) -> Result<u64, String> {
+        self.queue_with(kind, source, None)
+    }
+
+    /// Queue a job; a magnet with `via` (an account id) goes through that
+    /// debrid account.
+    pub fn queue_with(
+        &self,
+        kind: JobKind,
+        source: &str,
+        via: Option<&str>,
+    ) -> Result<u64, String> {
         let source = source.trim();
         if source.is_empty() {
             return Err("paste a magnet or HTTP URL first".into());
         }
+        let kind = match (kind, via) {
+            (JobKind::Magnet | JobKind::Debrid, Some(_)) => JobKind::Debrid,
+            (JobKind::Debrid, None) => return Err("pick a debrid service".into()),
+            (JobKind::Http, Some(_)) => return Err("debrid applies to magnet links".into()),
+            (kind, None) => kind,
+        };
         let valid = match kind {
-            JobKind::Magnet => is_valid_magnet_url(source),
+            JobKind::Magnet | JobKind::Debrid => is_valid_magnet_url(source),
             JobKind::Http => is_valid_download_url(source),
         };
         if !valid {
-            return Err(format!("invalid {} URL", kind.as_str()));
+            let shown = if kind.takes_magnet() {
+                "magnet"
+            } else {
+                "http"
+            };
+            return Err(format!("invalid {shown} URL"));
         }
         let mut inner = mutex_lock(&self.inner);
+        let debrid = match via {
+            Some(account) => Some(JobDebrid {
+                service: account_service(&inner, account)?,
+                account: account.to_string(),
+                state: SharedDebridState::default(),
+            }),
+            None => None,
+        };
         if let Some(note) = duplicate_note(&inner.jobs, kind, source) {
             return Err(note);
         }
         let snapshot = Arc::new(JobSnapshot::default());
         snapshot.set_status("queued");
         match kind {
-            JobKind::Magnet => {
+            JobKind::Magnet | JobKind::Debrid => {
                 if let Some(name) = magnet_display_name(source) {
                     snapshot.set_title(name);
                 }
@@ -354,9 +531,7 @@ impl Session {
             JobKind::Http => snapshot.set_title(filename_from_url(source, None)),
         }
         let id = inner.next_id;
-        inner.next_id += 1;
         let seed = kind == JobKind::Magnet && inner.seed && !inner.leech_only;
-        let dest = inner.dest.clone();
         let job = Job {
             id,
             kind,
@@ -369,28 +544,81 @@ impl Session {
             speed: 0.0,
             up_speed: 0.0,
             seed,
-            dest: dest.clone(),
+            dest: inner.dest.clone(),
+            part_count: inner.part_count,
+            debrid,
         };
-        let _ = self.engine.send(EngineCmd::Download {
-            id,
-            kind,
-            source: source.to_string(),
-            snapshot,
-            seed,
-            dest,
-        });
+        let cmd = launch(&inner, &job)?;
+        inner.next_id += 1;
+        let _ = self.engine.send(cmd);
         inner.jobs.push(job);
         persist_inner(&mut inner, true);
         Ok(id)
     }
 
     pub fn restart(&self, id: u64, seed: bool, dest: PathBuf) -> Result<u64, String> {
+        self.restart_with(id, Route::Keep, seed, dest, false)
+    }
+
+    /// True when this re-route should ask whether to remove the job's torrent
+    /// from the service it leaves: torrenter added it, it has a remote id, the
+    /// job is not done and `route` leaves that service. Same wording as clear.
+    pub fn reroute_asks_about_remote(&self, id: u64, route: &Route) -> bool {
+        let inner = mutex_lock(&self.inner);
+        inner
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .and_then(|job| left_remote(job, route))
+            .is_some()
+    }
+
+    /// Restart a job, optionally re-routing a magnet (peers ⇄ a provider).
+    /// Re-using the same provider keeps its torrent id and finished files, so
+    /// the download resumes instead of starting over. Leaving a service never
+    /// deletes on its own: `remove_from_service` is the user's answer to
+    /// [`Self::reroute_asks_about_remote`] (best effort, like clear).
+    pub fn restart_with(
+        &self,
+        id: u64,
+        route: Route,
+        seed: bool,
+        dest: PathBuf,
+        remove_from_service: bool,
+    ) -> Result<u64, String> {
         let mut inner = mutex_lock(&self.inner);
         let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
             return Err("job gone".into());
         };
-        let kind = inner.jobs[index].kind;
-        let source = inner.jobs[index].source.clone();
+        let old = inner.jobs[index].clone();
+        let source = old.source.clone();
+        let debrid = match (old.kind, &route) {
+            (JobKind::Http, Route::Via(_)) => return Err("debrid applies to magnet links".into()),
+            (_, Route::Peers) => None,
+            (_, Route::Via(account)) => Some(match &old.debrid {
+                // Same account: its torrent and finished files carry over.
+                Some(existing) if &existing.account == account => JobDebrid {
+                    service: existing.service,
+                    account: account.clone(),
+                    state: Arc::new(Mutex::new(existing.view())),
+                },
+                _ => JobDebrid {
+                    service: account_service(&inner, account)?,
+                    account: account.clone(),
+                    state: SharedDebridState::default(),
+                },
+            }),
+            (_, Route::Keep) => old.debrid.as_ref().map(|existing| JobDebrid {
+                service: existing.service,
+                account: existing.account.clone(),
+                state: Arc::new(Mutex::new(existing.view())),
+            }),
+        };
+        let kind = match (old.kind, &debrid) {
+            (JobKind::Http, _) => JobKind::Http,
+            (_, Some(_)) => JobKind::Debrid,
+            (_, None) => JobKind::Magnet,
+        };
         let others: Vec<Job> = inner
             .jobs
             .iter()
@@ -408,18 +636,23 @@ impl Session {
         if !title.is_empty() {
             snapshot.set_title(title);
         }
+        // Claim the id now: a failed launch still stores the job under it.
         let new_id = inner.next_id;
         inner.next_id += 1;
+        let leave_remote = left_remote(&old, &route)
+            .filter(|_| remove_from_service)
+            .map(|left| delete_remote_cmd(&inner, left));
+        if let Some(cmd) = leave_remote {
+            let _ = self.engine.send(cmd);
+        }
         let seed = kind == JobKind::Magnet && seed && !inner.leech_only;
-        let _ = self.engine.send(EngineCmd::Download {
-            id: new_id,
-            kind,
-            source: source.clone(),
-            snapshot: Arc::clone(&snapshot),
-            seed,
-            dest: dest.clone(),
-        });
-        inner.jobs[index] = Job {
+        // A fresh HTTP split starts from scratch anyway; keep the job's own
+        // count for debrid so its parts resume.
+        let part_count = match kind {
+            JobKind::Debrid if old.kind == JobKind::Debrid => old.part_count,
+            _ => inner.part_count,
+        };
+        let job = Job {
             id: new_id,
             kind,
             source,
@@ -432,7 +665,20 @@ impl Session {
             up_speed: 0.0,
             seed,
             dest,
+            part_count,
+            debrid,
         };
+        let cmd = match launch(&inner, &job) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                job.snapshot.set_error(error.clone());
+                inner.jobs[index] = job;
+                persist_inner(&mut inner, true);
+                return Err(error);
+            }
+        };
+        let _ = self.engine.send(cmd);
+        inner.jobs[index] = job;
         persist_inner(&mut inner, true);
         Ok(new_id)
     }
@@ -461,6 +707,47 @@ impl Session {
             inner.jobs[index].snapshot.mark_stopped();
             inner.jobs.remove(index);
             persist_inner(&mut inner, true);
+        }
+    }
+
+    /// True when clearing this job should ask whether to delete it from the
+    /// provider too: a debrid job torrenter added that did not finish.
+    pub fn clear_asks_about_remote(&self, id: u64) -> bool {
+        let inner = mutex_lock(&self.inner);
+        inner.jobs.iter().any(|job| {
+            job.id == id
+                && !job.snapshot.is_done()
+                && job.debrid.as_ref().is_some_and(|debrid| {
+                    let state = debrid.view();
+                    state.added_by_us && state.remote_id.is_some()
+                })
+        })
+    }
+
+    /// Clear a job and delete its torrent from the provider (only one
+    /// torrenter added). Best effort: failures arrive as a notice.
+    pub fn remove_with_remote(&self, id: u64) {
+        let delete = {
+            let inner = mutex_lock(&self.inner);
+            inner.jobs.iter().find(|job| job.id == id).and_then(|job| {
+                let debrid = job.debrid.as_ref()?;
+                let state = debrid.view();
+                if !state.added_by_us {
+                    return None;
+                }
+                Some(delete_remote_cmd(
+                    &inner,
+                    LeftRemote {
+                        account: debrid.account.clone(),
+                        service: debrid.service,
+                        remote_id: state.remote_id?,
+                    },
+                ))
+            })
+        };
+        self.remove(id);
+        if let Some(cmd) = delete {
+            let _ = self.engine.send(cmd);
         }
     }
 
@@ -521,21 +808,179 @@ pub(crate) fn tick_job_rates(job: &mut Job) {
     }
 }
 
+/// One torrent is one job whichever route it takes (peers or a provider), since
+/// both write the same folder.
 fn duplicate_note(jobs: &[Job], kind: JobKind, source: &str) -> Option<String> {
     let conflict = jobs.iter().any(|job| {
-        if !job.snapshot.is_active() || job.kind != kind {
+        if !job.snapshot.is_active() || job.kind.takes_magnet() != kind.takes_magnet() {
             return false;
         }
-        match kind {
-            JobKind::Magnet => magnet_info_hash(source).is_some_and(|hash| {
-                magnet_info_hash(&job.source).as_deref() == Some(hash.as_str())
-            }),
-            JobKind::Http => job.source == source,
+        if kind.takes_magnet() {
+            magnet_info_hash_hex(source).is_some_and(|hash| {
+                magnet_info_hash_hex(&job.source).as_deref() == Some(hash.as_str())
+            })
+        } else {
+            job.source == source
         }
     });
-    conflict.then(|| match kind {
-        JobKind::Magnet => "that magnet is already downloading".into(),
-        JobKind::Http => "that URL is already downloading".into(),
+    conflict.then(|| {
+        if kind.takes_magnet() {
+            "that magnet is already downloading".into()
+        } else {
+            "that URL is already downloading".into()
+        }
+    })
+}
+
+/// A provider torrent a job leaves behind.
+struct LeftRemote {
+    account: String,
+    service: Service,
+    remote_id: String,
+}
+
+/// The provider torrent a re-route would leave behind and that is worth asking
+/// about: torrenter added it, the job is not done, and `route` leaves its
+/// account (another account of the same provider counts as leaving).
+fn left_remote(job: &Job, route: &Route) -> Option<LeftRemote> {
+    let existing = job.debrid.as_ref()?;
+    let staying = match route {
+        Route::Keep => true,
+        Route::Via(account) => *account == existing.account,
+        Route::Peers => false,
+    };
+    if staying || job.snapshot.is_done() {
+        return None;
+    }
+    let state = existing.view();
+    if !state.added_by_us {
+        return None;
+    }
+    Some(LeftRemote {
+        account: existing.account.clone(),
+        service: existing.service,
+        remote_id: state.remote_id?,
+    })
+}
+
+/// Delete a torrent from a provider the user said yes to. Without the
+/// account's key (it was removed since) nothing can be deleted, so say so
+/// instead of dropping it.
+fn delete_remote_cmd(inner: &Inner, left: LeftRemote) -> EngineCmd {
+    // Exactly the account the torrent lives on: never the provider fallback,
+    // whose key belongs to a different account and torrent list.
+    match exact_account(inner, &left.account) {
+        Some((service, key)) => EngineCmd::DeleteRemote {
+            service,
+            key,
+            remote_id: left.remote_id,
+            base: inner.debrid_bases.get(&service).cloned(),
+        },
+        None => EngineCmd::Notice(format!(
+            "could not remove it from {}: no API key for that account any more; it is still on the account",
+            left.service.label()
+        )),
+    }
+}
+
+/// An account's provider and key for running a job: the exact account, or
+/// for an id saved before accounts its provider's only account.
+fn resolve_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    exact_account(inner, id).or_else(|| legacy_account(inner, id))
+}
+
+/// Only the account with this id: memory first (mobile keychains, tests),
+/// then on desktop `credentials.json` and the env accounts.
+fn exact_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    if let Some((service, key)) = inner.keys.get(id) {
+        return Some((*service, key.clone()));
+    }
+    if inner.desktop_keys {
+        return crate::credentials::account_key(id);
+    }
+    None
+}
+
+/// Jobs and routes saved before accounts name the provider (`torbox`). With
+/// no account of that id, use the provider's only account (saved, env or in
+/// memory), as the CLI and MCP resolve a provider name.
+fn legacy_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    let service = Service::parse(id).filter(|service| service.id() == id)?;
+    let mut memory = inner.keys.values().filter(|(each, _)| *each == service);
+    if let Some((_, key)) = memory.next() {
+        return memory.next().is_none().then(|| (service, key.clone()));
+    }
+    if !inner.desktop_keys {
+        return None;
+    }
+    let accounts: Vec<_> = crate::credentials::accounts()
+        .into_iter()
+        .filter(|account| account.service == service)
+        .collect();
+    match accounts.as_slice() {
+        [only] => crate::credentials::account_key(&only.id),
+        _ => None,
+    }
+}
+
+/// The provider of an account a new route names, or why it cannot be used.
+fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
+    if let Some((service, _)) = resolve_account(inner, id) {
+        return offered(service).map(|()| service);
+    }
+    Err(match Service::parse(id) {
+        Some(service) => format!("add a {} API key in settings first", service.label()),
+        None => "that debrid account's key is not available (removed, or not readable right now); check it in settings".into(),
+    })
+}
+
+/// The engine command for a job. Debrid jobs need a key for their provider.
+/// Only providers this build ships run, whatever a saved job, env key or
+/// hand-edited account names.
+fn offered(service: Service) -> Result<(), String> {
+    if Service::shipped().contains(&service) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not available in this build",
+            service.label()
+        ))
+    }
+}
+
+fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
+    let debrid = match &job.debrid {
+        Some(debrid) => {
+            offered(debrid.service)?;
+            let (_, key) = resolve_account(inner, &debrid.account).ok_or_else(|| {
+                if debrid.account == debrid.service.id() {
+                    format!("add a {} API key in settings first", debrid.service.label())
+                } else {
+                    format!(
+                        "this job's {} account key is not available (removed, or not readable right now); check it in settings or download it as a torrent",
+                        debrid.service.label()
+                    )
+                }
+            })?;
+            Some(DebridLaunch {
+                service: debrid.service,
+                key,
+                state: Arc::clone(&debrid.state),
+                remove_after: inner.debrid_remove_after,
+                base: inner.debrid_bases.get(&debrid.service).cloned(),
+            })
+        }
+        None => None,
+    };
+    Ok(EngineCmd::Download {
+        id: job.id,
+        kind: job.kind,
+        source: job.source.clone(),
+        snapshot: Arc::clone(&job.snapshot),
+        seed: job.seed && !inner.leech_only,
+        dest: job.dest.clone(),
+        part_count: job.part_count,
+        debrid,
     })
 }
 
@@ -548,7 +993,7 @@ fn persist_inner(inner: &mut Inner, force: bool) {
         return;
     }
     let records: Vec<_> = inner.jobs.iter().map(persist_record).collect();
-    if jobs::save_jobs_to(&inner.jobs_path, &records).is_ok() {
+    if jobs::save_job_list_to(&inner.jobs_path, &records, &inner.foreign).is_ok() {
         inner.saved_fingerprint = fingerprint;
         inner.persist_at = Instant::now();
     }
@@ -573,6 +1018,8 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     snapshot,
                     seed,
                     dest,
+                    part_count,
+                    debrid,
                 } => {
                     if snapshot.should_stop() {
                         snapshot.mark_stopped();
@@ -598,11 +1045,30 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     if !snapshot.is_paused() {
                         snapshot.set_status("starting");
                     }
-                    let result = match kind {
-                        JobKind::Magnet => {
+                    let result = match (kind, debrid) {
+                        (JobKind::Debrid, Some(launch)) => {
+                            let run = DebridRun {
+                                service: launch.service,
+                                key: launch.key,
+                                magnet: source,
+                                dest,
+                                part_count,
+                                remove_after: launch.remove_after,
+                                state: launch.state,
+                                base: launch.base,
+                                stall_timeout: crate::debrid::run::STALL_TIMEOUT,
+                            };
+                            start_debrid_reported(run, snapshot).await
+                        }
+                        (JobKind::Debrid, None) => {
+                            Err(anyhow::anyhow!("debrid job without a provider"))
+                        }
+                        (JobKind::Magnet, _) => {
                             start_download_reported(&source, snapshot, seed, dest).await
                         }
-                        JobKind::Http => start_url_download_reported(&source, snapshot, dest).await,
+                        (JobKind::Http, _) => {
+                            start_url_download_reported(&source, snapshot, dest, part_count).await
+                        }
                     };
                     if let Err(error) = result {
                         if !is_stopped(&error) {
@@ -613,6 +1079,27 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                         }
                     }
                 }
+                EngineCmd::DeleteRemote {
+                    service,
+                    key,
+                    remote_id,
+                    base,
+                } => {
+                    if let Err(error) =
+                        crate::debrid::delete_remote(service, &key, &remote_id, base).await
+                    {
+                        let _ = tx.send(EngineEvent::DownloadFailed {
+                            id: 0,
+                            error: crate::debrid::redact(
+                                &format!("could not remove it from {}: {error}", service.label()),
+                                Some(&key),
+                            ),
+                        });
+                    }
+                }
+                EngineCmd::Notice(error) => {
+                    let _ = tx.send(EngineEvent::DownloadFailed { id: 0, error });
+                }
                 EngineCmd::Probe(specs) => {
                     let results = specs
                         .into_iter()
@@ -621,6 +1108,8 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                                 JobKind::Magnet => {
                                     (magnet_payload_present(&spec.dest, &spec.source), false)
                                 }
+                                // Restored as Start; the runner re-checks every file.
+                                JobKind::Debrid => (false, false),
                                 JobKind::Http => (
                                     http_payload_present(&spec.dest, &spec.source, &spec.filename),
                                     http_resume_present(&spec.dest, &spec.source),
@@ -658,6 +1147,8 @@ mod tests {
             up_speed: 0.0,
             seed: false,
             dest: PathBuf::from(dest),
+            part_count: 4,
+            debrid: None,
         }
     }
 
@@ -782,9 +1273,9 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         assert!(!jobs[0].seed, "leech session must not keep GUI share seed");
         match jobs::load_jobs_from(&jobs_path) {
-            jobs::LoadJobs::Loaded(records) => {
-                assert_eq!(records.len(), 1);
-                assert!(!records[0].seed);
+            jobs::LoadJobs::Loaded(list) => {
+                assert_eq!(list.jobs.len(), 1);
+                assert!(!list.jobs[0].seed);
             }
             jobs::LoadJobs::Empty | jobs::LoadJobs::Corrupt(_) => panic!("expected rewritten jobs"),
         }
@@ -842,5 +1333,385 @@ mod tests {
         session.remove(9);
         assert!(session.jobs().is_empty());
         assert!(snap.is_stopped());
+    }
+
+    fn wait_for(mut done: impl FnMut() -> bool) {
+        for _ in 0..400 {
+            if done() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("timed out waiting");
+    }
+
+    async fn torbox_session(
+        dir: &std::path::Path,
+        fetch_polls: u32,
+    ) -> (
+        Session,
+        crate::debrid::fake::FakeServer,
+        Arc<Mutex<crate::debrid::torbox::tests::State>>,
+    ) {
+        use crate::debrid::torbox::tests::{torbox_fake, State, KEY};
+        let fake = Arc::new(Mutex::new(State {
+            fetch_polls,
+            ..State::default()
+        }));
+        let (server, base) = torbox_fake(Arc::clone(&fake)).await;
+        let session = Session::open(dir.join("dl"), dir.join("jobs.json"), true);
+        session.use_memory_keys();
+        session.set_debrid_base(Service::TorBox, base);
+        session.set_debrid_key(Service::TorBox, Secret::new(KEY));
+        (session, server, fake)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn debrid_job_completes_and_persists_ids_not_secrets() {
+        use crate::debrid::torbox::tests::{magnet, KEY};
+        let dir = tempdir().unwrap();
+        let (session, _server, _fake) = torbox_session(dir.path(), 0).await;
+        session.set_connections(Some(8));
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        let job = session.job(id).unwrap();
+        assert_eq!(job.kind, JobKind::Debrid);
+        assert!(!job.seed, "debrid jobs never seed");
+        assert_eq!(job.part_count, 8);
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| session.job(id).unwrap().snapshot.is_done());
+            session.persist(true);
+            let job = session.job(id).unwrap();
+            let state = job.debrid.as_ref().unwrap().view();
+            assert_eq!(state.files.len(), 2);
+            assert!(state.files.iter().all(|file| file.done));
+        })
+        .await
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("jobs.json")).unwrap();
+        assert!(text.contains("\"kind\": \"debrid\""), "{text}");
+        assert!(text.contains("\"service\": \"torbox\""));
+        assert!(text.contains("\"remoteId\": \"1\""));
+        assert!(text.contains("\"partCount\": 8"));
+        assert!(
+            !text.contains(KEY) && !text.contains("/dld/"),
+            "no key or link persisted"
+        );
+        assert!(dir.path().join("dl/Album/CD1/01.bin").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn debrid_routes_share_duplicate_checks_and_need_a_key() {
+        use crate::debrid::torbox::tests::{magnet, HASH};
+        let dir = tempdir().unwrap();
+        let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        // Same torrent (base32 spelling) as a plain magnet: one job per torrent.
+        let b32 = "zhqvoy7xelzd5gfctxwn7lrudomnkmcw";
+        assert_eq!(crate::torrent::normalize_info_hash(b32), HASH);
+        let plain = format!("magnet:?xt=urn:btih:{b32}");
+        assert_eq!(
+            session.queue(JobKind::Magnet, &plain).unwrap_err(),
+            "that magnet is already downloading"
+        );
+        session.set_debrid_key(Service::TorBox, None);
+        let other = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111";
+        assert_eq!(
+            session
+                .queue_with(JobKind::Magnet, other, Some("torbox"))
+                .unwrap_err(),
+            "add a TorBox API key in settings first"
+        );
+        assert!(session
+            .queue_with(JobKind::Http, "https://example.com/a", Some("torbox"))
+            .is_err());
+        session.stop(id);
+        assert!(session.job(id).unwrap().snapshot.is_stopped());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_keeps_the_remote_or_switches_to_peers() {
+        use crate::debrid::torbox::tests::{magnet, KEY};
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        let session = tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session
+        })
+        .await
+        .unwrap();
+        session.stop(id);
+        let kept = session.restart(id, false, dir.path().join("dl")).unwrap();
+        let job = session.job(kept).unwrap();
+        assert_eq!(job.kind, JobKind::Debrid);
+        assert_eq!(
+            job.debrid.as_ref().unwrap().view().remote_id.as_deref(),
+            Some("1"),
+            "same provider resumes the same remote torrent"
+        );
+        session.stop(kept);
+        // A restart that cannot launch (key removed) still uses up its id, so
+        // the next job never shares it.
+        session.set_debrid_key(Service::TorBox, None);
+        assert!(session.restart(kept, false, dir.path().join("dl")).is_err());
+        let failed = session.jobs()[0].id;
+        assert_ne!(failed, kept);
+        session.set_debrid_key(Service::TorBox, Secret::new(KEY));
+        let other_magnet = "magnet:?xt=urn:btih:2222222222222222222222222222222222222222";
+        let other = session
+            .queue_with(JobKind::Magnet, other_magnet, Some("torbox"))
+            .unwrap();
+        assert_ne!(other, failed, "ids stay unique after a failed restart");
+        let dest = dir.path().join("dl");
+        // Nothing to ask while staying on the service.
+        assert!(session.reroute_asks_about_remote(failed, &Route::Peers));
+        assert!(!session.reroute_asks_about_remote(failed, &Route::Keep));
+        assert!(!session.reroute_asks_about_remote(failed, &Route::Via("torbox".into())));
+        // "as torrent", answer no: same job from peers (seed stays off in
+        // tests); the torrent stays on the account.
+        let peers = session
+            .restart_with(failed, Route::Peers, false, dest.clone(), false)
+            .unwrap();
+        let job = session.job(peers).unwrap();
+        assert_eq!(job.kind, JobKind::Magnet);
+        assert!(job.debrid.is_none());
+        session.stop(peers);
+        assert!(
+            !session.reroute_asks_about_remote(peers, &Route::Peers),
+            "a peers job has nothing on a service"
+        );
+        // "as torrent", answer yes: the torrent torrenter added is removed.
+        let session = tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(other)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session
+        })
+        .await
+        .unwrap();
+        session.stop(other);
+        assert!(session.reroute_asks_about_remote(other, &Route::Peers));
+        let other_peers = session
+            .restart_with(other, Route::Peers, false, dest, true)
+            .unwrap();
+        session.stop(other_peers);
+        assert_eq!(session.jobs().len(), 2);
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| !fake.lock().unwrap().torrents.contains_key(&2));
+            assert!(
+                fake.lock().unwrap().torrents.contains_key(&1),
+                "the job answered no keeps its torrent"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn providers_this_build_hides_never_run() {
+        let dir = tempdir().unwrap();
+        let session = Session::open(dir.path().join("dl"), dir.path().join("jobs.json"), true);
+        session.use_memory_keys();
+        session.set_debrid_account("rd", Service::RealDebrid, Secret::new("k"));
+        let magnet = "magnet:?xt=urn:btih:3333333333333333333333333333333333333333";
+        let error = session
+            .queue_with(JobKind::Magnet, magnet, Some("rd"))
+            .unwrap_err();
+        assert_eq!(error, "Real-Debrid is not available in this build");
+        assert!(session.jobs().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removal_never_borrows_another_accounts_key() {
+        use crate::debrid::torbox::tests::{magnet, KEY};
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session.stop(id);
+            // The job's own account goes; another TorBox account remains. It
+            // could run a legacy job, but must never delete for this one.
+            session.set_debrid_key(Service::TorBox, None);
+            session.set_debrid_account("torbox-other", Service::TorBox, Secret::new(KEY));
+            assert!(session.clear_asks_about_remote(id));
+            session.remove_with_remote(id);
+            let mut notices = Vec::new();
+            wait_for(|| {
+                notices.extend(session.drain_events().into_iter().filter_map(
+                    |event| match event {
+                        SessionEvent::DownloadFailed { id: 0, error } => Some(error),
+                        _ => None,
+                    },
+                ));
+                !notices.is_empty()
+            });
+            assert!(
+                notices[0].contains("no API key for that account"),
+                "{notices:?}"
+            );
+            assert!(
+                fake.lock().unwrap().torrents.contains_key(&1),
+                "no delete reached the provider"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removal_without_a_key_says_it_was_kept() {
+        use crate::debrid::torbox::tests::magnet;
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session.stop(id);
+            session.set_debrid_key(Service::TorBox, None);
+            assert!(session.reroute_asks_about_remote(id, &Route::Peers));
+            let peers = session
+                .restart_with(id, Route::Peers, false, dir.path().join("dl"), true)
+                .unwrap();
+            session.stop(peers);
+            let mut notices = Vec::new();
+            wait_for(|| {
+                notices.extend(session.drain_events().into_iter().filter_map(
+                    |event| match event {
+                        SessionEvent::DownloadFailed { id: 0, error } => Some(error),
+                        _ => None,
+                    },
+                ));
+                !notices.is_empty()
+            });
+            assert!(
+                notices[0].contains("no API key for that account"),
+                "{notices:?}"
+            );
+            assert!(fake.lock().unwrap().torrents.contains_key(&1));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_an_unfinished_job_can_delete_it_from_the_provider() {
+        use crate::debrid::torbox::tests::magnet;
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        let session = tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session
+        })
+        .await
+        .unwrap();
+        session.stop(id);
+        assert!(session.clear_asks_about_remote(id));
+        session.remove_with_remote(id);
+        assert!(session.jobs().is_empty());
+        let fake = Arc::clone(&fake);
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| fake.lock().unwrap().torrents.is_empty());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn restored_debrid_jobs_keep_their_provider_state() {
+        let dir = tempdir().unwrap();
+        let jobs_path = dir.path().join("jobs.json");
+        let record = PersistedJob {
+            id: 4,
+            kind: "debrid".into(),
+            source: "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056".into(),
+            dest: dir.path().to_path_buf(),
+            status: "stopped".into(),
+            part_count: Some(8),
+            service: Some("torbox".into()),
+            remote_id: Some("77".into()),
+            added_by_us: true,
+            files: vec![jobs::PersistedFile {
+                id: "0".into(),
+                path: "a.bin".into(),
+                size: 5,
+                done: true,
+            }],
+            ..PersistedJob::default()
+        };
+        jobs::save_jobs_to(&jobs_path, &[record]).unwrap();
+        let session = Session::open(dir.path().to_path_buf(), jobs_path.clone(), true);
+        session.use_memory_keys();
+        assert!(matches!(session.hydrate(), Hydrate::Loaded));
+        let job = session.job(4).unwrap();
+        assert_eq!(job.kind, JobKind::Debrid);
+        assert_eq!(job.part_count, 8);
+        let state = job.debrid.as_ref().unwrap().view();
+        assert_eq!(state.remote_id.as_deref(), Some("77"));
+        assert!(state.added_by_us && state.files[0].done);
+        session.persist(true);
+        match jobs::load_jobs_from(&jobs_path) {
+            jobs::LoadJobs::Loaded(list) => {
+                assert_eq!(list.jobs[0].remote_id.as_deref(), Some("77"));
+                assert_eq!(list.jobs[0].files.len(), 1);
+            }
+            _ => panic!("expected jobs"),
+        }
     }
 }

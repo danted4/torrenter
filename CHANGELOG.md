@@ -4,6 +4,30 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-11-15
+
+### Added
+
+- **Debrid route for magnet jobs** (desktop GUI, CLI, MCP, Android, iOS): a magnet can go through your own debrid service, which fetches it server-side; torrenter then downloads every file over HTTP into the same `<dest>/<torrent-name>/` folder. TorBox ships in this release. Real-Debrid, AllDebrid, Premiumize and Debrid-Link adapters are built and tested against fakes and ship once each is confirmed with a real account.
+- Debrid **accounts**: each key is a named account for one provider, so a provider can have several. Desktop `credentials.json` (owner-only) plus a read-only account per `TORRENTER_<SERVICE>_KEY`; Android Keystore encryption (excluded from backup); iOS Keychain. `torrenter debrid add <provider> [--name]|test|remove|list`, `torrenter magnet --debrid <account>`, and MCP `queue_magnet` `debrid` plus a `debrid_services` tool listing account names.
+- While the service fetches, rows read `MAGNET → service · fetching %` with an **as torrent** action; then `HTTP · via service` with `file i/n`. A fetch whose progress has not moved for 30 minutes (paused time excluded) fails so its slot frees, and is not restarted on the next launch. Optional **remove from service after download** (only torrents torrenter added). Clearing an unfinished debrid job, or switching it to **as torrent** or another service, asks whether to remove it from the service (only torrents torrenter added; MCP never removes them).
+- **Connections per download** setting (Auto = 4, or 1–16) for new HTTP and debrid downloads, capped per service.
+- Full **settings page** behind the cog on desktop, Android and iOS (theme, macOS tint, debrid accounts, connections, remove after download; iOS keep alive, desktop auto-update mirrored). On desktop: a category sidebar (appearance, downloads, debrid accounts, updates) with full-width setting tiles, and a fixed-width route dropdown (**default (none)** or an account) on the URL row.
+
+### Changed
+
+- Magnet rows name the waits before data flows: **fetching metadata** while the swarm sends the file list (was shown as "verifying"), and **connecting to peers** until the first bytes arrive (was "downloading" at 0 B). Both use an indeterminate bar, and resuming returns to the phase that was paused.
+- Theme moved from the mobile main screens and the desktop cog popup into the settings page.
+- HTTP rows no longer show a peer count.
+- `jobs.json` and `config.json` keep job records (unknown kinds or services) and keys written by newer builds instead of dropping them; `config.json` saves atomically and a file that no longer parses moves to `config.json.bak`.
+
+### Fixed
+
+- The same torrent spelled with a base32 and a hex info hash now counts as one job and shares one folder lock.
+- Lowering the part count no longer leaves orphaned `.part-N` files in `.resume/`.
+- Windows: a picked download folder shows (and is saved) as `E:\folder` instead of the verbatim `\\?\E:\folder`; one saved that way earlier reads back plain.
+- Settings saved from two threads at once (an update check and a toggle), or by two torrenter processes (`torrenter debrid add` while the GUI is open), can no longer tear `config.json` or `credentials.json` and reset them.
+
 ## [3.7.1] - 2026-11-14
 
 ### Added

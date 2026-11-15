@@ -14,6 +14,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use torrenter::debrid::Service;
 use torrenter::identity::{self, VERSION};
 use torrenter::jobs::JobKind;
 use torrenter::paths;
@@ -34,6 +35,11 @@ struct Mcp {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct MagnetArg {
     uri: String,
+    /// Optional debrid account: its name, or a provider id when that provider
+    /// has one account (see `debrid_services`). Omit to download from peers.
+    /// Uses the user's own configured key; never ask for one.
+    #[serde(default)]
+    debrid: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -67,6 +73,30 @@ struct JobToolView {
     finished: bool,
     active: bool,
     error: Option<String>,
+    /// Debrid route only: account name, provider fetch progress (0–100) and file i/n.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debrid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debrid_progress: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DebridServiceView {
+    id: String,
+    label: String,
+    /// A key is configured (env or settings). The key itself is never exposed.
+    configured: bool,
+    /// Names of the user's accounts for this provider (pass one as `debrid`).
+    accounts: Vec<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct DebridServicesOut {
+    services: Vec<DebridServiceView>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -86,8 +116,20 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn job_view(job: &Job) -> JobToolView {
+/// Account names by id, read once per tool call.
+fn account_names() -> std::collections::HashMap<String, String> {
+    torrenter::credentials::accounts()
+        .into_iter()
+        .map(|account| (account.id, account.name))
+        .collect()
+}
+
+fn job_view(job: &Job, names: &std::collections::HashMap<String, String>) -> JobToolView {
     let error = job.snapshot.error();
+    let debrid = job
+        .debrid
+        .as_ref()
+        .map(|debrid| (debrid.account.clone(), debrid.view()));
     JobToolView {
         id: job.id,
         kind: job.kind.as_str().to_string(),
@@ -108,6 +150,23 @@ fn job_view(job: &Job) -> JobToolView {
         finished: job.snapshot.is_done(),
         active: job.snapshot.is_active(),
         error,
+        debrid: debrid.as_ref().map(|(account, _)| {
+            names
+                .get(account)
+                .cloned()
+                .unwrap_or_else(|| account.clone())
+        }),
+        debrid_progress: debrid
+            .as_ref()
+            .map(|(_, state)| f32::from(state.remote_permille) / 10.0),
+        file_index: debrid
+            .as_ref()
+            .filter(|(_, state)| state.file_index > 0)
+            .map(|(_, state)| state.file_index),
+        file_count: debrid
+            .as_ref()
+            .filter(|(_, state)| !state.files.is_empty())
+            .map(|(_, state)| state.files.len()),
     }
 }
 
@@ -156,6 +215,8 @@ impl Mcp {
         }
         let jobs_path = torrenter::jobs::jobs_path().unwrap_or_else(|_| dest.join("jobs.json"));
         let session = Session::open_leech(dest, jobs_path);
+        session.set_connections(config.connections);
+        session.set_debrid_remove_after(config.debrid_remove_after);
         let notices = Arc::new(Mutex::new(Vec::new()));
         match session.hydrate() {
             session::Hydrate::Empty | session::Hydrate::Loaded => {}
@@ -185,17 +246,65 @@ impl Mcp {
         self.session.dest().display().to_string()
     }
 
-    #[tool(description = "Queue a magnet download (leech)")]
+    #[tool(
+        description = "Queue a magnet download (leech). Pass `debrid` (an account name from debrid_services) only when the user asks to download through their debrid account."
+    )]
     fn queue_magnet(
         &self,
-        Parameters(MagnetArg { uri }): Parameters<MagnetArg>,
+        Parameters(MagnetArg { uri, debrid }): Parameters<MagnetArg>,
     ) -> Result<Json<QueueOut>, String> {
         if !is_valid_magnet_url(&uri) {
             return Err("Invalid magnet URL!".into());
         }
+        let via = match debrid.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            None => None,
+            Some(query) => Some(
+                torrenter::credentials::resolve(query)
+                    .filter(|account| Service::shipped().contains(&account.service))
+                    .map(|account| account.id)
+                    .ok_or_else(|| match Service::parse(query) {
+                        // A provider with no account: the user adds one.
+                        Some(service)
+                            if !torrenter::credentials::accounts()
+                                .iter()
+                                .any(|account| account.service == service) =>
+                        {
+                            format!("add a {} API key in settings first", service.label())
+                        }
+                        _ => format!(
+                            "no single debrid account matches {query:?}; see debrid_services"
+                        ),
+                    })?,
+            ),
+        };
         self.session
-            .queue(JobKind::Magnet, &uri)
+            .queue_with(JobKind::Magnet, &uri, via.as_deref())
             .map(|id| Json(QueueOut { id }))
+    }
+
+    #[tool(
+        description = "Debrid providers this build supports, with the names of the user's accounts for each (keys are never shown)"
+    )]
+    fn debrid_services(&self) -> Json<DebridServicesOut> {
+        let all = torrenter::credentials::accounts();
+        Json(DebridServicesOut {
+            services: Service::shipped()
+                .iter()
+                .map(|service| {
+                    let accounts: Vec<String> = all
+                        .iter()
+                        .filter(|account| account.service == *service)
+                        .map(|account| account.name.clone())
+                        .collect();
+                    DebridServiceView {
+                        id: service.id().into(),
+                        label: service.label().into(),
+                        configured: !accounts.is_empty(),
+                        accounts,
+                    }
+                })
+                .collect(),
+        })
     }
 
     #[tool(description = "Queue an HTTP(S) download")]
@@ -214,7 +323,14 @@ impl Mcp {
     #[tool(description = "List jobs and one-shot notices")]
     fn jobs(&self) -> Json<JobsOut> {
         Json(JobsOut {
-            jobs: self.session.jobs().iter().map(job_view).collect(),
+            jobs: {
+                let names = account_names();
+                self.session
+                    .jobs()
+                    .iter()
+                    .map(|job| job_view(job, &names))
+                    .collect()
+            },
             notices: take_notices(&self.notices),
         })
     }
@@ -237,7 +353,9 @@ impl Mcp {
         Ok("ok".into())
     }
 
-    #[tool(description = "Remove a job from the list")]
+    #[tool(
+        description = "Remove a job from the list (downloaded files, and any copy on a debrid account, are left as they are)"
+    )]
     fn remove(&self, Parameters(IdArg { id }): Parameters<IdArg>) -> Result<String, String> {
         if !self.session.has_job(id) {
             return Err("job gone".into());
@@ -246,7 +364,9 @@ impl Mcp {
         Ok("ok".into())
     }
 
-    #[tool(description = "Restart a job (leech, same dest)")]
+    #[tool(
+        description = "Restart a job (leech, same dest, same route; never removes anything from a debrid account)"
+    )]
     fn restart(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
@@ -264,7 +384,7 @@ impl ServerHandler for Mcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("torrenter", VERSION))
             .with_instructions(
-                "Magnet and HTTP downloads. Poll jobs. Do not run the GUI at the same time.",
+                "Magnet and HTTP downloads. A magnet can go through the user's own debrid service (queue_magnet `debrid`) only when they ask; keys are configured by the user, never through MCP. Poll jobs. Do not run the GUI at the same time.",
             )
     }
 }

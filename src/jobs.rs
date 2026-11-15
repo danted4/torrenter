@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::fsutil::{atomic_write, quarantine, recover_incomplete_save};
 use crate::progress::JobSnapshot;
 use crate::update::config_path;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
@@ -14,6 +17,8 @@ pub const HTTP_NOT_RESUMABLE: &str = "HTTP download cannot resume; restart to st
 pub enum JobKind {
     Magnet,
     Http,
+    /// A magnet routed through a debrid provider (downloads over HTTP).
+    Debrid,
 }
 
 impl JobKind {
@@ -21,6 +26,7 @@ impl JobKind {
         match self {
             Self::Magnet => "magnet",
             Self::Http => "http",
+            Self::Debrid => "debrid",
         }
     }
 
@@ -28,6 +34,7 @@ impl JobKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "magnet" => Some(Self::Magnet),
             "http" => Some(Self::Http),
+            "debrid" => Some(Self::Debrid),
             _ => None,
         }
     }
@@ -36,11 +43,17 @@ impl JobKind {
         match self {
             Self::Magnet => "MAGNET",
             Self::Http => "HTTP",
+            Self::Debrid => "DEBRID",
         }
+    }
+
+    /// Magnet input (plain or via a debrid provider).
+    pub fn takes_magnet(self) -> bool {
+        matches!(self, Self::Magnet | Self::Debrid)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedJob {
     pub id: u64,
@@ -63,13 +76,71 @@ pub struct PersistedJob {
     pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// HTTP parts this job was created with (resume needs the same split).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_count: Option<u8>,
+    /// Debrid route: provider id (`torbox`, …). Never a key or a link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Debrid route: the account id (a named key; never the key). Missing on
+    /// jobs saved before accounts, which used the provider id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Debrid route: the provider's id for this torrent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    /// Debrid route: torrenter added it, so "remove after download" may delete it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub added_by_us: bool,
+    /// Debrid route: files reported by the provider (ids and relative paths only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PersistedFile>,
+    /// Fields written by newer builds, kept so a rewrite does not drop them.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedFile {
+    pub id: String,
+    /// Relative path inside the job folder, already sanitized.
+    pub path: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct JobListFile {
     #[serde(default)]
-    jobs: Vec<PersistedJob>,
+    jobs: Vec<Value>,
+}
+
+/// Jobs this build understands, plus records of kinds it does not (written by a
+/// newer build). Foreign records are written back untouched on every save.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct JobList {
+    pub jobs: Vec<PersistedJob>,
+    pub foreign: Vec<Value>,
+}
+
+impl JobList {
+    /// Highest id across known and foreign records, so new ids never collide.
+    pub fn max_id(&self) -> u64 {
+        let foreign = self
+            .foreign
+            .iter()
+            .filter_map(|value| value.get("id").and_then(Value::as_u64));
+        self.jobs
+            .iter()
+            .map(|job| job.id)
+            .chain(foreign)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +152,7 @@ pub enum RestoreAction {
 
 #[derive(Debug)]
 pub enum LoadJobs {
-    Loaded(Vec<PersistedJob>),
+    Loaded(JobList),
     Empty,
     Corrupt(String),
 }
@@ -116,12 +187,7 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
         }
     };
     match serde_json::from_slice::<JobListFile>(&bytes) {
-        Ok(file) => LoadJobs::Loaded(
-            file.jobs
-                .into_iter()
-                .filter(PersistedJob::is_valid)
-                .collect(),
-        ),
+        Ok(file) => LoadJobs::Loaded(split_records(file.jobs)),
         Err(error) => {
             quarantine(path);
             LoadJobs::Corrupt(error.to_string())
@@ -129,12 +195,46 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
     }
 }
 
+/// Records this build can run become jobs. Anything else with an id (an
+/// unknown kind, a debrid service this build lacks, a field shape from a newer
+/// build) is kept as-is and written back untouched, so a newer build still
+/// finds it. One bad record never quarantines the file; records without an id
+/// cannot be tracked and are dropped.
+fn split_records(records: Vec<Value>) -> JobList {
+    let mut list = JobList::default();
+    for record in records {
+        let job = serde_json::from_value::<PersistedJob>(record.clone())
+            .ok()
+            .filter(PersistedJob::is_valid);
+        match job {
+            Some(job) => list.jobs.push(job),
+            None => {
+                if record
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|id| id > 0)
+                {
+                    list.foreign.push(record);
+                }
+            }
+        }
+    }
+    list
+}
+
 pub fn save_jobs_to(path: &Path, jobs: &[PersistedJob]) -> Result<()> {
-    let file = JobListFile {
-        jobs: jobs.to_vec(),
-    };
+    save_job_list_to(path, jobs, &[])
+}
+
+pub fn save_job_list_to(path: &Path, jobs: &[PersistedJob], foreign: &[Value]) -> Result<()> {
+    let mut records = Vec::with_capacity(jobs.len() + foreign.len());
+    for job in jobs {
+        records.push(serde_json::to_value(job).context("failed to serialize jobs")?);
+    }
+    records.extend(foreign.iter().cloned());
+    let file = JobListFile { jobs: records };
     let bytes = serde_json::to_vec_pretty(&file).context("failed to serialize jobs")?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes, false)
 }
 
 impl PersistedJob {
@@ -149,6 +249,14 @@ impl PersistedJob {
         match self.kind_id() {
             Some(JobKind::Magnet) => is_valid_magnet_url(&self.source),
             Some(JobKind::Http) => is_valid_download_url(&self.source),
+            Some(JobKind::Debrid) => {
+                is_valid_magnet_url(&self.source)
+                    && self
+                        .service
+                        .as_deref()
+                        .and_then(crate::debrid::Service::parse)
+                        .is_some()
+            }
             None => false,
         }
     }
@@ -175,6 +283,8 @@ impl PersistedJob {
                     RestoreAction::Start
                 }
             }
+            // The runner re-checks every file and can fetch again from the provider.
+            Some(JobKind::Debrid) => RestoreAction::Start,
             Some(JobKind::Magnet) => {
                 if self.downloaded > 0 && !present {
                     RestoreAction::Missing
@@ -234,55 +344,6 @@ impl PersistedJob {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).with_context(|| format!("failed to write {}", tmp.display()))?;
-    replace_file(&tmp, path)
-}
-
-/// POSIX rename replaces. Windows cannot rename over an existing file, so the
-/// live file is moved aside only for that replace, then restored if the new
-/// name fails. Never unlink the live file first.
-fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    if cfg!(windows) && to.exists() {
-        let backup = to.with_extension("json.prev");
-        let _ = std::fs::remove_file(&backup);
-        std::fs::rename(to, &backup)
-            .with_context(|| format!("failed to move aside {}", to.display()))?;
-        if let Err(error) = std::fs::rename(from, to) {
-            let _ = std::fs::rename(&backup, to);
-            return Err(error).with_context(|| format!("failed to replace {}", to.display()));
-        }
-        let _ = std::fs::remove_file(&backup);
-        return Ok(());
-    }
-    std::fs::rename(from, to).with_context(|| format!("failed to replace {}", to.display()))
-}
-
-fn recover_incomplete_save(path: &Path) {
-    if path.exists() {
-        return;
-    }
-    for aside in [
-        path.with_extension("json.tmp"),
-        path.with_extension("json.prev"),
-    ] {
-        if aside.exists() && std::fs::rename(&aside, path).is_ok() {
-            return;
-        }
-    }
-}
-
-fn quarantine(path: &Path) {
-    let bak = path.with_extension("json.bak");
-    let _ = std::fs::remove_file(&bak);
-    let _ = std::fs::rename(path, bak);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +367,7 @@ mod tests {
             status: status.into(),
             paused: status == "paused",
             error: None,
+            ..Default::default()
         }
     }
 
@@ -316,16 +378,85 @@ mod tests {
         let job = sample("magnet", "downloading", 10);
         save_jobs_to(&path, std::slice::from_ref(&job)).unwrap();
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![job]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![job]),
             other => panic!("expected loaded, got {other:?}"),
         }
-        let parsed: JobListFile = serde_json::from_str(
-            r#"{"jobs":[{"id":2,"kind":"http","source":"https://example.com/a","dest":"/tmp/a","extra":true}]}"#,
+        let parsed: PersistedJob = serde_json::from_str(
+            r#"{"id":2,"kind":"http","source":"https://example.com/a","dest":"/tmp/a","extra":true}"#,
         )
         .unwrap();
-        assert_eq!(parsed.jobs[0].id, 2);
-        assert!(!parsed.jobs[0].paused);
-        assert_eq!(parsed.jobs[0].downloaded, 0);
+        assert_eq!(parsed.id, 2);
+        assert!(!parsed.paused);
+        assert_eq!(parsed.downloaded, 0);
+        // Unknown fields survive a rewrite.
+        let back = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(back["extra"], Value::Bool(true));
+    }
+
+    #[test]
+    fn unrunnable_records_survive_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        std::fs::write(
+            &path,
+            r#"{"jobs":[
+                {"id":7,"kind":"future","source":"x","dest":"/tmp/a","newField":{"a":1}},
+                {"id":3,"kind":"http","source":"https://example.com/a","dest":"/tmp/a"},
+                {"id":4,"kind":"http","source":"https://example.com/b","dest":"/tmp/a","downloaded":"oops"},
+                {"id":9,"kind":"debrid","source":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567","dest":"/tmp/a","service":"newdebrid"},
+                {"kind":"http","source":"https://example.com/c","dest":"/tmp/a"}
+            ]}"#,
+        )
+        .unwrap();
+        let list = match load_jobs_from(&path) {
+            LoadJobs::Loaded(list) => list,
+            other => panic!("expected loaded, got {other:?}"),
+        };
+        assert_eq!(list.jobs.len(), 1, "only the runnable record is a job");
+        assert_eq!(
+            list.foreign.len(),
+            3,
+            "future kind, newer field shape and unknown service are kept; no id is dropped"
+        );
+        assert_eq!(list.max_id(), 9);
+        save_job_list_to(&path, &list.jobs, &list.foreign).unwrap();
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let kinds: Vec<_> = raw["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|job| job["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, ["http", "future", "http", "debrid"]);
+        assert_eq!(raw["jobs"][1]["newField"]["a"], 1);
+        assert_eq!(raw["jobs"][2]["downloaded"], "oops");
+        assert_eq!(raw["jobs"][3]["service"], "newdebrid");
+    }
+
+    #[test]
+    fn debrid_fields_roundtrip_without_links_or_keys() {
+        let job = PersistedJob {
+            part_count: Some(8),
+            service: Some("torbox".into()),
+            remote_id: Some("123".into()),
+            added_by_us: true,
+            files: vec![PersistedFile {
+                id: "0".into(),
+                path: "Album/01.flac".into(),
+                size: 10,
+                done: false,
+            }],
+            ..sample("magnet", "downloading", 0)
+        };
+        let text = serde_json::to_string(&job).unwrap();
+        assert!(text.contains("\"remoteId\":\"123\""));
+        assert!(text.contains("\"addedByUs\":true"));
+        let back: PersistedJob = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, job);
+        let plain = serde_json::to_string(&sample("http", "queued", 0)).unwrap();
+        assert!(
+            !plain.contains("service") && !plain.contains("addedByUs") && !plain.contains("files")
+        );
     }
 
     #[test]
@@ -340,7 +471,7 @@ mod tests {
         assert!(path.exists());
         assert!(!path.with_extension("json.tmp").exists());
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![second]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![second]),
             other => panic!("expected loaded, got {other:?}"),
         }
     }
@@ -354,7 +485,7 @@ mod tests {
         std::fs::rename(&path, path.with_extension("json.tmp")).unwrap();
         assert!(!path.exists());
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert_eq!(jobs, vec![job]),
+            LoadJobs::Loaded(list) => assert_eq!(list.jobs, vec![job]),
             other => panic!("expected recovered, got {other:?}"),
         }
         assert!(path.exists());
@@ -384,7 +515,7 @@ mod tests {
         )
         .unwrap();
         match load_jobs_from(&path) {
-            LoadJobs::Loaded(jobs) => assert!(jobs.is_empty()),
+            LoadJobs::Loaded(list) => assert!(list.jobs.is_empty()),
             other => panic!("expected loaded empty, got {other:?}"),
         }
     }

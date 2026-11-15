@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::debrid::{check_account, Secret, Service};
 use crate::identity;
 use crate::jobs::JobKind;
-use crate::session::{self, Job, Session};
+use crate::session::{self, Job, Route, Session};
 
 #[uniffi::export]
 pub fn banner() -> String {
@@ -36,6 +37,8 @@ impl From<String> for EngineError {
 pub enum Kind {
     Magnet,
     Http,
+    /// A magnet routed through a debrid provider.
+    Debrid,
 }
 
 impl From<JobKind> for Kind {
@@ -43,6 +46,7 @@ impl From<JobKind> for Kind {
         match kind {
             JobKind::Magnet => Self::Magnet,
             JobKind::Http => Self::Http,
+            JobKind::Debrid => Self::Debrid,
         }
     }
 }
@@ -52,6 +56,7 @@ impl From<Kind> for JobKind {
         match kind {
             Kind::Magnet => Self::Magnet,
             Kind::Http => Self::Http,
+            Kind::Debrid => Self::Debrid,
         }
     }
 }
@@ -77,11 +82,55 @@ pub struct JobView {
     pub finished: bool,
     pub active: bool,
     pub error: Option<String>,
+    /// Debrid route only: service id (`torbox`, …).
+    pub service: Option<String>,
+    /// Provider fetch progress, 0–1000, while the service fetches.
+    pub remote_permille: u16,
+    /// 1-based file being downloaded and the file count (0 before downloading).
+    pub file_index: u32,
+    pub file_count: u32,
+    /// Debrid route only: the account id the job runs through.
+    #[uniffi(default = None)]
+    pub account: Option<String>,
+}
+
+/// A debrid service this build offers.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ServiceView {
+    pub id: String,
+    pub label: String,
+}
+
+/// Result of a settings "Test": never contains the key.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AccountView {
+    pub premium: bool,
+    pub expires: Option<String>,
+}
+
+fn service_from(id: &str) -> Result<Service, EngineError> {
+    Service::parse(id)
+        .filter(|service| Service::shipped().contains(service))
+        .ok_or_else(|| EngineError::Failed {
+            msg: format!("unknown debrid service {id}"),
+        })
+}
+
+#[uniffi::export]
+pub fn debrid_services() -> Vec<ServiceView> {
+    Service::shipped()
+        .iter()
+        .map(|service| ServiceView {
+            id: service.id().into(),
+            label: service.label().into(),
+        })
+        .collect()
 }
 
 impl JobView {
     fn from_job(job: &Job) -> Self {
         let error = job.snapshot.error();
+        let debrid = job.debrid.as_ref().map(|d| d.view());
         Self {
             id: job.id,
             kind: job.kind.into(),
@@ -102,6 +151,17 @@ impl JobView {
             finished: job.snapshot.is_done(),
             active: job.snapshot.is_active(),
             error,
+            service: job.debrid.as_ref().map(|d| d.service.id().to_string()),
+            account: job.debrid.as_ref().map(|d| d.account.clone()),
+            remote_permille: debrid.as_ref().map(|d| d.remote_permille).unwrap_or(0),
+            file_index: debrid
+                .as_ref()
+                .map(|d| u32::try_from(d.file_index).unwrap_or(u32::MAX))
+                .unwrap_or(0),
+            file_count: debrid
+                .as_ref()
+                .map(|d| u32::try_from(d.files.len()).unwrap_or(u32::MAX))
+                .unwrap_or(0),
         }
     }
 }
@@ -115,9 +175,108 @@ pub struct Engine {
 impl Engine {
     #[uniffi::constructor]
     pub fn open(dest: String, jobs_path: String, seed: bool) -> Arc<Self> {
-        Arc::new(Self {
-            session: Session::open(PathBuf::from(dest), PathBuf::from(jobs_path), seed),
-        })
+        let session = Session::open(PathBuf::from(dest), PathBuf::from(jobs_path), seed);
+        // Apps keep keys in the Keystore / Keychain and hand them over.
+        session.use_memory_keys();
+        Arc::new(Self { session })
+    }
+
+    /// Hand a named account's key from the platform keychain to the engine
+    /// (memory only), or `None` to forget it. `id` is the app's stable account
+    /// id; call before `hydrate` so restored jobs can start.
+    pub fn set_debrid_account(
+        &self,
+        id: String,
+        service: String,
+        key: Option<String>,
+    ) -> Result<(), EngineError> {
+        let service = service_from(&service)?;
+        self.session
+            .set_debrid_account(&id, service, key.and_then(Secret::new));
+        Ok(())
+    }
+
+    pub fn has_account(&self, id: String) -> bool {
+        self.session.has_account(&id)
+    }
+
+    /// Settings "Test": blocking network call — run it off the UI thread.
+    pub fn debrid_account(&self, service: String, key: String) -> Result<AccountView, EngineError> {
+        let service = service_from(&service)?;
+        let key = Secret::new(key).ok_or_else(|| EngineError::Failed {
+            msg: "empty key".into(),
+        })?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| EngineError::Failed {
+                msg: error.to_string(),
+            })?;
+        runtime
+            .block_on(check_account(service, &key))
+            .map(|account| AccountView {
+                premium: account.premium,
+                expires: account.expires,
+            })
+            .map_err(|error| EngineError::Failed {
+                msg: error.to_string(),
+            })
+    }
+
+    /// Queue a magnet through a debrid account (its id).
+    pub fn queue_debrid(&self, source: String, account: String) -> Result<u64, EngineError> {
+        self.session
+            .queue_with(JobKind::Magnet, &source, Some(&account))
+            .map_err(Into::into)
+    }
+
+    /// Restart re-routed: `account = None` downloads from peers ("as
+    /// torrent"). `remove_from_service` is the answer to
+    /// `reroute_asks_about_remote`; pass false when it did not ask.
+    pub fn restart_route(
+        &self,
+        id: u64,
+        account: Option<String>,
+        seed: bool,
+        dest: String,
+        remove_from_service: bool,
+    ) -> Result<u64, EngineError> {
+        let route = match account {
+            Some(account) => Route::Via(account),
+            None => Route::Peers,
+        };
+        self.session
+            .restart_with(id, route, seed, PathBuf::from(dest), remove_from_service)
+            .map_err(Into::into)
+    }
+
+    /// This re-route should ask "also remove it from the service?" first
+    /// (the job leaves a service holding a torrent torrenter added).
+    pub fn reroute_asks_about_remote(&self, id: u64, account: Option<String>) -> bool {
+        let route = match account {
+            Some(account) => Route::Via(account),
+            None => Route::Peers,
+        };
+        self.session.reroute_asks_about_remote(id, &route)
+    }
+
+    /// Connections per download for new jobs (`None` = Auto = 4).
+    pub fn set_connections(&self, parts: Option<u8>) {
+        self.session.set_connections(parts);
+    }
+
+    pub fn set_debrid_remove_after(&self, enabled: bool) {
+        self.session.set_debrid_remove_after(enabled);
+    }
+
+    /// Clearing this job should ask "also remove it from the service?".
+    pub fn clear_asks_about_remote(&self, id: u64) -> bool {
+        self.session.clear_asks_about_remote(id)
+    }
+
+    /// Clear the job and delete its torrent from the service (best effort).
+    pub fn remove_with_remote(&self, id: u64) {
+        self.session.remove_with_remote(id);
     }
 
     pub fn hydrate(&self) -> Result<(), EngineError> {
@@ -216,6 +375,8 @@ mod tests {
             up_speed: 0.0,
             seed: false,
             dest: PathBuf::from("/tmp/films"),
+            part_count: 4,
+            debrid: None,
         }
     }
 
@@ -231,6 +392,8 @@ mod tests {
         assert!(view.active);
         assert!(!view.paused);
         assert!(view.error.is_none());
+        assert!(view.service.is_none());
+        assert_eq!(view.file_count, 0);
     }
 
     #[test]
@@ -246,6 +409,43 @@ mod tests {
         engine.persist(false);
         engine.persist(true);
         assert!(!engine.any_active());
+    }
+
+    #[test]
+    fn engine_keeps_keys_in_memory_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(
+            dir.path().display().to_string(),
+            dir.path().join("jobs.json").display().to_string(),
+            false,
+        );
+        let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string();
+        assert!(!engine.has_account("torbox-1a2b3c".into()));
+        let error = engine
+            .queue_debrid(magnet.clone(), "torbox".into())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("add a TorBox API key"),
+            "{error}"
+        );
+        engine
+            .set_debrid_account("torbox-1a2b3c".into(), "torbox".into(), Some("k".into()))
+            .unwrap();
+        assert!(engine.has_account("torbox-1a2b3c".into()));
+        // A job saved before accounts names the provider: its only account.
+        assert!(engine.has_account("torbox".into()));
+        engine
+            .set_debrid_account("torbox-1a2b3c".into(), "torbox".into(), None)
+            .unwrap();
+        assert!(!engine.has_account("torbox-1a2b3c".into()));
+        assert!(engine
+            .set_debrid_account("x".into(), "nope".into(), Some("k".into()))
+            .is_err());
+        assert_eq!(debrid_services()[0].id, "torbox");
+        assert!(
+            !dir.path().join("credentials.json").exists(),
+            "mobile never writes a credentials file"
+        );
     }
 
     #[test]

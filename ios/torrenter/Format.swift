@@ -37,7 +37,31 @@ func formatEta(_ seconds: Double?) -> String {
     return plural(whole, "second")
 }
 
-func jobStatsLine(_ job: JobView) -> String {
+/// The debrid service is still fetching (before files download).
+func jobIsFetching(_ job: JobView) -> Bool {
+    job.service != nil && ["fetching", "queued", "starting"].contains(job.status)
+}
+
+func serviceLabel(_ id: String?) -> String {
+    guard let id else { return "" }
+    return debridServices().first { $0.id == id }?.label ?? id
+}
+
+/// The job's debrid account name, or its provider's when unknown.
+func jobRouteName(_ job: JobView, names: [String: String]) -> String {
+    job.account.flatMap { names[$0] } ?? serviceLabel(job.service)
+}
+
+/// Row badge: MAGNET, HTTP, or the debrid phase (by account name).
+func jobBadge(_ job: JobView, names: [String: String] = [:]) -> String {
+    if job.service != nil {
+        let name = jobRouteName(job, names: names)
+        return jobIsFetching(job) ? "MAGNET → \(name)" : "HTTP · via \(name)"
+    }
+    return job.kind == .http ? "HTTP" : "MAGNET"
+}
+
+func jobStatsLine(_ job: JobView, names: [String: String] = [:]) -> String {
     let downloaded = job.downloaded
     let total = job.total
     let eta: String
@@ -45,6 +69,17 @@ func jobStatsLine(_ job: JobView) -> String {
         eta = formatEta(Double(total - downloaded) / job.speed)
     } else {
         eta = "N/A"
+    }
+    if job.service != nil {
+        if jobIsFetching(job) {
+            let pct = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), Double(job.remotePermille) / 10.0)
+            return "\(job.status)  \(jobRouteName(job, names: names)) fetching \(pct)%"
+        }
+        let files = job.fileCount > 0 ? "  file \(max(job.fileIndex, 1))/\(job.fileCount)" : ""
+        return "\(job.status)\(files)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"
+    }
+    if job.kind == .http {
+        return "\(job.status)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"
     }
     let sharing = job.kind == .magnet && job.seed
     let seeding = sharing && job.active && total > 0 && downloaded >= total
@@ -60,7 +95,12 @@ func jobStatsLine(_ job: JobView) -> String {
 
 func jobBarFraction(_ job: JobView) -> Float? {
     let status = job.status
-    if status == "queued" || status == "starting" || status.contains("Initializing") {
+    if job.service != nil, status == "fetching" {
+        return Float(job.remotePermille) / 1000
+    }
+    // Waiting phases with no meaningful percentage: an indeterminate bar.
+    let waiting = ["queued", "starting", "fetching metadata", "connecting to peers"]
+    if waiting.contains(status) || status.contains("Initializing") {
         return nil
     }
     if job.total <= 1, job.downloaded > job.total {

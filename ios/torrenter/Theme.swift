@@ -12,7 +12,7 @@ enum ThemeId: String, CaseIterable {
     }
 }
 
-struct Palette {
+struct Palette: Equatable {
     let bg: Color
     let row: Color
     let rowAlt: Color
@@ -71,6 +71,15 @@ func themePalette(_ id: ThemeId) -> Palette {
     }
 }
 
+/// A named key for one debrid provider; a provider can have several.
+struct DebridAccount: Codable, Identifiable, Equatable {
+    /// Stable id the engine, jobs and the remembered route use. Keys saved
+    /// before accounts existed use the provider id.
+    let id: String
+    var name: String
+    let service: String
+}
+
 enum Prefs {
     static let themeKey = "theme"
 
@@ -80,6 +89,55 @@ enum Prefs {
 
     static func saveTheme(_ id: ThemeId) {
         UserDefaults.standard.set(id.rawValue, forKey: themeKey)
+    }
+
+    static let debridRouteKey = "debridRoute"
+    static let connectionsKey = "connections"
+    static let removeAfterKey = "debridRemoveAfter"
+
+    /// Remembered debrid account id for magnet jobs; nil is default (peers).
+    static func debridRoute() -> String? {
+        UserDefaults.standard.string(forKey: debridRouteKey)
+    }
+
+    static func saveDebridRoute(_ id: String?) {
+        if let id {
+            UserDefaults.standard.set(id, forKey: debridRouteKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: debridRouteKey)
+        }
+    }
+
+    /// Connections per download; 0 is Auto (4).
+    static func connections() -> Int {
+        UserDefaults.standard.integer(forKey: connectionsKey)
+    }
+
+    static func saveConnections(_ parts: Int) {
+        UserDefaults.standard.set(parts, forKey: connectionsKey)
+    }
+
+    static func removeAfter() -> Bool {
+        UserDefaults.standard.bool(forKey: removeAfterKey)
+    }
+
+    static func saveRemoveAfter(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: removeAfterKey)
+    }
+
+    static let accountsKey = "debridAccounts"
+
+    /// Debrid accounts (names and providers only; keys live in the Keychain
+    /// under each account's id).
+    static func accounts() -> [DebridAccount] {
+        guard let data = UserDefaults.standard.data(forKey: accountsKey) else { return [] }
+        return (try? JSONDecoder().decode([DebridAccount].self, from: data)) ?? []
+    }
+
+    static func saveAccounts(_ accounts: [DebridAccount]) {
+        if let data = try? JSONEncoder().encode(accounts) {
+            UserDefaults.standard.set(data, forKey: accountsKey)
+        }
     }
 
     static let keepAliveKey = "keepAlive"

@@ -12,13 +12,17 @@ use librqbit::{
 
 use crate::progress::{
     check_stop, is_stopped, output_lock, watch_cli_controls, JobSnapshot, ProgressHandle,
+    CONNECTING_TO_PEERS, FETCHING_METADATA,
 };
 use crate::validate::is_valid_magnet_url;
 
-fn magnet_folder_lock(hash: &str) -> Arc<tokio::sync::Mutex<()>> {
-    output_lock(&format!("magnet:{hash}"))
+/// Locks on the normalised hash so base32 and hex spellings of one torrent share it.
+pub(crate) fn magnet_folder_lock(hash: &str) -> Arc<tokio::sync::Mutex<()>> {
+    output_lock(&format!("magnet:{}", normalize_info_hash(hash)))
 }
 
+/// The info hash as written in the magnet (lowercased). Folder names derive from
+/// this spelling, so it must stay stable for existing downloads.
 pub fn magnet_info_hash(magnet_uri: &str) -> Option<String> {
     magnet_uri.split(['?', '&']).find_map(|part| {
         let value = part.strip_prefix("xt=")?;
@@ -30,6 +34,37 @@ pub fn magnet_info_hash(magnet_uri: &str) -> Option<String> {
             None
         }
     })
+}
+
+/// 40-char lowercase hex identity of the torrent: use for comparisons, locks and
+/// debrid cache checks, never for folder names.
+pub fn magnet_info_hash_hex(magnet_uri: &str) -> Option<String> {
+    magnet_info_hash(magnet_uri).map(|hash| normalize_info_hash(&hash))
+}
+
+/// Base32 (32 chars, RFC 4648) becomes hex; anything else is lowercased as-is.
+pub(crate) fn normalize_info_hash(hash: &str) -> String {
+    let lower = hash.trim().to_ascii_lowercase();
+    if lower.len() != 32 {
+        return lower;
+    }
+    let mut bits: u64 = 0;
+    let mut nbits = 0u32;
+    let mut out = String::with_capacity(40);
+    for ch in lower.bytes() {
+        let value = match ch {
+            b'a'..=b'z' => ch - b'a',
+            b'2'..=b'7' => ch - b'2' + 26,
+            _ => return lower,
+        };
+        bits = (bits << 5) | u64::from(value);
+        nbits += 5;
+        while nbits >= 8 {
+            nbits -= 8;
+            out.push_str(&format!("{:02x}", (bits >> nbits) & 0xff));
+        }
+    }
+    out
 }
 
 pub fn magnet_display_name(magnet_uri: &str) -> Option<String> {
@@ -119,7 +154,9 @@ fn write_folder_marker(path: &Path, hash: &str) -> Result<()> {
 }
 
 fn folder_belongs_to(path: &Path, hash: &str) -> bool {
-    path.is_dir() && folder_marker(path).as_deref() == Some(hash)
+    path.is_dir()
+        && folder_marker(path)
+            .is_some_and(|marker| normalize_info_hash(&marker) == normalize_info_hash(hash))
 }
 
 fn folder_candidates(base: &str, hash: &str) -> Vec<String> {
@@ -252,9 +289,11 @@ pub async fn start_download_with(
     let info_hash = magnet_info_hash(magnet_uri).context("magnet has no info hash")?;
     let folder_lock = magnet_folder_lock(&info_hash);
     let _folder = folder_lock.lock().await;
+    // First the swarm sends the torrent's info (name, files, sizes): nothing
+    // to verify or download until it arrives.
     if !progress.is_paused() {
-        progress.set_status("verifying");
-        progress.set_message("Initializing torrent client & verifying data...");
+        progress.set_status(FETCHING_METADATA);
+        progress.set_message("Fetching torrent metadata from peers...");
     }
 
     // Compilation torrents open many files at once; macOS defaults are often 256.
@@ -370,6 +409,7 @@ async fn run_torrent(
     progress.set_message("0");
 
     let mut engine_paused = false;
+    let mut got_data = false;
     if progress.is_paused() {
         session
             .pause(&handle)
@@ -481,13 +521,28 @@ async fn run_torrent(
                     progress.set_position(position);
                     let (peers, uploaded, up_speed) = live_peers_and_upload(&stats, session);
                     let verifying = matches!(stats.state, TorrentStatsState::Initializing { .. });
+                    // "connecting to peers" until the first bytes arrive (or
+                    // data already on disk); then "downloading" for good, so
+                    // a slow stretch does not flip back.
+                    let down_speed = stats
+                        .live
+                        .as_ref()
+                        .map(|live| live.download_speed.as_bytes())
+                        .unwrap_or(0);
+                    if stats.progress_bytes > 0 || down_speed > 0 {
+                        got_data = true;
+                    }
                     if download_done && seed {
                         progress.set_status("seeding");
                         progress.set_seed_message(peers, uploaded, up_speed);
                     } else if verifying {
                         progress.set_status("verifying");
                     } else if !download_done {
-                        progress.set_status("downloading");
+                        progress.set_status(if got_data {
+                            "downloading"
+                        } else {
+                            CONNECTING_TO_PEERS
+                        });
                         progress.set_message(format!("{peers}"));
                     }
                 }
@@ -499,6 +554,34 @@ async fn run_torrent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HEX: &str = "c9e15763f722f23e98a29decdfae341b98d53056";
+    const B32: &str = "zhqvoy7xelzd5gfctxwn7lrudomnkmcw";
+
+    #[test]
+    fn base32_and_hex_hashes_normalise_to_the_same_hex() {
+        assert_eq!(normalize_info_hash(B32), HEX);
+        assert_eq!(normalize_info_hash(&B32.to_ascii_uppercase()), HEX);
+        assert_eq!(normalize_info_hash(HEX), HEX);
+        assert_eq!(normalize_info_hash(&HEX.to_ascii_uppercase()), HEX);
+        let b32 = format!("magnet:?xt=urn:btih:{}&dn=x", B32.to_ascii_uppercase());
+        let hex = format!("magnet:?xt=urn:btih:{HEX}");
+        assert_eq!(magnet_info_hash_hex(&b32).as_deref(), Some(HEX));
+        assert_eq!(magnet_info_hash_hex(&hex).as_deref(), Some(HEX));
+        // Folder naming keeps the magnet's own spelling.
+        assert_eq!(magnet_info_hash(&b32).as_deref(), Some(B32));
+    }
+
+    #[test]
+    fn folder_marker_matches_across_hash_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("x");
+        std::fs::create_dir(&folder).unwrap();
+        write_folder_marker(&folder, B32).unwrap();
+        assert!(folder_belongs_to(&folder, HEX));
+        assert!(folder_belongs_to(&folder, B32));
+        assert!(!folder_belongs_to(&folder, "0".repeat(40).as_str()));
+    }
 
     #[tokio::test]
     async fn rejects_invalid_magnet() {

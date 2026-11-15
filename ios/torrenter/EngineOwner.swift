@@ -7,7 +7,11 @@ import UIKit
 final class EngineOwner: ObservableObject {
     static let tickMs: UInt64 = 200
 
-    @Published private(set) var jobs: [JobView] = []
+    /// The job list lives in its own object so only the job rows redraw on
+    /// the 200 ms refresh; the rest of the screen (URL field, dropdowns,
+    /// settings) does not.
+    let jobList = JobList()
+    var jobs: [JobView] { jobList.jobs }
     @Published var notice: String?
     @Published private(set) var bannerText: String = ""
     @Published var keepAliveOn: Bool = Prefs.keepAlive() {
@@ -16,6 +20,34 @@ final class EngineOwner: ObservableObject {
             syncKeepAlive()
         }
     }
+    /// Remembered debrid account id for magnet jobs (nil = default, peers).
+    @Published var debridRoute: String? = Prefs.debridRoute() {
+        didSet { Prefs.saveDebridRoute(debridRoute) }
+    }
+    /// Connections per download; 0 = Auto (4).
+    @Published var connections: Int = Prefs.connections() {
+        didSet {
+            Prefs.saveConnections(connections)
+            engine?.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
+        }
+    }
+    @Published var removeAfter: Bool = Prefs.removeAfter() {
+        didSet {
+            Prefs.saveRemoveAfter(removeAfter)
+            engine?.setDebridRemoveAfter(enabled: removeAfter)
+        }
+    }
+    /// Debrid accounts with a key in the Keychain, in the order added.
+    @Published private(set) var accounts: [DebridAccount] = []
+    /// Last account check per account id ("premium until …" or the error).
+    @Published private(set) var accountNotes: [String: String] = [:]
+    /// A cleared debrid job that may still be on the service: ask first.
+    @Published var clearAsk: JobView?
+    /// "as torrent" on a debrid job torrenter added: ask before it leaves the service.
+    @Published var rerouteAsk: JobView?
+
+    /// The job the "also remove it from …?" question is about, if any.
+    var remoteAsk: JobView? { clearAsk ?? rerouteAsk }
 
     private var engine: Engine?
     private var ticker: Task<Void, Never>?
@@ -40,6 +72,18 @@ final class EngineOwner: ObservableObject {
             jobsPath: Paths.jobsFile().path,
             seed: false
         )
+        // Keys go in before hydrate so restored debrid jobs can start.
+        accounts = loadAccounts()
+        for account in accounts {
+            if let key = Keychain.read(account.id) {
+                try? created.setDebridAccount(id: account.id, service: account.service, key: key)
+            }
+        }
+        if let route = debridRoute, !accounts.contains(where: { $0.id == route }) {
+            debridRoute = nil
+        }
+        created.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
+        created.setDebridRemoveAfter(enabled: removeAfter)
         do {
             try created.hydrate()
         } catch {
@@ -65,7 +109,11 @@ final class EngineOwner: ObservableObject {
     func queue(kind: Kind, source: String) -> Bool {
         guard let engine else { return false }
         do {
-            _ = try engine.queue(kind: kind, source: source)
+            if kind == .magnet, let account = debridRoute {
+                _ = try engine.queueDebrid(source: source, account: account)
+            } else {
+                _ = try engine.queue(kind: kind, source: source)
+            }
             notice = nil
             refresh()
             return true
@@ -88,6 +136,191 @@ final class EngineOwner: ObservableObject {
     func remove(id: UInt64) {
         engine?.remove(id: id)
         refresh()
+    }
+
+    /// Clear button: ask first when the job is a debrid torrent we added that
+    /// never finished (it may still sit on the service).
+    func clear(job: JobView) {
+        if engine?.clearAsksAboutRemote(id: job.id) == true {
+            clearAsk = job
+        } else {
+            remove(id: job.id)
+        }
+    }
+
+    func clearConfirmed(job: JobView, removeRemote: Bool) {
+        if removeRemote {
+            engine?.removeWithRemote(id: job.id)
+        } else {
+            engine?.remove(id: job.id)
+        }
+        clearAsk = nil
+        refresh()
+    }
+
+    /// Answer to the remote question: finish the clear or the re-route. The
+    /// dialog passes what it showed (its binding may already be cleared).
+    func remoteAnswered(job: JobView, rerouting: Bool, removeRemote: Bool) {
+        remoteDismissed()
+        if rerouting {
+            restartAsTorrent(job: job, removeRemote: removeRemote)
+        } else {
+            clearConfirmed(job: job, removeRemote: removeRemote)
+        }
+    }
+
+    /// Dismissed without an answer: neither clear nor re-route.
+    func remoteDismissed() {
+        clearAsk = nil
+        rerouteAsk = nil
+    }
+
+    /// Stop waiting for the service and download the same torrent from peers.
+    func asTorrent(job: JobView) {
+        if engine?.rerouteAsksAboutRemote(id: job.id, account: nil) == true {
+            rerouteAsk = job
+        } else {
+            restartAsTorrent(job: job, removeRemote: false)
+        }
+    }
+
+    private func restartAsTorrent(job: JobView, removeRemote: Bool) {
+        guard let engine else { return }
+        do {
+            _ = try engine.restartRoute(
+                id: job.id,
+                account: nil,
+                seed: false,
+                dest: Paths.publicDest().path,
+                removeFromService: removeRemote
+            )
+            notice = nil
+            refresh()
+        } catch {
+            notice = engineMessage(error)
+        }
+    }
+
+    /// Accounts this build can use. A key saved per provider before accounts
+    /// existed becomes an account with that id. An entry leaves the stored list
+    /// only when its Keychain item is provably gone; a read that fails for
+    /// another reason (before first unlock) or an unknown provider never
+    /// removes it, and the shipped-provider filter applies in memory only.
+    private func loadAccounts() -> [DebridAccount] {
+        let stored = Self.storedAccounts()
+        var list = stored
+        for service in debridServices() where !list.contains(where: { $0.id == service.id }) {
+            if Keychain.exists(service.id) {
+                list.append(DebridAccount(id: service.id, name: service.label, service: service.id))
+            }
+        }
+        list = list.filter { Keychain.exists($0.id) }
+        if list != stored {
+            Prefs.saveAccounts(list)
+        }
+        let shipped = Set(debridServices().map(\.id))
+        return list.filter { shipped.contains($0.service) }
+    }
+
+    /// The saved list, one entry per id (a hand-edited list may repeat one).
+    private static func storedAccounts() -> [DebridAccount] {
+        var seen = Set<String>()
+        return Prefs.accounts().filter { seen.insert($0.id).inserted }
+    }
+
+    func account(_ id: String?) -> DebridAccount? {
+        guard let id else { return nil }
+        return accounts.first { $0.id == id }
+    }
+
+    /// "work (TorBox)", or just "TorBox" when the name is the provider's.
+    func accountTitle(_ job: JobView) -> String {
+        guard let account = account(job.account) else { return serviceLabel(job.service) }
+        let provider = serviceLabel(account.service)
+        return account.name == provider ? provider : "\(account.name) (\(provider))"
+    }
+
+    /// Account names by id, for job rows.
+    var accountNames: [String: String] {
+        Dictionary(accounts.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    /// The name a new account gets when none is typed: the provider's, then
+    /// "TorBox 2", …
+    func defaultName(service: String) -> String {
+        let base = serviceLabel(service)
+        if !nameTaken(base) {
+            return base
+        }
+        var n = 2
+        while nameTaken("\(base) \(n)") {
+            n += 1
+        }
+        return "\(base) \(n)"
+    }
+
+    /// Names are unique across providers, ignoring case.
+    func nameTaken(_ name: String) -> Bool {
+        let wanted = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return accounts.contains { $0.name.lowercased() == wanted }
+    }
+
+    /// Save a new account: the key to the Keychain, the name to settings.
+    /// Returns false (with a notice) when it could not be saved.
+    @discardableResult
+    func addAccount(service: String, name: String, key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, typed.isEmpty || !nameTaken(typed) else { return false }
+        let finalName = typed.isEmpty ? defaultName(service: service) : typed
+        var id = service
+        while accounts.contains(where: { $0.id == id }) || id == service {
+            id = "\(service)-\(String(format: "%06x", Int.random(in: 0 ..< 0xFFFFFF)))"
+        }
+        guard Keychain.save(id, key: trimmed) else {
+            notice = "could not save the key in the Keychain"
+            return false
+        }
+        try? engine?.setDebridAccount(id: id, service: service, key: trimmed)
+        let added = DebridAccount(id: id, name: finalName, service: service)
+        accounts.append(added)
+        // Edit the stored list so accounts this build hides are kept.
+        Prefs.saveAccounts(Self.storedAccounts().filter { $0.id != id } + [added])
+        testAccount(id: id, key: trimmed)
+        return true
+    }
+
+    func removeAccount(id: String) {
+        guard let account = account(id) else { return }
+        Keychain.delete(id)
+        try? engine?.setDebridAccount(id: id, service: account.service, key: nil)
+        accounts.removeAll { $0.id == id }
+        Prefs.saveAccounts(Self.storedAccounts().filter { $0.id != id })
+        accountNotes[id] = nil
+        if debridRoute == id {
+            debridRoute = nil
+        }
+    }
+
+    /// Ask the provider who the key belongs to, off the main thread.
+    func testAccount(id: String, key: String? = nil) {
+        guard let engine, let account = account(id), let key = key ?? Keychain.read(id) else { return }
+        accountNotes[id] = "checking…"
+        let service = account.service
+        Task.detached { [weak self] in
+            let note: String
+            do {
+                let result = try engine.debridAccount(service: service, key: key)
+                if result.premium {
+                    note = "premium" + (result.expires.map { " until \($0)" } ?? "")
+                } else {
+                    note = "key works, but the account is not premium"
+                }
+            } catch {
+                note = engineMessage(error)
+            }
+            await MainActor.run { self?.accountNotes[id] = note }
+        }
     }
 
     func restart(job: JobView) {
@@ -258,16 +491,29 @@ final class EngineOwner: ObservableObject {
     private func tick() {
         guard let engine else { return }
         let notices = engine.drainNotices()
-        if let last = notices.last {
+        if let last = notices.last, last != notice {
             notice = last
         }
         engine.persist(force: !engine.anyActive())
-        jobs = engine.jobs()
+        jobList.update(engine.jobs())
         syncKeepAlive()
     }
 
     private func refresh() {
-        jobs = engine?.jobs() ?? []
+        jobList.update(engine?.jobs() ?? [])
+    }
+}
+
+/// The live job list, observed only by the job rows.
+@MainActor
+final class JobList: ObservableObject {
+    @Published private(set) var jobs: [JobView] = []
+
+    /// Publish only real changes: every publish redraws its observers.
+    func update(_ next: [JobView]) {
+        if next != jobs {
+            jobs = next
+        }
     }
 }
 

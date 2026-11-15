@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# A newer push to the same PR or branch cancels the run it replaces. On main
+# every commit gets its own group, so each one's run finishes (a release
+# waits on main being green).
+concurrency:
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -75,6 +82,19 @@ jobs:
         run: |
           cargo ndk -P 30 -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
             build --locked --features ffi --release --lib
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+      - name: Kotlin unit tests and debug APK
+        run: gradle testDebugUnitTest assembleDebug
+        working-directory: android
 
   ios-xcframework:
     name: ios xcframework and swift
@@ -84,16 +104,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ios-xcframework
-      - name: TorrenterFFI.xcframework
-        run: cargo run --locked --features ios-xcframework --bin ios-xcframework
-      - name: Swift tests (iOS Simulator)
-        working-directory: ios
+      # Boot the simulator now, in the background, while Rust compiles.
+      - name: Boot iOS Simulator
         run: |
           set -euo pipefail
-          dest=$(python3 - <<'PY'
+          udid=$(python3 - <<'PY'
           import json, subprocess, sys
           data = json.loads(
               subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"])
@@ -103,11 +118,35 @@ jobs:
                   continue
               for device in devices:
                   if device.get("isAvailable") and "iPhone" in device.get("name", ""):
-                      print(f"platform=iOS Simulator,id={device['udid']}")
+                      print(device["udid"])
                       sys.exit(0)
           sys.exit("no available iPhone simulator")
           PY
           )
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          nohup xcrun simctl boot "$udid" >/dev/null 2>&1 &
+      # Its own key: a cache that matches exactly is never re-saved, and the
+      # old key holds release slices this job no longer builds.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-sim-debug
+      # CI tests on a simulator: build only that slice, unoptimised.
+      - name: TorrenterFFI.xcframework (simulator)
+        env:
+          TORRENTER_IOS_SIM_ONLY: "1"
+        run: cargo run --locked --features ios-xcframework --bin ios-xcframework
+      # The device slice is not linked in CI; type-check it so iPhone-only
+      # compile errors still fail the build.
+      - name: Check device target
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        run: cargo check --locked --features ffi --lib --target aarch64-apple-ios
+      - name: Swift tests (iOS Simulator)
+        working-directory: ios
+        run: |
+          set -euo pipefail
+          xcrun simctl bootstatus "$SIM_UDID" -b >/dev/null
+          dest="platform=iOS Simulator,id=$SIM_UDID"
           xcodebuild \
             -project torrenter.xcodeproj \
             -scheme torrenter \
