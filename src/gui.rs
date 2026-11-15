@@ -577,9 +577,6 @@ impl GuiApp {
         let picked = solid_popup_below(ui, popup_id, select, palette, |ui| {
             ui.set_min_width(select.rect.width().max(240.0));
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.vertical_centered(|ui| {
-                ui.label(ink("download magnets", 11.0, palette.dim));
-            });
             let mut picked = None;
             if menu_row(
                 ui,
