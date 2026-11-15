@@ -143,6 +143,8 @@ enum EngineCmd {
         remote_id: String,
         base: Option<Url>,
     },
+    /// A one-shot notice for every front (sent back as a job-less failure).
+    Notice(String),
 }
 
 struct DebridLaunch {
@@ -613,14 +615,7 @@ impl Session {
         inner.next_id += 1;
         let leave_remote = left_remote(&old, route)
             .filter(|_| remove_from_service)
-            .and_then(|(service, remote_id)| {
-                Some(EngineCmd::DeleteRemote {
-                    service,
-                    key: resolve_key(&inner, service)?,
-                    remote_id,
-                    base: inner.debrid_bases.get(&service).cloned(),
-                })
-            });
+            .map(|(service, remote_id)| delete_remote_cmd(&inner, service, remote_id));
         if let Some(cmd) = leave_remote {
             let _ = self.engine.send(cmd);
         }
@@ -714,12 +709,7 @@ impl Session {
                 if !state.added_by_us {
                     return None;
                 }
-                Some(EngineCmd::DeleteRemote {
-                    service: debrid.service,
-                    key: resolve_key(&inner, debrid.service)?,
-                    remote_id: state.remote_id?,
-                    base: inner.debrid_bases.get(&debrid.service).cloned(),
-                })
+                Some(delete_remote_cmd(&inner, debrid.service, state.remote_id?))
             })
         };
         self.remove(id);
@@ -809,8 +799,6 @@ fn duplicate_note(jobs: &[Job], kind: JobKind, source: &str) -> Option<String> {
     })
 }
 
-/// Memory first (mobile keychains, tests), then on desktop the env override and
-/// `credentials.json`.
 /// The provider torrent a re-route would leave behind and that is worth asking
 /// about: torrenter added it, the job is not done, and `route` leaves it.
 fn left_remote(job: &Job, route: Route) -> Option<(Service, String)> {
@@ -830,6 +818,26 @@ fn left_remote(job: &Job, route: Route) -> Option<(Service, String)> {
     Some((existing.service, state.remote_id?))
 }
 
+/// Delete a torrent from a provider the user said yes to. Without a key (it
+/// was removed since) nothing can be deleted, so say so instead of dropping it.
+fn delete_remote_cmd(inner: &Inner, service: Service, remote_id: String) -> EngineCmd {
+    match resolve_key(inner, service) {
+        Some(key) => EngineCmd::DeleteRemote {
+            service,
+            key,
+            remote_id,
+            base: inner.debrid_bases.get(&service).cloned(),
+        },
+        None => EngineCmd::Notice(format!(
+            "could not remove it from {}: no {} API key any more; it is still on the account",
+            service.label(),
+            service.label()
+        )),
+    }
+}
+
+/// Memory first (mobile keychains, tests), then on desktop the env override and
+/// `credentials.json`.
 fn resolve_key(inner: &Inner, service: Service) -> Option<Secret> {
     if let Some(key) = inner.keys.get(&service) {
         return Some(key.clone());
@@ -981,6 +989,9 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                             ),
                         });
                     }
+                }
+                EngineCmd::Notice(error) => {
+                    let _ = tx.send(EngineEvent::DownloadFailed { id: 0, error });
                 }
                 EngineCmd::Probe(specs) => {
                     let results = specs
@@ -1410,6 +1421,49 @@ mod tests {
                 fake.lock().unwrap().torrents.contains_key(&1),
                 "the job answered no keeps its torrent"
             );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removal_without_a_key_says_it_was_kept() {
+        use crate::debrid::torbox::tests::magnet;
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session.stop(id);
+            session.set_debrid_key(Service::TorBox, None);
+            assert!(session.reroute_asks_about_remote(id, Route::Peers));
+            let peers = session
+                .restart_with(id, Route::Peers, false, dir.path().join("dl"), true)
+                .unwrap();
+            session.stop(peers);
+            let mut notices = Vec::new();
+            wait_for(|| {
+                notices.extend(session.drain_events().into_iter().filter_map(
+                    |event| match event {
+                        SessionEvent::DownloadFailed { id: 0, error } => Some(error),
+                        _ => None,
+                    },
+                ));
+                !notices.is_empty()
+            });
+            assert!(notices[0].contains("no TorBox API key"), "{notices:?}");
+            assert!(fake.lock().unwrap().torrents.contains_key(&1));
         })
         .await
         .unwrap();
