@@ -125,9 +125,11 @@ jobs:
           )
           echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
           nohup xcrun simctl boot "$udid" >/dev/null 2>&1 &
+      # Its own key: a cache that matches exactly is never re-saved, and the
+      # old key holds release slices this job no longer builds.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ios-xcframework
+          key: ios-sim-debug
       # CI tests on a simulator: build only that slice, unoptimised.
       - name: TorrenterFFI.xcframework (simulator)
         env:
