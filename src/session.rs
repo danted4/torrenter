@@ -867,7 +867,9 @@ fn left_remote(job: &Job, route: &Route) -> Option<LeftRemote> {
 /// account's key (it was removed since) nothing can be deleted, so say so
 /// instead of dropping it.
 fn delete_remote_cmd(inner: &Inner, left: LeftRemote) -> EngineCmd {
-    match resolve_account(inner, &left.account) {
+    // Exactly the account the torrent lives on: never the provider fallback,
+    // whose key belongs to a different account and torrent list.
+    match exact_account(inner, &left.account) {
         Some((service, key)) => EngineCmd::DeleteRemote {
             service,
             key,
@@ -881,18 +883,22 @@ fn delete_remote_cmd(inner: &Inner, left: LeftRemote) -> EngineCmd {
     }
 }
 
-/// An account's provider and key: memory first (mobile keychains, tests),
-/// then on desktop `credentials.json` and the env overrides.
+/// An account's provider and key for running a job: the exact account, or
+/// for an id saved before accounts its provider's only account.
 fn resolve_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    exact_account(inner, id).or_else(|| legacy_account(inner, id))
+}
+
+/// Only the account with this id: memory first (mobile keychains, tests),
+/// then on desktop `credentials.json` and the env accounts.
+fn exact_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
     if let Some((service, key)) = inner.keys.get(id) {
         return Some((*service, key.clone()));
     }
     if inner.desktop_keys {
-        if let Some(found) = crate::credentials::account_key(id) {
-            return Some(found);
-        }
+        return crate::credentials::account_key(id);
     }
-    legacy_account(inner, id)
+    None
 }
 
 /// Jobs and routes saved before accounts name the provider (`torbox`). With
@@ -924,7 +930,7 @@ fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
     }
     Err(match Service::parse(id) {
         Some(service) => format!("add a {} API key in settings first", service.label()),
-        None => "that debrid account is gone; pick another in settings".into(),
+        None => "that debrid account's key is not available (removed, or not readable right now); check it in settings".into(),
     })
 }
 
@@ -937,7 +943,7 @@ fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
                     format!("add a {} API key in settings first", debrid.service.label())
                 } else {
                     format!(
-                        "this job's {} account is gone; add it again in settings or download it as a torrent",
+                        "this job's {} account key is not available (removed, or not readable right now); check it in settings or download it as a torrent",
                         debrid.service.label()
                     )
                 }
@@ -1503,6 +1509,55 @@ mod tests {
             assert!(
                 fake.lock().unwrap().torrents.contains_key(&1),
                 "the job answered no keeps its torrent"
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removal_never_borrows_another_accounts_key() {
+        use crate::debrid::torbox::tests::{magnet, KEY};
+        let dir = tempdir().unwrap();
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
+        let id = session
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| {
+                session
+                    .job(id)
+                    .unwrap()
+                    .debrid
+                    .unwrap()
+                    .view()
+                    .remote_id
+                    .is_some()
+            });
+            session.stop(id);
+            // The job's own account goes; another TorBox account remains. It
+            // could run a legacy job, but must never delete for this one.
+            session.set_debrid_key(Service::TorBox, None);
+            session.set_debrid_account("torbox-other", Service::TorBox, Secret::new(KEY));
+            assert!(session.clear_asks_about_remote(id));
+            session.remove_with_remote(id);
+            let mut notices = Vec::new();
+            wait_for(|| {
+                notices.extend(session.drain_events().into_iter().filter_map(
+                    |event| match event {
+                        SessionEvent::DownloadFailed { id: 0, error } => Some(error),
+                        _ => None,
+                    },
+                ));
+                !notices.is_empty()
+            });
+            assert!(
+                notices[0].contains("no API key for that account"),
+                "{notices:?}"
+            );
+            assert!(
+                fake.lock().unwrap().torrents.contains_key(&1),
+                "no delete reached the provider"
             );
         })
         .await

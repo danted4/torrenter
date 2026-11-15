@@ -428,7 +428,7 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | iOS: jobs stop when you leave | Expected after the ~20 s grace window; reopen and they restart. Turn on **keep alive** to keep downloading in the background |
 | iOS: VLC cannot see files | Open Files → On My iPhone → torrenter, or **share** on the idle row |
 | Debrid: "add a TorBox API key in settings first" | Add an account in settings, `torrenter debrid add torbox`, or set `TORRENTER_TORBOX_KEY` |
-| Debrid: "this job's TorBox account is gone" | The account it ran through was removed; add it again, or use **as torrent** |
+| Debrid: "this job's TorBox account key is not available" | The account it ran through was removed (add it again), or its key could not be read this launch (reopen the app); or use **as torrent** |
 | Debrid: "no single debrid account matches" (CLI / MCP) | Two accounts share that provider; pass the account name (`torrenter debrid list`) |
 | Debrid: "API key rejected" | Copy the key again from the service's account page; **Test** shows the service's own message |
 | Debrid: stuck at "fetching" | The service is still downloading it (or the torrent is dead); wait, or use **as torrent** to download from peers |
