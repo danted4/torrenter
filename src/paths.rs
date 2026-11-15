@@ -20,7 +20,28 @@ pub fn configured_dir(config: &AppConfig) -> Option<PathBuf> {
         .download_dir
         .as_ref()
         .filter(|path| !path.as_os_str().is_empty())
-        .cloned()
+        .map(|path| plain_path(path.clone()))
+}
+
+/// Windows `canonicalize` returns verbatim paths (`\\?\E:\folder`,
+/// `\\?\UNC\server\share`). Give back the everyday form people recognise
+/// (`E:\folder`, `\\server\share`); any other path, or a verbatim form with
+/// no plain equivalent (`\\?\Volume{…}`), is returned unchanged.
+pub fn plain_path(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if drive && (bytes.len() == 2 || bytes[2] == b'\\') {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 pub fn effective_dir(config: &AppConfig) -> PathBuf {
@@ -53,7 +74,9 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 pub fn persistable_dir(path: impl AsRef<Path>) -> Result<PathBuf> {
     let resolved = resolve_user_dir(path)?;
     ensure_dir(&resolved)?;
-    Ok(std::fs::canonicalize(&resolved).unwrap_or(resolved))
+    Ok(plain_path(
+        std::fs::canonicalize(&resolved).unwrap_or(resolved),
+    ))
 }
 
 #[cfg(test)]
@@ -96,6 +119,24 @@ mod tests {
             ..AppConfig::default()
         };
         assert!(configured_dir(&config).is_none());
+    }
+
+    #[test]
+    fn verbatim_windows_paths_display_plain() {
+        let plain = |text: &str| plain_path(PathBuf::from(text)).display().to_string();
+        assert_eq!(plain(r"\\?\E:\my\folder"), r"E:\my\folder");
+        assert_eq!(plain(r"\\?\C:\"), r"C:\");
+        assert_eq!(plain(r"\\?\UNC\nas\share\dl"), r"\\nas\share\dl");
+        // No plain equivalent, or already plain: unchanged.
+        assert_eq!(plain(r"\\?\Volume{abc}\dl"), r"\\?\Volume{abc}\dl");
+        assert_eq!(plain(r"E:\my\folder"), r"E:\my\folder");
+        assert_eq!(plain("/home/me/dl"), "/home/me/dl");
+        // A folder saved verbatim by an earlier build reads back plain.
+        let config = AppConfig {
+            download_dir: Some(PathBuf::from(r"\\?\E:\my\folder")),
+            ..AppConfig::default()
+        };
+        assert_eq!(effective_dir(&config), PathBuf::from(r"E:\my\folder"));
     }
 
     #[test]

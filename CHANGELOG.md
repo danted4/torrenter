@@ -22,6 +22,7 @@ All notable changes to this project are documented here.
 
 - The same torrent spelled with a base32 and a hex info hash now counts as one job and shares one folder lock.
 - Lowering the part count no longer leaves orphaned `.part-N` files in `.resume/`.
+- Windows: a picked download folder shows (and is saved) as `E:\folder` instead of the verbatim `\\?\E:\folder`; one saved that way earlier reads back plain.
 - Settings saved from two threads at once (an update check and a toggle), or by two torrenter processes (`torrenter debrid add` while the GUI is open), can no longer tear `config.json` or `credentials.json` and reset them.
 
 ## [3.7.1] - 2026-11-14
