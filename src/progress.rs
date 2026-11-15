@@ -107,6 +107,20 @@ fn styled_bar(bar: ProgressBar, total: u64) -> ProgressBar {
 }
 
 /// Shared counters the GUI polls while the download engines run.
+/// Magnet: the swarm is still sending the torrent's info (name, files).
+pub const FETCHING_METADATA: &str = "fetching metadata";
+/// Magnet: info known, peers found, no data yet.
+pub const CONNECTING_TO_PEERS: &str = "connecting to peers";
+
+/// Phases a job waits in before data flows; a resume returns to the same
+/// one rather than claiming "downloading".
+const WAITING_PHASES: [&str; 4] = [
+    FETCHING_METADATA,
+    CONNECTING_TO_PEERS,
+    "verifying",
+    "fetching",
+];
+
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub downloaded: AtomicU64,
@@ -118,6 +132,8 @@ pub struct JobSnapshot {
     paused: AtomicBool,
     stop: AtomicBool,
     status: Mutex<String>,
+    /// The waiting phase a pause interrupted, restored on resume.
+    before_pause: Mutex<Option<String>>,
     title: Mutex<String>,
     error: Mutex<Option<String>>,
 }
@@ -134,6 +150,7 @@ impl Default for JobSnapshot {
             paused: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             status: Mutex::new(String::from("queued")),
+            before_pause: Mutex::new(None),
             title: Mutex::new(String::new()),
             error: Mutex::new(None),
         }
@@ -216,18 +233,25 @@ impl JobSnapshot {
             return;
         }
         let was_paused = self.paused.fetch_xor(true, Ordering::Relaxed);
+        if !was_paused {
+            let current = self.status();
+            *mutex_lock(&self.before_pause) = WAITING_PHASES
+                .contains(&current.as_str())
+                .then_some(current);
+            self.set_status("paused");
+            return;
+        }
+        if let Some(waiting) = mutex_lock(&self.before_pause).take() {
+            self.set_status(waiting);
+            return;
+        }
         let total = self.total.load(Ordering::Relaxed);
         let downloaded = self.downloaded.load(Ordering::Relaxed);
-        let next = if was_paused {
-            if total > 0 && downloaded >= total {
-                "seeding"
-            } else {
-                "downloading"
-            }
+        self.set_status(if total > 0 && downloaded >= total {
+            "seeding"
         } else {
-            "paused"
-        };
-        self.set_status(next);
+            "downloading"
+        });
     }
 
     pub fn request_stop(&self) {
@@ -615,6 +639,25 @@ pub fn format_size(size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resume_returns_to_the_waiting_phase_it_paused() {
+        let snapshot = JobSnapshot::default();
+        snapshot.set_status(FETCHING_METADATA);
+        snapshot.toggle_pause();
+        assert_eq!(snapshot.status(), "paused");
+        snapshot.toggle_pause();
+        assert_eq!(snapshot.status(), FETCHING_METADATA);
+        // Once data flows, a pause and resume reads "downloading" as before.
+        snapshot.set_status("downloading");
+        snapshot.toggle_pause();
+        snapshot.toggle_pause();
+        assert_eq!(snapshot.status(), "downloading");
+        snapshot.set_status(CONNECTING_TO_PEERS);
+        snapshot.toggle_pause();
+        snapshot.toggle_pause();
+        assert_eq!(snapshot.status(), CONNECTING_TO_PEERS);
+    }
+
     use super::*;
 
     #[test]

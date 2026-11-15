@@ -69,4 +69,9 @@ final class FormatTests: XCTestCase {
         let orphan = job(kind: .debrid, status: "downloading", service: "torbox", account: "gone")
         XCTAssertEqual(jobBadge(orphan, names: names), "HTTP · via TorBox")
     }
+
+    func testWaitingPhasesShowAnIndeterminateBar() {
+        XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "fetching metadata")))
+        XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "connecting to peers")))
+    }
 }

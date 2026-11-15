@@ -156,7 +156,7 @@ No Rust/Cargo is needed at runtime. Building from source is in the [Development]
 
 ## Android
 
-Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`. Same engines and chrome as the desktop GUI: magnet launcher icon, phosphor / amber / ice / scarlet / violet, MAGNET ⇄ HTTP, share/leech (seed ON/OFF), verifying then downloading, queue of four. There is **no** in-app updater (the APK is not a desktop `torrenter-*` / `torrenter-gui-*` asset).
+Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`. Same engines and chrome as the desktop GUI: magnet launcher icon, phosphor / amber / ice / scarlet / violet, MAGNET ⇄ HTTP, share/leech (seed ON/OFF), fetching metadata, verifying, then downloading, queue of four. There is **no** in-app updater (the APK is not a desktop `torrenter-*` / `torrenter-gui-*` asset).
 
 1. Open the [latest GitHub Release](https://github.com/danted4/torrenter/releases/latest) and download `torrenter-android.apk` (debug-signed sideload, arm64 + x86_64). Or build it from this tree (see [Development](#development)):
 
@@ -178,7 +178,7 @@ No Rust/Cargo is needed on the phone. Building the APK is in the [Development](#
 
 ## iOS
 
-Sideload from this tree onto **your** iPhone — not the App Store, not a GitHub IPA. min **iOS 16**, arm64 device + simulator slice. Same engines and chrome as Android (magnet icon, phosphor / amber / ice / scarlet / violet, MAGNET ⇄ HTTP, verifying then downloading, queue of four) with three product cuts: **leech only** (no share toggle), **no background service** (Home keeps downloading for the ~20 s iOS grace window, then parks live jobs; reopening restarts them, unless **keep alive** is on), dest is **On My iPhone → torrenter** (`Documents/torrenter`). There is **no** in-app updater.
+Sideload from this tree onto **your** iPhone — not the App Store, not a GitHub IPA. min **iOS 16**, arm64 device + simulator slice. Same engines and chrome as Android (magnet icon, phosphor / amber / ice / scarlet / violet, MAGNET ⇄ HTTP, fetching metadata, verifying, then downloading, queue of four) with three product cuts: **leech only** (no share toggle), **no background service** (Home keeps downloading for the ~20 s iOS grace window, then parks live jobs; reopening restarts them, unless **keep alive** is on), dest is **On My iPhone → torrenter** (`Documents/torrenter`). There is **no** in-app updater.
 
 You need a **Mac**, **full Xcode** from the App Store (Command Line Tools are not enough), Rust 1.85+, and the iPhone on USB. A free Apple ID can sign to that device (the cert expires about every 7 days). Linux and Windows cannot produce an installable iOS app.
 
@@ -235,6 +235,7 @@ Debrid: `queue_magnet` takes an optional `debrid` account name (or a provider id
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
 | **Parallelism** | piece picker | byte-range parts: **connections** setting, Auto = 4 (1–16) |
 | **Resume** | librqbit on disk under `<dest>/<torrent-name>/` | `<dest>/.resume/` part files |
+| **Phases** | **fetching metadata** (the swarm sends the file list) → **verifying** (data already on disk, e.g. after a resume) → **connecting to peers** (until the first bytes) → **downloading** → **seeding** or **done**; the bar is indeterminate until data flows | **downloading** → **done** |
 | **Peers** | live count in the bar | `Peers: 0` |
 | **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |

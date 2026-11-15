@@ -715,7 +715,10 @@ private fun jobBarFraction(job: JobView): Float? {
     if (job.service != null && status == "fetching") {
         return job.remotePermille.toFloat() / 1000f
     }
-    if (status == "queued" || status == "starting" || status.contains("Initializing")) {
+    // Waiting phases with no meaningful percentage: an indeterminate bar.
+    if (status in setOf("queued", "starting", "fetching metadata", "connecting to peers") ||
+        status.contains("Initializing")
+    ) {
         return null
     }
     if (job.total <= 1uL && job.downloaded > job.total) {

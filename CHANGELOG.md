@@ -14,6 +14,7 @@ All notable changes to this project are documented here.
 
 ### Changed
 
+- Magnet rows name the waits before data flows: **fetching metadata** while the swarm sends the file list (was shown as "verifying"), and **connecting to peers** until the first bytes arrive (was "downloading" at 0 B). Both use an indeterminate bar, and resuming returns to the phase that was paused.
 - Theme moved from the mobile main screens and the desktop cog popup into the settings page.
 - HTTP rows no longer show a peer count.
 - `jobs.json` and `config.json` keep job records (unknown kinds or services) and keys written by newer builds instead of dropping them; `config.json` saves atomically and a file that no longer parses moves to `config.json.bak`.

@@ -74,7 +74,13 @@ fn mix_rgb(a: Color32, b: Color32, toward_b: f32) -> Color32 {
 }
 
 fn progress_is_indeterminate(status: &str) -> bool {
-    matches!(status, "queued" | "starting") || status.contains("Initializing")
+    matches!(
+        status,
+        "queued"
+            | "starting"
+            | crate::progress::FETCHING_METADATA
+            | crate::progress::CONNECTING_TO_PEERS
+    ) || status.contains("Initializing")
 }
 
 fn job_bar_fraction(status: &str, downloaded: u64, total: u64) -> Option<f32> {
@@ -3614,6 +3620,8 @@ mod tests {
             job_bar_fraction("Initializing torrent client & verifying data...", 25, 100).is_none()
         );
         assert_eq!(job_bar_fraction("verifying", 25, 100), Some(0.25));
+        assert!(job_bar_fraction("fetching metadata", 0, 0).is_none());
+        assert!(job_bar_fraction("connecting to peers", 0, 100).is_none());
         assert!(job_bar_fraction("downloading", 250, 1).is_none());
         assert_eq!(job_bar_fraction("downloading", 25, 100), Some(0.25));
         assert_eq!(job_bar_fraction("paused", 25, 100), Some(0.25));

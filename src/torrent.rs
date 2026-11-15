@@ -12,6 +12,7 @@ use librqbit::{
 
 use crate::progress::{
     check_stop, is_stopped, output_lock, watch_cli_controls, JobSnapshot, ProgressHandle,
+    CONNECTING_TO_PEERS, FETCHING_METADATA,
 };
 use crate::validate::is_valid_magnet_url;
 
@@ -288,9 +289,11 @@ pub async fn start_download_with(
     let info_hash = magnet_info_hash(magnet_uri).context("magnet has no info hash")?;
     let folder_lock = magnet_folder_lock(&info_hash);
     let _folder = folder_lock.lock().await;
+    // First the swarm sends the torrent's info (name, files, sizes): nothing
+    // to verify or download until it arrives.
     if !progress.is_paused() {
-        progress.set_status("verifying");
-        progress.set_message("Initializing torrent client & verifying data...");
+        progress.set_status(FETCHING_METADATA);
+        progress.set_message("Fetching torrent metadata from peers...");
     }
 
     // Compilation torrents open many files at once; macOS defaults are often 256.
@@ -406,6 +409,7 @@ async fn run_torrent(
     progress.set_message("0");
 
     let mut engine_paused = false;
+    let mut got_data = false;
     if progress.is_paused() {
         session
             .pause(&handle)
@@ -517,13 +521,28 @@ async fn run_torrent(
                     progress.set_position(position);
                     let (peers, uploaded, up_speed) = live_peers_and_upload(&stats, session);
                     let verifying = matches!(stats.state, TorrentStatsState::Initializing { .. });
+                    // "connecting to peers" until the first bytes arrive (or
+                    // data already on disk); then "downloading" for good, so
+                    // a slow stretch does not flip back.
+                    let down_speed = stats
+                        .live
+                        .as_ref()
+                        .map(|live| live.download_speed.as_bytes())
+                        .unwrap_or(0);
+                    if stats.progress_bytes > 0 || down_speed > 0 {
+                        got_data = true;
+                    }
                     if download_done && seed {
                         progress.set_status("seeding");
                         progress.set_seed_message(peers, uploaded, up_speed);
                     } else if verifying {
                         progress.set_status("verifying");
                     } else if !download_done {
-                        progress.set_status("downloading");
+                        progress.set_status(if got_data {
+                            "downloading"
+                        } else {
+                            CONNECTING_TO_PEERS
+                        });
                         progress.set_message(format!("{peers}"));
                     }
                 }

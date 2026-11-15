@@ -98,7 +98,9 @@ func jobBarFraction(_ job: JobView) -> Float? {
     if job.service != nil, status == "fetching" {
         return Float(job.remotePermille) / 1000
     }
-    if status == "queued" || status == "starting" || status.contains("Initializing") {
+    // Waiting phases with no meaningful percentage: an indeterminate bar.
+    let waiting = ["queued", "starting", "fetching metadata", "connecting to peers"]
+    if waiting.contains(status) || status.contains("Initializing") {
         return nil
     }
     if job.total <= 1, job.downloaded > job.total {
