@@ -429,7 +429,13 @@ fn sync_files(state: &SharedDebridState, plan: &[PlannedFile]) {
         .iter()
         .map(|item| PersistedFile {
             id: item.file.id.clone(),
-            path: item.relative.to_string_lossy().into_owned(),
+            // Always "/"-separated, so jobs.json reads the same on every OS.
+            path: item
+                .relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
             size: item.file.size,
             done: previous
                 .iter()
