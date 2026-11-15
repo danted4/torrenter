@@ -926,7 +926,7 @@ fn legacy_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
 /// The provider of an account a new route names, or why it cannot be used.
 fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
     if let Some((service, _)) = resolve_account(inner, id) {
-        return Ok(service);
+        return offered(service).map(|()| service);
     }
     Err(match Service::parse(id) {
         Some(service) => format!("add a {} API key in settings first", service.label()),
@@ -935,9 +935,23 @@ fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
 }
 
 /// The engine command for a job. Debrid jobs need a key for their provider.
+/// Only providers this build ships run, whatever a saved job, env key or
+/// hand-edited account names.
+fn offered(service: Service) -> Result<(), String> {
+    if Service::shipped().contains(&service) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is not available in this build",
+            service.label()
+        ))
+    }
+}
+
 fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
     let debrid = match &job.debrid {
         Some(debrid) => {
+            offered(debrid.service)?;
             let (_, key) = resolve_account(inner, &debrid.account).ok_or_else(|| {
                 if debrid.account == debrid.service.id() {
                     format!("add a {} API key in settings first", debrid.service.label())
@@ -1513,6 +1527,20 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn providers_this_build_hides_never_run() {
+        let dir = tempdir().unwrap();
+        let session = Session::open(dir.path().join("dl"), dir.path().join("jobs.json"), true);
+        session.use_memory_keys();
+        session.set_debrid_account("rd", Service::RealDebrid, Secret::new("k"));
+        let magnet = "magnet:?xt=urn:btih:3333333333333333333333333333333333333333";
+        let error = session
+            .queue_with(JobKind::Magnet, magnet, Some("rd"))
+            .unwrap_err();
+        assert_eq!(error, "Real-Debrid is not available in this build");
+        assert!(session.jobs().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

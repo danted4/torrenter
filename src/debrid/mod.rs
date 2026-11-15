@@ -83,8 +83,10 @@ impl Service {
             .find(|service| service.id() == wanted)
     }
 
-    /// Providers verified end to end with a real account. Others stay on the
-    /// feature branch until someone confirms them.
+    /// Providers verified end to end with a real account. The other adapters
+    /// are compiled and tested against fakes but hidden: the fronts list only
+    /// these, and the session refuses to run any other. One joins here once
+    /// someone confirms it with a real account.
     pub fn shipped() -> &'static [Service] {
         &[Service::TorBox]
     }
