@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +34,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -286,12 +289,16 @@ private fun ProviderSelect(
     onPick: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    // The list matches the select's measured width, like the desktop.
+    var anchorWidth by remember { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
     Box {
         Box(
             modifier =
                 Modifier
                     .fillMaxWidth()
                     .height(40.dp)
+                    .onGloballyPositioned { anchorWidth = with(density) { it.size.width.toDp() } }
                     .border(1.dp, if (service == null) palette.dim else palette.fg, RoundedCornerShape(2.dp))
                     .clickable { open = true },
             contentAlignment = Alignment.Center,
@@ -314,7 +321,7 @@ private fun ProviderSelect(
         DropdownMenu(
             expanded = open,
             onDismissRequest = { open = false },
-            modifier = Modifier.background(palette.row),
+            modifier = Modifier.background(palette.row).width(anchorWidth),
         ) {
             debridServices().forEach { each ->
                 DropdownMenuItem(

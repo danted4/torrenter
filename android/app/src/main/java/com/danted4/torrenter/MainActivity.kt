@@ -24,6 +24,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.Arrangement
@@ -403,6 +405,7 @@ private fun AppScreen(
                     current = account(debridRoute),
                     accounts = accounts,
                     palette = palette,
+                    modifier = Modifier.weight(1f),
                     onPick = { setRoute(it) },
                     onManage = {
                         settingsTab = SettingsTab.ACCOUNTS
@@ -429,8 +432,10 @@ private fun AppScreen(
                 },
                 colors = buttons,
                 shape = RoundedCornerShape(2.dp),
-                modifier = Modifier.weight(1f),
-            ) { Text("START", fontFamily = FontFamily.Monospace) }
+                // One line always: the route select takes the spare width in
+                // MAGNET mode, START does in HTTP mode.
+                modifier = if (magnet) Modifier else Modifier.weight(1f),
+            ) { Text("START", fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false) }
         }
         Text("Download/torrenter", color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         if (jobs.isEmpty()) {
@@ -596,17 +601,21 @@ private fun RouteMenu(
     current: DebridAccount?,
     accounts: List<DebridAccount>,
     palette: Palette,
+    modifier: Modifier = Modifier,
     onPick: (String?) -> Unit,
     onManage: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    var boxWidth by remember { mutableStateOf(ROUTE_LIST_W) }
+    val density = LocalDensity.current
     val on = current != null
-    Box {
+    Box(modifier) {
         Box(
             modifier =
                 Modifier
-                    .width(150.dp)
+                    .fillMaxWidth()
                     .height(40.dp)
+                    .onGloballyPositioned { boxWidth = with(density) { it.size.width.toDp() } }
                     .border(1.dp, if (on) palette.fg else palette.dim, RoundedCornerShape(2.dp))
                     .clickable { open = true },
             contentAlignment = Alignment.Center,
@@ -627,10 +636,12 @@ private fun RouteMenu(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(end = 8.dp),
             )
         }
+        // Never narrower than the box; wide enough for name + provider (the
+        // desktop route list is wider than its box too).
         DropdownMenu(
             expanded = open,
             onDismissRequest = { open = false },
-            modifier = Modifier.background(palette.row).width(240.dp),
+            modifier = Modifier.background(palette.row).width(maxOf(ROUTE_LIST_W, boxWidth)),
         ) {
             RouteRow("default (none)", "from peers", current == null, palette) {
                 open = false
@@ -662,6 +673,9 @@ private fun RouteMenu(
         }
     }
 }
+
+/** The route list's narrowest width: room for a name and its provider. */
+private val ROUTE_LIST_W = 240.dp
 
 @androidx.compose.runtime.Composable
 private fun RouteRow(
