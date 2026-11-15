@@ -191,24 +191,27 @@ pub fn load_jobs_from(path: &Path) -> LoadJobs {
     }
 }
 
-/// Known kinds must parse and validate or they are dropped (one bad record no
-/// longer quarantines the file). Unknown kinds are kept as-is for newer builds.
+/// Records this build can run become jobs. Anything else with an id (an
+/// unknown kind, a debrid service this build lacks, a field shape from a newer
+/// build) is kept as-is and written back untouched, so a newer build still
+/// finds it. One bad record never quarantines the file; records without an id
+/// cannot be tracked and are dropped.
 fn split_records(records: Vec<Value>) -> JobList {
     let mut list = JobList::default();
     for record in records {
-        let known = record
-            .get("kind")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| JobKind::parse(kind).is_some());
-        if !known {
-            if record.get("id").and_then(Value::as_u64).is_some() {
-                list.foreign.push(record);
-            }
-            continue;
-        }
-        if let Ok(job) = serde_json::from_value::<PersistedJob>(record) {
-            if job.is_valid() {
-                list.jobs.push(job);
+        let job = serde_json::from_value::<PersistedJob>(record.clone())
+            .ok()
+            .filter(PersistedJob::is_valid);
+        match job {
+            Some(job) => list.jobs.push(job),
+            None => {
+                if record
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|id| id > 0)
+                {
+                    list.foreign.push(record);
+                }
             }
         }
     }
@@ -387,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kinds_survive_a_rewrite() {
+    fn unrunnable_records_survive_a_rewrite() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jobs.json");
         std::fs::write(
@@ -395,7 +398,9 @@ mod tests {
             r#"{"jobs":[
                 {"id":7,"kind":"future","source":"x","dest":"/tmp/a","newField":{"a":1}},
                 {"id":3,"kind":"http","source":"https://example.com/a","dest":"/tmp/a"},
-                {"id":4,"kind":"http","source":"https://example.com/b","dest":"/tmp/a","downloaded":"oops"}
+                {"id":4,"kind":"http","source":"https://example.com/b","dest":"/tmp/a","downloaded":"oops"},
+                {"id":9,"kind":"debrid","source":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567","dest":"/tmp/a","service":"newdebrid"},
+                {"kind":"http","source":"https://example.com/c","dest":"/tmp/a"}
             ]}"#,
         )
         .unwrap();
@@ -403,13 +408,13 @@ mod tests {
             LoadJobs::Loaded(list) => list,
             other => panic!("expected loaded, got {other:?}"),
         };
+        assert_eq!(list.jobs.len(), 1, "only the runnable record is a job");
         assert_eq!(
-            list.jobs.len(),
-            1,
-            "malformed known record is dropped alone"
+            list.foreign.len(),
+            3,
+            "future kind, newer field shape and unknown service are kept; no id is dropped"
         );
-        assert_eq!(list.foreign.len(), 1);
-        assert_eq!(list.max_id(), 7);
+        assert_eq!(list.max_id(), 9);
         save_job_list_to(&path, &list.jobs, &list.foreign).unwrap();
         let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let kinds: Vec<_> = raw["jobs"]
@@ -418,8 +423,10 @@ mod tests {
             .iter()
             .map(|job| job["kind"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(kinds, ["http", "future"]);
+        assert_eq!(kinds, ["http", "future", "http", "debrid"]);
         assert_eq!(raw["jobs"][1]["newField"]["a"], 1);
+        assert_eq!(raw["jobs"][2]["downloaded"], "oops");
+        assert_eq!(raw["jobs"][3]["service"], "newdebrid");
     }
 
     #[test]

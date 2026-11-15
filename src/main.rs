@@ -214,6 +214,7 @@ async fn run_debrid_download(uri: &str, dest: PathBuf, service: Service) -> Resu
         remove_after: config.debrid_remove_after,
         state: Arc::clone(&state),
         base: None,
+        stall_timeout: torrenter::debrid::run::STALL_TIMEOUT,
     };
     println!("\nvia {}\n[1] pause/resume   [2] stop\n", service.label());
     let task = tokio::spawn(start_debrid_reported(run, Arc::clone(&snapshot)));

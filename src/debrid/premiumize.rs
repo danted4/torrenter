@@ -1488,6 +1488,7 @@ pub(crate) mod tests {
                 remove_after: true,
                 state,
                 base: Some(base),
+                stall_timeout: crate::debrid::run::STALL_TIMEOUT,
             }
         }
 

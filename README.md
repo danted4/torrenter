@@ -258,12 +258,12 @@ A debrid service downloads a torrent on its own servers and hands back HTTPS lin
 - **Services:** TorBox in this release. Real-Debrid, AllDebrid, Premiumize and Debrid-Link are built and tested against fakes and ship once someone confirms each with a real account.
 - **Keys:** desktop `credentials.json` next to `config.json` (owner-only, never in `jobs.json` or logs), or `TORRENTER_<SERVICE>_KEY` (e.g. `TORRENTER_TORBOX_KEY`), which overrides the saved key and is never written. Android keeps keys encrypted with the Keystore, iOS in the Keychain. Add one in settings (**Test** shows "premium until …" or the error) or with `torrenter debrid add torbox`.
 - **Route:** off on a fresh install; the debrid control (or `--debrid`, or MCP `debrid`) turns it on and is remembered like seed (MCP always defaults to off). Debrid jobs never seed.
-- **While the service fetches** the row reads `MAGNET → TorBox · fetching %`, with an **as torrent** action to download from peers instead. There is no automatic fallback. Then it reads `HTTP · via TorBox` with `file i/n`, files one after another.
+- **While the service fetches** the row reads `MAGNET → TorBox · fetching %`, with an **as torrent** action to download from peers instead. There is no automatic fallback. If the service's progress does not move for **60 minutes** (time paused does not count), the job fails with "TorBox made no progress on this torrent for 60 minutes" so its download slot frees; it stays failed on the next launch, and **restart** waits again or **as torrent** switches to peers. Then it reads `HTTP · via TorBox` with `file i/n`, files one after another.
 - **Connections:** the setting (Auto = 4) is capped per service (Premiumize 1; AllDebrid, Debrid-Link, Real-Debrid 8; TorBox 16).
-- **Resume:** jobs keep the service's torrent id and file ids, never links. Restarting asks the service for fresh links and continues the saved parts; an expired link is refreshed once.
-- **Remove from service after download** (off by default) deletes only torrents torrenter added, after every file landed. Clearing an unfinished debrid job asks whether to remove it from the service too.
+- **Resume:** jobs keep the service's torrent id and file ids, never links. Restarting asks the service for fresh links and continues the saved parts; an expired link is refreshed (twice in a row with no new bytes fails the job).
+- **Remove from service after download** (off by default) deletes only torrents torrenter added, after every file landed. Clearing an unfinished debrid job asks whether to remove it from the service too; switching one torrenter added to **as torrent** (or another service) removes it from the old service.
 - **Blocked content** (for example Real-Debrid's "infringing file") fails the job with the service's message. torrenter does not work around it.
-- **Downgrades:** torrenter 3.7.1 and older drop debrid jobs from the list (the files stay on disk). From this release on, unknown job kinds are kept as-is.
+- **Downgrades:** torrenter 3.7.1 and older drop debrid jobs from the list (the files stay on disk). From this release on, job records this build cannot run (an unknown kind or service) are kept as-is.
 
 ## Updates
 

@@ -977,6 +977,7 @@ pub(crate) mod tests {
             remove_after: true,
             state: Arc::clone(&state),
             base: Some(base.clone()),
+            stall_timeout: crate::debrid::run::STALL_TIMEOUT,
         };
         start_debrid_reported(run, Arc::clone(&snapshot))
             .await
@@ -1015,6 +1016,7 @@ pub(crate) mod tests {
             remove_after: true,
             state: SharedDebridState::default(),
             base: Some(base),
+            stall_timeout: crate::debrid::run::STALL_TIMEOUT,
         };
         let error = start_debrid_reported(run, snapshot).await.unwrap_err();
         let text = format!("{error:#}");

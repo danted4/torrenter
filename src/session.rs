@@ -592,7 +592,33 @@ impl Session {
         if !title.is_empty() {
             snapshot.set_title(title);
         }
+        // Claim the id now: a failed launch still stores the job under it.
         let new_id = inner.next_id;
+        inner.next_id += 1;
+        // Leaving a service drops its torrent from this job; one torrenter
+        // added would sit on the account where clear / remove-after can no
+        // longer reach it, so delete it (best effort, like clear).
+        let leave_remote = old.debrid.as_ref().and_then(|existing| {
+            if debrid
+                .as_ref()
+                .is_some_and(|next| next.service == existing.service)
+            {
+                return None;
+            }
+            let state = existing.view();
+            if !state.added_by_us || old.snapshot.is_done() {
+                return None;
+            }
+            Some(EngineCmd::DeleteRemote {
+                service: existing.service,
+                key: resolve_key(&inner, existing.service)?,
+                remote_id: state.remote_id?,
+                base: inner.debrid_bases.get(&existing.service).cloned(),
+            })
+        });
+        if let Some(cmd) = leave_remote {
+            let _ = self.engine.send(cmd);
+        }
         let seed = kind == JobKind::Magnet && seed && !inner.leech_only;
         // A fresh HTTP split starts from scratch anyway; keep the job's own
         // count for debrid so its parts resume.
@@ -625,7 +651,6 @@ impl Session {
                 return Err(error);
             }
         };
-        inner.next_id += 1;
         let _ = self.engine.send(cmd);
         inner.jobs[index] = job;
         persist_inner(&mut inner, true);
@@ -892,6 +917,7 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                                 remove_after: launch.remove_after,
                                 state: launch.state,
                                 base: launch.base,
+                                stall_timeout: crate::debrid::run::STALL_TIMEOUT,
                             };
                             start_debrid_reported(run, snapshot).await
                         }
@@ -925,7 +951,10 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     {
                         let _ = tx.send(EngineEvent::DownloadFailed {
                             id: 0,
-                            error: format!("could not remove it from {}: {error}", service.label()),
+                            error: crate::debrid::redact(
+                                &format!("could not remove it from {}: {error}", service.label()),
+                                Some(&key),
+                            ),
                         });
                     }
                 }
@@ -1269,7 +1298,7 @@ mod tests {
     async fn restart_keeps_the_remote_or_switches_to_peers() {
         use crate::debrid::torbox::tests::{magnet, KEY};
         let dir = tempdir().unwrap();
-        let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
+        let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
             .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
             .unwrap();
@@ -1298,16 +1327,36 @@ mod tests {
             "same provider resumes the same remote torrent"
         );
         session.stop(kept);
-        // "as torrent": same job, now from peers (seed stays off in tests).
+        // A restart that cannot launch (key removed) still uses up its id, so
+        // the next job never shares it.
+        session.set_debrid_key(Service::TorBox, None);
+        assert!(session.restart(kept, false, dir.path().join("dl")).is_err());
+        let failed = session.jobs()[0].id;
+        assert_ne!(failed, kept);
         session.set_debrid_key(Service::TorBox, Secret::new(KEY));
+        let other_magnet = "magnet:?xt=urn:btih:2222222222222222222222222222222222222222";
+        let other = session
+            .queue_with(JobKind::Magnet, other_magnet, Some(Service::TorBox))
+            .unwrap();
+        assert_ne!(other, failed, "ids stay unique after a failed restart");
+        session.stop(other);
+        session.remove(other);
+        // "as torrent": same job, now from peers (seed stays off in tests).
+        // The torrent torrenter added on the service is deleted (nothing could
+        // reach it afterwards).
         let peers = session
-            .restart_with(kept, Route::Peers, false, dir.path().join("dl"))
+            .restart_with(failed, Route::Peers, false, dir.path().join("dl"))
             .unwrap();
         let job = session.job(peers).unwrap();
         assert_eq!(job.kind, JobKind::Magnet);
         assert!(job.debrid.is_none());
         session.stop(peers);
         assert_eq!(session.jobs().len(), 1);
+        tokio::task::spawn_blocking(move || {
+            wait_for(|| !fake.lock().unwrap().torrents.contains_key(&1));
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

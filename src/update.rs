@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use url::Url;
 
-use crate::fsutil::{atomic_write, quarantine, recover_incomplete_save};
+use crate::fsutil::{atomic_write, edit_lock, quarantine, recover_incomplete_save};
 use crate::http::PART_COUNT;
 use crate::identity::{self, AppKind, VERSION, VERSION_TAG};
 use crate::progress::{JobSnapshot, ProgressHandle};
@@ -173,7 +173,10 @@ pub fn edit_config(change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig> {
     edit_config_at(&config_path()?, change)
 }
 
+static CONFIG_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn edit_config_at(path: &Path, change: impl FnOnce(&mut AppConfig)) -> Result<AppConfig> {
+    let _edit = edit_lock(&CONFIG_EDIT);
     let mut config = match load_config_from(path) {
         Ok(config) => config,
         Err(_) => {
@@ -907,6 +910,30 @@ mod tests {
             crate::fsutil::bak_path(&path).exists(),
             "broken config kept aside"
         );
+    }
+
+    #[test]
+    fn concurrent_config_edits_keep_every_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let path = &path;
+                scope.spawn(move || {
+                    for round in 0..5 {
+                        edit_config_at(path, |config| {
+                            config.extra.insert(format!("k{i}"), round.into());
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let config = load_config_from(&path).unwrap();
+        for i in 0..16 {
+            assert_eq!(config.extra[&format!("k{i}")], 4, "k{i} kept");
+        }
+        assert!(!crate::fsutil::bak_path(&path).exists(), "never torn");
     }
 
     #[test]

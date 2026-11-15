@@ -198,6 +198,21 @@ impl fmt::Display for DebridError {
 
 impl std::error::Error for DebridError {}
 
+impl DebridError {
+    /// The same error with links and the key stripped from its text.
+    pub fn redacted(self, key: &Secret) -> Self {
+        let clean = |detail: String| redact(&detail, Some(key));
+        match self {
+            DebridError::BadKey(detail) => DebridError::BadKey(clean(detail)),
+            DebridError::NotPremium(detail) => DebridError::NotPremium(clean(detail)),
+            DebridError::Blocked(detail) => DebridError::Blocked(clean(detail)),
+            DebridError::Service(detail) => DebridError::Service(clean(detail)),
+            DebridError::Network(detail) => DebridError::Network(clean(detail)),
+            other => other,
+        }
+    }
+}
+
 /// Replace anything URL-shaped (and the key, if given) so provider text can be
 /// shown, saved in `jobs.json` or returned over MCP without leaking a link.
 pub fn redact(text: &str, key: Option<&Secret>) -> String {
@@ -397,20 +412,41 @@ pub async fn delete_remote(
     remote_id: &str,
     base: Option<url::Url>,
 ) -> Result<(), DebridError> {
-    Provider::new(service, key.clone(), base)?
-        .delete(remote_id)
-        .await
+    let result = match Provider::new(service, key.clone(), base) {
+        Ok(provider) => provider.delete(remote_id).await,
+        Err(error) => Err(error),
+    };
+    result.map_err(|error| error.redacted(key))
 }
 
 /// Settings "Test" button / `torrenter debrid test`: ask the provider who the
 /// key belongs to. The error text is safe to show.
 pub async fn check_account(service: Service, key: &Secret) -> Result<Account, DebridError> {
-    Provider::new(service, key.clone(), None)?.account().await
+    let result = match Provider::new(service, key.clone(), None) {
+        Ok(provider) => provider.account().await,
+        Err(error) => Err(error),
+    };
+    result.map_err(|error| error.redacted(key))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_errors_drop_links_and_the_key() {
+        let key = Secret::new("sekret-key").unwrap();
+        let error = DebridError::Service(
+            "delete failed at https://api.example/x?token=sekret-key for sekret-key".into(),
+        )
+        .redacted(&key);
+        let text = error.to_string();
+        assert!(
+            !text.contains("sekret-key") && !text.contains("https://"),
+            "{text}"
+        );
+        assert_eq!(DebridError::Gone.redacted(&key), DebridError::Gone);
+    }
 
     #[test]
     fn service_ids_parse_loosely_and_roundtrip() {

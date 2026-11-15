@@ -297,6 +297,8 @@ pub(crate) mod tests {
         pub fetch_polls: u32,
         /// Answer the first N file-link downloads with 403 (expired link).
         pub expire_links: u32,
+        /// Progress climbs one percent per poll while fetching (else stuck at 45%).
+        pub advance: bool,
         pub plan: u64,
     }
 
@@ -321,8 +323,13 @@ pub(crate) mod tests {
         )
     }
 
-    fn torrent_json(id: u64, torrent: &Torrent, fetch_polls: u32) -> Value {
+    fn torrent_json(id: u64, torrent: &Torrent, fetch_polls: u32, advance: bool) -> Value {
         let done = torrent.polls >= fetch_polls;
+        let fetching = if advance {
+            f64::from((torrent.polls + 1).min(99))
+        } else {
+            45.0
+        };
         let files: Vec<Value> = torrent
             .files
             .iter()
@@ -335,7 +342,7 @@ pub(crate) mod tests {
             "id": id, "hash": torrent.hash, "name": "Album",
             "download_state": if torrent.failed { "error" } else if done { "cached" } else { "downloading" },
             // TorBox sometimes reports progress as a percent.
-            "progress": if done { 1.0 } else { 45.0 },
+            "progress": if done { 1.0 } else { fetching },
             "download_finished": done && !torrent.failed,
             "download_present": done && !torrent.failed,
             "files": if done { Value::from(files) } else { Value::from(Vec::<Value>::new()) },
@@ -416,19 +423,20 @@ pub(crate) mod tests {
                 }
                 "torrents/mylist" => {
                     let fetch_polls = state.fetch_polls;
+                    let advance = state.advance;
                     if let Some(id) = request.query("id").and_then(|v| v.parse::<u64>().ok()) {
                         let Some(torrent) = state.torrents.get_mut(&id) else {
                             return FakeResponse::json(404, json!({"success": true, "error": "ITEM_NOT_FOUND", "detail": "No torrents found for this user.", "data": null}));
                         };
                         torrent.polls += 1;
                         // Sometimes a one-element array instead of an object.
-                        let item = torrent_json(id, torrent, fetch_polls);
+                        let item = torrent_json(id, torrent, fetch_polls, advance);
                         return envelope_ok(if id % 2 == 0 { json!([item]) } else { item });
                     }
                     let list: Vec<Value> = state
                         .torrents
                         .iter()
-                        .map(|(id, torrent)| torrent_json(*id, torrent, fetch_polls))
+                        .map(|(id, torrent)| torrent_json(*id, torrent, fetch_polls, advance))
                         .collect();
                     envelope_ok(Value::from(list))
                 }

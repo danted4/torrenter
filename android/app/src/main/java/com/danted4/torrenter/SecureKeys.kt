@@ -2,9 +2,11 @@ package com.danted4.torrenter
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.security.KeyStore
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -27,14 +29,31 @@ object SecureKeys {
         service: String,
     ): String? {
         val stored = prefs(context).getString(service, null) ?: return null
+        val parts = stored.split(":", limit = 2)
+        val decoded =
+            try {
+                parts.map { Base64.decode(it, Base64.NO_WRAP) }
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        if (decoded == null || decoded.size != 2) {
+            // Malformed value: it can never decrypt.
+            delete(context, service)
+            return null
+        }
+        val (iv, body) = decoded
         return try {
-            val (iv, body) = stored.split(":", limit = 2).map { Base64.decode(it, Base64.NO_WRAP) }
             val cipher = Cipher.getInstance(TRANSFORM)
             cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(TAG_BITS, iv))
             String(cipher.doFinal(body), Charsets.UTF_8).ifEmpty { null }
-        } catch (_: Exception) {
-            // Restored from another device or the Keystore key was reset: unusable.
-            delete(context, service)
+        } catch (error: Exception) {
+            // Only errors that prove the key is unusable (restored from another
+            // device, Keystore key reset or invalidated) drop it. A transient
+            // Keystore failure (daemon busy, right after boot) keeps it for
+            // the next read.
+            if (error is AEADBadTagException || error is KeyPermanentlyInvalidatedException) {
+                delete(context, service)
+            }
             null
         }
     }

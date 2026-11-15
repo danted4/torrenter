@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 
@@ -21,9 +22,27 @@ pub(crate) fn bak_path(path: &Path) -> PathBuf {
     sibling(path, ".bak")
 }
 
+/// Every save shares one `<path>.tmp` name, so writes and crash recovery in
+/// this process take turns. Threads (GUI worker vs UI) do save concurrently.
+static FILES: Mutex<()> = Mutex::new(());
+
+fn files_lock() -> MutexGuard<'static, ()> {
+    FILES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Lock for a read-modify-write of one settings file, held around the load,
+/// the change and the save so two edits cannot drop each other's setting.
+/// Separate from the write lock above, so nesting is safe.
+pub(crate) fn edit_lock(lock: &'static Mutex<()>) -> MutexGuard<'static, ()> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Write `<path>.tmp`, then rename over `path`. With `private`, the file is
 /// created owner-only (0600) on unix before any bytes land in it.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    let _files = files_lock();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -70,6 +89,7 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
 
 /// Restore a save that crashed between the two renames.
 pub(crate) fn recover_incomplete_save(path: &Path) {
+    let _files = files_lock();
     if path.exists() {
         return;
     }

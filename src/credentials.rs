@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::debrid::{Secret, Service};
-use crate::fsutil::{atomic_write, quarantine, recover_incomplete_save};
+use crate::fsutil::{atomic_write, edit_lock, quarantine, recover_incomplete_save};
 use crate::update::config_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +83,10 @@ fn key_at(
         .map(|secret| (secret, KeySource::File))
 }
 
+static CREDENTIALS_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn set_key_at(path: &Path, service: Service, key: Option<&Secret>) -> Result<()> {
+    let _edit = edit_lock(&CREDENTIALS_EDIT);
     let mut file = match read_file(path) {
         Ok(file) => file,
         // Keep unreadable bytes as credentials.json.bak rather than overwrite them.

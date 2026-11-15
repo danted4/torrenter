@@ -268,6 +268,10 @@ struct GuiApp {
     glass_tint: u8,
     applied_glass_tint: u8,
     settings_open: bool,
+    /// Which services have a key (credentials.json or env), read once rather
+    /// than every frame. `None` = reload; cleared on save / remove and when
+    /// settings opens.
+    key_sources: Option<Vec<(Service, KeySource)>>,
     glass_applied: bool,
     viewport_fullscreen: bool,
     /// Remembered debrid route for magnet jobs (decision: remembered like seed).
@@ -365,6 +369,7 @@ impl GuiApp {
             glass_tint,
             applied_glass_tint: glass_tint,
             settings_open: false,
+            key_sources: None,
             glass_applied: false,
             viewport_fullscreen: false,
             debrid_route,
@@ -455,12 +460,20 @@ impl GuiApp {
         }
     }
 
+    fn key_source(&mut self, service: Service) -> Option<KeySource> {
+        self.key_sources
+            .get_or_insert_with(credentials::configured)
+            .iter()
+            .find(|(each, _)| *each == service)
+            .map(|(_, source)| *source)
+    }
+
     /// Services with a key, in settings order.
-    fn ready_services(&self) -> Vec<Service> {
+    fn ready_services(&mut self) -> Vec<Service> {
         Service::shipped()
             .iter()
             .copied()
-            .filter(|service| self.session.has_debrid_key(*service))
+            .filter(|service| self.key_source(*service).is_some())
             .collect()
     }
 
@@ -470,6 +483,7 @@ impl GuiApp {
         if ready.is_empty() {
             self.toast_fail("add a debrid API key in settings first");
             self.settings_open = true;
+            self.key_sources = None;
             return;
         }
         let next = match self
@@ -785,6 +799,7 @@ impl eframe::App for GuiApp {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 if settings_cog(ui, palette, self.settings_open).clicked() {
                                     self.settings_open = !self.settings_open;
+                                    self.key_sources = None;
                                 }
                                 if auto_update_toggle(ui, self.auto_update, palette).clicked() {
                                     self.auto_update = !self.auto_update;
@@ -1492,7 +1507,7 @@ impl GuiApp {
     }
 
     fn debrid_account_card(&mut self, ui: &mut egui::Ui, service: Service, palette: Theme) {
-        let source = credentials::key_for(service).map(|(_, source)| source);
+        let source = self.key_source(service);
         let fill = self.card_fill(palette.row);
         egui::Frame::NONE
             .fill(fill)
@@ -1557,7 +1572,9 @@ impl GuiApp {
                 let draft = self.key_drafts.get(&service).cloned().unwrap_or_default();
                 if save {
                     if let Some(key) = Secret::new(draft) {
-                        match credentials::set_key(service, &key) {
+                        let saved = credentials::set_key(service, &key);
+                        self.key_sources = None;
+                        match saved {
                             Ok(()) => {
                                 self.key_drafts.remove(&service);
                                 self.toast_info(format!("{} key saved", service.label()));
@@ -1573,7 +1590,9 @@ impl GuiApp {
                         self.start_account_check(service, key);
                     }
                 } else if remove {
-                    match credentials::remove_key(service) {
+                    let removed = credentials::remove_key(service);
+                    self.key_sources = None;
+                    match removed {
                         Ok(()) => {
                             self.account_notes.remove(&service);
                             if self.debrid_route == Some(service) {

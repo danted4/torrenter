@@ -25,6 +25,14 @@ const RATE_LIMIT_WAIT: Duration = Duration::from_secs(30);
 const NETWORK_RETRIES: u32 = 5;
 /// Consecutive rate-limit / 503 waits before giving up (~10 minutes).
 const RATE_LIMIT_RETRIES: u32 = 20;
+/// Fail a job whose provider-side progress has not moved for this long, so a
+/// dead torrent frees its download slot. Measured from the last progress
+/// change, never counting time paused. An hour leaves room for a torrent in
+/// the provider's own queue and for whole-percent progress (Real-Debrid) on a
+/// big, slow torrent.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Granularity of the stall clock and of noticing a resume while fetching.
+const STALL_TICK: Duration = Duration::from_millis(250);
 
 /// Provider-side progress and ids for one debrid job. Shared with the session,
 /// which persists it and shows it; never holds a link or a key.
@@ -60,6 +68,8 @@ pub struct DebridRun {
     pub state: SharedDebridState,
     /// Test hook: provider API base instead of the real host.
     pub base: Option<Url>,
+    /// `STALL_TIMEOUT` outside tests.
+    pub stall_timeout: Duration,
 }
 
 /// Run a debrid job to completion, stop, or failure. Errors are redacted (no
@@ -72,7 +82,13 @@ pub async fn start_debrid_reported(run: DebridRun, snapshot: Arc<JobSnapshot>) -
             snapshot.mark_stopped();
             Ok(())
         }
-        Err(error) => Err(anyhow!(redact(&format!("{error:#}"), Some(&key)))),
+        Err(error) => {
+            let text = redact(&format!("{error:#}"), Some(&key));
+            // Recorded here too, so the job is saved as failed (and not
+            // restarted on the next launch) even before the session drains it.
+            snapshot.set_error(text.clone());
+            Err(anyhow!(text))
+        }
     }
 }
 
@@ -94,9 +110,7 @@ async fn drive(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
     let provider = Provider::new(run.service, run.key.clone(), run.base.clone())?;
 
     // Phase 1: the provider fetches the torrent.
-    if !snapshot.is_paused() {
-        snapshot.set_status("fetching");
-    }
+    show_fetching(&snapshot);
     let remote_id = ensure_remote(&provider, &run, &hash, &snapshot).await?;
     let files = wait_ready(&provider, &run, &remote_id, &hash, &snapshot).await?;
 
@@ -148,7 +162,10 @@ async fn drive(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
         );
         let progress =
             ProgressHandle::job_file(Arc::clone(&snapshot), done_bytes, total, item.file.size);
-        let mut refreshed = false;
+        // A rejected (expired) link is refreshed once per stretch without
+        // progress: a second expiry after more bytes landed (another long
+        // pause, an IP change) refreshes again; two in a row fail the job.
+        let mut refreshed_at: Option<u64> = None;
         loop {
             wait_while_paused(Some(snapshot.as_ref())).await?;
             let link = retrying(&snapshot, || provider.link(&remote_id, &item.file)).await?;
@@ -163,8 +180,14 @@ async fn drive(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
             .await
             {
                 Ok(()) => break,
-                Err(error) if error.downcast_ref::<LinkRejected>().is_some() && !refreshed => {
-                    refreshed = true;
+                Err(error) if error.downcast_ref::<LinkRejected>().is_some() => {
+                    let now = snapshot
+                        .downloaded
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if refreshed_at.is_some_and(|at| now <= at) {
+                        return Err(error);
+                    }
+                    refreshed_at = Some(now);
                 }
                 Err(error) => return Err(error),
             }
@@ -215,8 +238,12 @@ async fn wait_ready(
     let mut remote_id = remote_id.to_string();
     let mut re_added = false;
     let mut interval = POLL_FIRST;
+    // Unpaused time since provider progress last moved.
+    let mut stalled = Duration::ZERO;
+    let mut best: Option<u16> = None;
     loop {
         wait_while_paused(Some(snapshot.as_ref())).await?;
+        show_fetching(snapshot);
         match retrying(snapshot, || provider.status(&remote_id)).await {
             Ok(remote) => match remote.state {
                 RemoteState::Ready => {
@@ -226,6 +253,17 @@ async fn wait_ready(
                 RemoteState::Failed(reason) => bail!("{reason}"),
                 RemoteState::Fetching { permille } => {
                     lock(&run.state).remote_permille = permille;
+                    if best.is_none_or(|best| permille > best) {
+                        best = Some(permille);
+                        stalled = Duration::ZERO;
+                    } else if stalled >= run.stall_timeout {
+                        bail!(
+                            "{} made no progress on this torrent for {}; restart to keep \
+                             waiting, or download it as a torrent",
+                            run.service.label(),
+                            describe(run.stall_timeout)
+                        );
+                    }
                 }
             },
             Err(error)
@@ -237,12 +275,55 @@ async fn wait_ready(
                 re_added = true;
                 lock(&run.state).remote_id = None;
                 remote_id = ensure_remote(provider, run, hash, snapshot).await?;
+                best = None;
+                stalled = Duration::ZERO;
                 continue;
             }
             Err(error) => return Err(error),
         }
-        sleep_or_stop(snapshot, interval).await?;
+        // Wake at the deadline rather than a full interval past it.
+        let wait = interval.min(run.stall_timeout.saturating_sub(stalled).max(STALL_TICK));
+        fetch_sleep(snapshot, wait, &mut stalled).await?;
         interval = (interval.mul_f32(1.5)).min(POLL_MAX);
+    }
+}
+
+/// Status `fetching` while unpaused. Pause / resume rewrites the status, and a
+/// restored job may start paused, so this is re-asserted while waiting.
+fn show_fetching(snapshot: &JobSnapshot) {
+    if !snapshot.is_paused() && snapshot.status() != "fetching" {
+        snapshot.set_status("fetching");
+    }
+}
+
+/// Sleep `wait` in short slices, adding only the unpaused slices to `stalled`.
+async fn fetch_sleep(
+    snapshot: &Arc<JobSnapshot>,
+    wait: Duration,
+    stalled: &mut Duration,
+) -> Result<()> {
+    let mut left = wait;
+    while !left.is_zero() {
+        let slice = left.min(STALL_TICK);
+        sleep_or_stop(snapshot, slice).await?;
+        left -= slice;
+        if !snapshot.is_paused() {
+            *stalled += slice;
+            show_fetching(snapshot);
+        }
+    }
+    Ok(())
+}
+
+fn describe(wait: Duration) -> String {
+    let minutes = wait.as_secs() / 60;
+    match minutes {
+        0 => match wait.as_secs() {
+            0 | 1 => "1 second".into(),
+            seconds => format!("{seconds} seconds"),
+        },
+        1 => "1 minute".into(),
+        _ => format!("{minutes} minutes"),
     }
 }
 
@@ -376,6 +457,7 @@ mod tests {
             remove_after: true,
             state,
             base: Some(base),
+            stall_timeout: crate::debrid::run::STALL_TIMEOUT,
         }
     }
 
@@ -462,6 +544,119 @@ mod tests {
             !text.contains("wrong-key-123") && !text.contains("http"),
             "{text}"
         );
+    }
+
+    /// Its own info hash, so tests that hold a fetch open do not queue on
+    /// another test's folder lock (the lock is process-wide, keyed by hash).
+    fn own_magnet(last: char) -> String {
+        let hash: String = crate::debrid::torbox::tests::HASH
+            .chars()
+            .take(39)
+            .chain([last])
+            .collect();
+        format!("magnet:?xt=urn:btih:{hash}&dn=Album")
+    }
+
+    #[tokio::test]
+    async fn stalled_fetch_fails_after_the_timeout_and_frees_the_slot() {
+        let fake = Arc::new(Mutex::new(State {
+            fetch_polls: 1_000,
+            ..State::default()
+        }));
+        let (_server, base) = torbox_fake(Arc::clone(&fake)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = Arc::new(JobSnapshot::default());
+        let mut run = run_for(dir.path(), base, SharedDebridState::default());
+        run.magnet = own_magnet('1');
+        run.stall_timeout = Duration::from_millis(600);
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            start_debrid_reported(run, Arc::clone(&snapshot)),
+        )
+        .await
+        .expect("a stalled fetch gives up")
+        .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(600));
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("TorBox made no progress on this torrent for 1 second;"),
+            "{text}"
+        );
+        // Failed, not stopped: saved as failed, so it is not restarted on launch.
+        assert_eq!(snapshot.status(), "failed");
+        assert_eq!(snapshot.error().as_deref(), Some(text.as_str()));
+        assert!(!snapshot.is_active());
+    }
+
+    #[tokio::test]
+    async fn slow_but_moving_fetch_never_times_out() {
+        let fake = Arc::new(Mutex::new(State {
+            fetch_polls: 12,
+            advance: true,
+            ..State::default()
+        }));
+        let (_server, base) = torbox_fake(Arc::clone(&fake)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = Arc::new(JobSnapshot::default());
+        let mut run = run_for(dir.path(), base, SharedDebridState::default());
+        run.magnet = own_magnet('2');
+        // Shorter than the whole fetch, longer than any one poll gap.
+        run.stall_timeout = Duration::from_millis(400);
+        start_debrid_reported(run, Arc::clone(&snapshot))
+            .await
+            .unwrap();
+        assert!(snapshot.is_done(), "status {}", snapshot.status());
+    }
+
+    #[tokio::test]
+    async fn paused_time_does_not_count_and_resume_shows_fetching() {
+        let fake = Arc::new(Mutex::new(State {
+            fetch_polls: 1_000,
+            ..State::default()
+        }));
+        let (_server, base) = torbox_fake(Arc::clone(&fake)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = SharedDebridState::default();
+        let snapshot = Arc::new(JobSnapshot::default());
+        let mut run = run_for(dir.path(), base, Arc::clone(&state));
+        run.magnet = own_magnet('3');
+        run.stall_timeout = Duration::from_millis(800);
+        let task = tokio::spawn(start_debrid_reported(run, Arc::clone(&snapshot)));
+        for _ in 0..100 {
+            if state.lock().unwrap().remote_permille > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        snapshot.toggle_pause();
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            !task.is_finished(),
+            "paused time counted toward the timeout"
+        );
+        assert_eq!(snapshot.status(), "paused");
+        snapshot.toggle_pause();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            snapshot.status(),
+            "fetching",
+            "resume returns to the fetch view"
+        );
+        let error = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("times out once unpaused")
+            .unwrap()
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("made no progress"));
+    }
+
+    #[test]
+    fn stall_message_names_the_wait() {
+        assert_eq!(describe(STALL_TIMEOUT), "60 minutes");
+        assert_eq!(describe(Duration::from_secs(60)), "1 minute");
+        assert_eq!(describe(Duration::from_millis(600)), "1 second");
+        assert_eq!(describe(Duration::from_secs(30)), "30 seconds");
     }
 
     #[test]

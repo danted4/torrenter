@@ -1212,6 +1212,7 @@ pub(crate) mod tests {
             remove_after: true,
             state: shared,
             base: Some(base.clone()),
+            stall_timeout: crate::debrid::run::STALL_TIMEOUT,
         };
         start_debrid_reported(run(KEY, Arc::clone(&shared)), Arc::clone(&snapshot))
             .await
