@@ -228,6 +228,7 @@ async fn mcp_reports_env_keys_without_exposing_them() {
     assert!(!text.contains("env-secret-key-xyz"), "{text}");
     let payload: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(payload["services"][0]["configured"], true);
+    assert_eq!(payload["services"][0]["accounts"][0], "TorBox (env)");
     drop(stdin);
     let _ = timeout(Duration::from_secs(5), child.wait()).await;
     let _ = child.kill().await;

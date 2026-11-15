@@ -197,6 +197,9 @@ async fn drive(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
         done_bytes += item.file.size;
     }
 
+    // Every part is merged; drop the job's now-empty resume folder (only
+    // removed when empty).
+    let _ = std::fs::remove_dir(job_root.join(".resume"));
     if run.remove_after && lock(&run.state).added_by_us {
         // Best effort: the files are already safe on disk.
         let _ = stoppable(&snapshot, provider.delete(&remote_id)).await;
@@ -497,11 +500,7 @@ mod tests {
         // The expired first link was refreshed once; remove-after deleted it.
         assert!(server.count("requestdl") >= 3);
         assert!(fake.lock().unwrap().torrents.is_empty());
-        assert!(!job
-            .join(".resume")
-            .read_dir()
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(false));
+        assert!(!job.join(".resume").exists(), "empty resume folder removed");
     }
 
     #[tokio::test]

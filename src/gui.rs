@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Sense, Stroke, TextEdit, Vec2};
 
-use crate::credentials::{self, KeySource};
+use crate::credentials::{self, AccountInfo, KeySource};
 use crate::debrid::{check_account, Secret, Service};
 use crate::identity::{self, AppKind, VERSION_TAG};
 use crate::jobs::{self, JobKind};
@@ -243,8 +243,8 @@ struct RestartDraft {
     kind: Mode,
     seed: bool,
     dest: PathBuf,
-    /// Magnet jobs: `None` from peers, or through a debrid service.
-    route: Option<Service>,
+    /// Magnet jobs: `None` from peers, or through a debrid account (id).
+    route: Option<String>,
 }
 
 struct GuiApp {
@@ -271,22 +271,70 @@ struct GuiApp {
     /// Which services have a key (credentials.json or env), read once rather
     /// than every frame. `None` = reload; cleared on save / remove and when
     /// settings opens.
-    key_sources: Option<Vec<(Service, KeySource)>>,
+    accounts_cache: Option<Vec<AccountInfo>>,
     glass_applied: bool,
     viewport_fullscreen: bool,
     /// Remembered debrid route for magnet jobs (decision: remembered like seed).
-    debrid_route: Option<Service>,
+    debrid_route: Option<String>,
     debrid_remove_after: bool,
     connections: Option<u8>,
-    /// Settings page: key being typed per service (never shown back).
-    key_drafts: HashMap<Service, String>,
-    /// Settings page: last account check per service.
-    account_notes: HashMap<Service, String>,
-    account_tx: Sender<(Service, String)>,
-    account_rx: Receiver<(Service, String)>,
+    /// Settings page: the category shown in the content pane.
+    settings_tab: SettingsTab,
+    /// Settings page: the add-account form, while open.
+    add_form: Option<AddAccountForm>,
+    /// Settings page: last account check per account id.
+    account_notes: HashMap<String, String>,
+    account_tx: Sender<(String, String)>,
+    account_rx: Receiver<(String, String)>,
     /// Clearing or re-routing a debrid job whose torrent torrenter added on
     /// the service: ask "also remove it from …?" first.
     remote_confirm: Option<RemoteAsk>,
+}
+
+/// Settings categories, listed in the sidebar.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    Appearance,
+    Downloads,
+    Accounts,
+    Updates,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [
+        SettingsTab::Appearance,
+        SettingsTab::Downloads,
+        SettingsTab::Accounts,
+        SettingsTab::Updates,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "appearance",
+            SettingsTab::Downloads => "downloads",
+            SettingsTab::Accounts => "debrid accounts",
+            SettingsTab::Updates => "updates",
+        }
+    }
+}
+
+/// Settings: a new account being added (provider first, then name and key;
+/// the key is never shown back).
+#[derive(Default)]
+struct AddAccountForm {
+    service: Option<Service>,
+    name: String,
+    key: String,
+}
+
+/// "TorBox", or "work (TorBox)" when the name differs from the provider.
+fn account_title(name: &str, service: Service) -> String {
+    if name == service.label() {
+        name.to_string()
+    } else {
+        format!("{name} ({})", service.label())
+    }
 }
 
 /// What waits on the "also remove it from the service?" answer.
@@ -362,11 +410,7 @@ impl GuiApp {
         let session = Session::open(dest.clone(), jobs_path, seed);
         session.set_connections(config.connections);
         session.set_debrid_remove_after(config.debrid_remove_after);
-        let debrid_route = config
-            .debrid_route
-            .as_deref()
-            .and_then(Service::parse)
-            .filter(|service| Service::shipped().contains(service));
+        let debrid_route = config.debrid_route.clone().filter(|id| !id.is_empty());
         let (account_tx, account_rx) = mpsc::channel();
         let _ = cmd_tx.send(WorkerCmd::Check);
         let mut app = Self {
@@ -390,13 +434,14 @@ impl GuiApp {
             glass_tint,
             applied_glass_tint: glass_tint,
             settings_open: false,
-            key_sources: None,
+            accounts_cache: None,
             glass_applied: false,
             viewport_fullscreen: false,
             debrid_route,
             debrid_remove_after: config.debrid_remove_after,
             connections: config.connections,
-            key_drafts: HashMap::new(),
+            settings_tab: SettingsTab::default(),
+            add_form: None,
             account_notes: HashMap::new(),
             account_tx,
             account_rx,
@@ -472,54 +517,120 @@ impl GuiApp {
 
     fn queue_job(&mut self) {
         let (kind, via) = match self.mode {
-            Mode::Magnet => (JobKind::Magnet, self.debrid_route),
+            Mode::Magnet => (JobKind::Magnet, self.route_account().map(|a| a.id)),
             Mode::Http => (JobKind::Http, None),
         };
-        match self.session.queue_with(kind, &self.input, via) {
+        match self.session.queue_with(kind, &self.input, via.as_deref()) {
             Ok(_) => self.input.clear(),
             Err(error) => self.toast_fail(error),
         }
     }
 
-    fn key_source(&mut self, service: Service) -> Option<KeySource> {
-        self.key_sources
-            .get_or_insert_with(credentials::configured)
-            .iter()
-            .find(|(each, _)| *each == service)
-            .map(|(_, source)| *source)
+    /// Debrid accounts for shipped providers (saved and env), read once and
+    /// cached; cleared on save / remove and when settings opens.
+    fn accounts(&mut self) -> Vec<AccountInfo> {
+        self.accounts_cache
+            .get_or_insert_with(|| {
+                credentials::accounts()
+                    .into_iter()
+                    .filter(|account| Service::shipped().contains(&account.service))
+                    .collect()
+            })
+            .clone()
     }
 
-    /// Services with a key, in settings order.
-    fn ready_services(&mut self) -> Vec<Service> {
-        Service::shipped()
-            .iter()
-            .copied()
-            .filter(|service| self.key_source(*service).is_some())
-            .collect()
+    fn account(&mut self, id: &str) -> Option<AccountInfo> {
+        self.accounts().into_iter().find(|account| account.id == id)
     }
 
-    /// Debrid control click: off → first service with a key → next → off.
-    fn cycle_debrid_route(&mut self) {
-        let ready = self.ready_services();
-        if ready.is_empty() {
-            self.toast_fail("add a debrid API key in settings first");
-            self.settings_open = true;
-            self.key_sources = None;
+    /// The remembered route, if its account still exists.
+    fn route_account(&mut self) -> Option<AccountInfo> {
+        let id = self.debrid_route.clone()?;
+        self.account(&id)
+    }
+
+    /// Route menu pick: `None` = default (peers), or an account id.
+    fn set_debrid_route(&mut self, route: Option<String>) {
+        let _ = update::set_debrid_route(route.as_deref());
+        self.debrid_route = route;
+    }
+
+    /// Open settings on a category (the dropdown opens debrid accounts).
+    fn open_settings(&mut self, tab: SettingsTab) {
+        self.settings_open = true;
+        self.settings_tab = tab;
+        self.accounts_cache = None;
+    }
+
+    /// The route menu under the select: default (none), each shipped
+    /// provider (a provider without a key opens settings), manage keys.
+    fn route_menu(&mut self, ui: &mut egui::Ui, select: &egui::Response, palette: Theme) {
+        let popup_id = ui.make_persistent_id("debrid-route-menu");
+        if select.clicked() {
+            ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+        }
+        if !ui.memory(|memory| memory.is_popup_open(popup_id)) {
             return;
         }
-        let next = match self
-            .debrid_route
-            .and_then(|now| ready.iter().position(|service| *service == now))
-        {
-            None => ready.first().copied(),
-            Some(index) => ready.get(index + 1).copied(),
-        };
-        self.debrid_route = next;
-        let _ = update::set_debrid_route(next.map(Service::id));
+        let accounts = self.accounts();
+        let current = self.route_account().map(|account| account.id);
+        let picked = egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            select,
+            egui::PopupCloseBehavior::CloseOnClick,
+            |ui| {
+                ui.set_min_width(select.rect.width().max(240.0));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                glass_label(ui, "download magnets", 11.0, palette.dim);
+                let mut picked = None;
+                if menu_row(
+                    ui,
+                    "default (none)",
+                    "from peers",
+                    current.is_none(),
+                    palette,
+                )
+                .clicked()
+                {
+                    picked = Some(RoutePick::Route(None));
+                }
+                for account in &accounts {
+                    if menu_row(
+                        ui,
+                        &account.name,
+                        account.service.label(),
+                        current.as_deref() == Some(account.id.as_str()),
+                        palette,
+                    )
+                    .clicked()
+                    {
+                        picked = Some(RoutePick::Route(Some(account.id.clone())));
+                    }
+                }
+                ui.separator();
+                let manage = if accounts.is_empty() {
+                    "add a debrid account…"
+                } else {
+                    "manage accounts…"
+                };
+                if menu_row(ui, manage, "", false, palette).clicked() {
+                    picked = Some(RoutePick::Settings);
+                }
+                picked
+            },
+        )
+        .flatten();
+        match picked {
+            Some(RoutePick::Route(route)) => self.set_debrid_route(route),
+            Some(RoutePick::Settings) => self.open_settings(SettingsTab::Accounts),
+            None => {}
+        }
     }
 
-    fn start_account_check(&mut self, service: Service, key: Secret) {
-        self.account_notes.insert(service, "checking…".into());
+    fn start_account_check(&mut self, account: String, service: Service, key: Secret) {
+        self.account_notes
+            .insert(account.clone(), "checking…".into());
         let tx = self.account_tx.clone();
         thread::spawn(move || {
             let note = match tokio::runtime::Builder::new_current_thread()
@@ -539,13 +650,13 @@ impl GuiApp {
                 },
                 Err(error) => error.to_string(),
             };
-            let _ = tx.send((service, note));
+            let _ = tx.send((account, note));
         });
     }
 
-    fn restart_job(&mut self, id: u64, route: Option<Service>, seed: bool, dest: PathBuf) -> bool {
+    fn restart_job(&mut self, id: u64, route: Option<String>, seed: bool, dest: PathBuf) -> bool {
         let route = match route {
-            Some(service) => Route::Via(service),
+            Some(account) => Route::Via(account),
             None => Route::Peers,
         };
         let kind = self.session.job(id).map(|job| job.kind);
@@ -554,7 +665,7 @@ impl GuiApp {
         } else {
             route
         };
-        if self.session.reroute_asks_about_remote(id, route) {
+        if self.session.reroute_asks_about_remote(id, &route) {
             // Restarts once answered; closing the question cancels it.
             self.remote_confirm = Some(RemoteAsk::Reroute {
                 id,
@@ -790,8 +901,8 @@ impl eframe::App for GuiApp {
         const URL_H: f32 = 28.0;
         const DEST_H: f32 = 22.0;
         const GUTTER: f32 = 12.0;
-        while let Ok((service, note)) = self.account_rx.try_recv() {
-            self.account_notes.insert(service, note);
+        while let Ok((account, note)) = self.account_rx.try_recv() {
+            self.account_notes.insert(account, note);
         }
         let header_h = if self.settings_open {
             16.0 + CONTROLS_H + 16.0
@@ -844,7 +955,7 @@ impl eframe::App for GuiApp {
                                 ui.spacing_mut().item_spacing.x = 8.0;
                                 if settings_cog(ui, palette, self.settings_open).clicked() {
                                     self.settings_open = !self.settings_open;
-                                    self.key_sources = None;
+                                    self.accounts_cache = None;
                                 }
                                 if auto_update_toggle(ui, self.auto_update, palette).clicked() {
                                     self.auto_update = !self.auto_update;
@@ -875,12 +986,19 @@ impl eframe::App for GuiApp {
                         }
                         let button_w = 80.0_f32;
                         let gap = 10.0_f32;
-                        let debrid_w = DEBRID_CONTROL_W;
-                        let glyphs_w = 42.0_f32 + debrid_w + gap;
+                        let magnet = self.mode == Mode::Magnet;
+                        let picked = self.route_account();
+                        let via = picked.as_ref().filter(|_| magnet);
+                        let route_text = route_label(picked.as_ref());
+                        // Fixed width (that of "default (none)"); longer
+                        // account names are shortened with "…".
+                        let route_w = route_select_width(ui, &route_label(None));
+                        let glyphs_w = 42.0_f32 + route_w + gap;
                         let edit_margin = 16.0_f32;
                         ui.add_space(gap);
-                        let field_w = (ui.available_width() - gap - glyphs_w - gap - button_w)
-                            .clamp(200.0, 680.0);
+                        // The field takes whatever the controls leave.
+                        let field_w =
+                            (ui.available_width() - gap - glyphs_w - gap - button_w).max(200.0);
                         let edit_w = (field_w - edit_margin).max(160.0);
                         let input_id = ui.make_persistent_id("download-url");
                         let focused = ui.memory(|memory| memory.has_focus(input_id));
@@ -912,10 +1030,17 @@ impl eframe::App for GuiApp {
                             },
                         );
                         ui.add_space(gap);
-                        let magnet = self.mode == Mode::Magnet;
-                        let via = self.debrid_route.filter(|_| magnet);
-                        if debrid_control(ui, via, magnet, palette).clicked() && magnet {
-                            self.cycle_debrid_route();
+                        let select = route_select(
+                            ui,
+                            &route_text,
+                            route_w,
+                            URL_H,
+                            via.is_some(),
+                            magnet,
+                            palette,
+                        );
+                        if magnet {
+                            self.route_menu(ui, &select, palette);
                         }
                         ui.add_space(gap);
                         if let Some(seed) =
@@ -1076,6 +1201,11 @@ impl eframe::App for GuiApp {
                     return;
                 }
                 let jobs = self.session.jobs();
+                let account_names: HashMap<String, String> = self
+                    .accounts()
+                    .into_iter()
+                    .map(|account| (account.id, account.name))
+                    .collect();
                 const SEARCH_H: f32 = 28.0;
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), SEARCH_H),
@@ -1181,16 +1311,21 @@ impl eframe::App for GuiApp {
                             .stroke(Stroke::new(1.0_f32, palette.dim))
                             .inner_margin(10.0);
                         card.show(ui, |ui| {
-                                let debrid_view =
-                                    job.debrid.as_ref().map(|debrid| (debrid.service, debrid.view()));
+                                // Shown by account name (the provider's name
+                                // for a single account).
+                                let debrid_view = job.debrid.as_ref().map(|debrid| {
+                                    let name = account_names
+                                        .get(&debrid.account)
+                                        .cloned()
+                                        .unwrap_or_else(|| debrid.service.label().to_string());
+                                    (name, debrid.view())
+                                });
                                 let fetching = debrid_view.is_some()
                                     && matches!(status.as_str(), "fetching" | "queued" | "starting");
                                 ui.horizontal(|ui| {
                                     let badge = match &debrid_view {
-                                        Some((service, _)) if fetching => {
-                                            format!("MAGNET → {}", service.label())
-                                        }
-                                        Some((service, _)) => format!("HTTP · via {}", service.label()),
+                                        Some((name, _)) if fetching => format!("MAGNET → {name}"),
+                                        Some((name, _)) => format!("HTTP · via {name}"),
                                         None => job.kind.label().to_string(),
                                     };
                                     glass_label(ui, badge, 13.0, palette.dim);
@@ -1309,11 +1444,10 @@ impl eframe::App for GuiApp {
                                             format_size(total),
                                         )
                                     }
-                                } else if let Some((service, state)) = &debrid_view {
+                                } else if let Some((name, state)) = &debrid_view {
                                     if fetching {
                                         format!(
-                                            "{status}  {} fetching {:.1}%",
-                                            service.label(),
+                                            "{status}  {name} fetching {:.1}%",
                                             f32::from(state.remote_permille) / 10.0
                                         )
                                     } else {
@@ -1383,7 +1517,7 @@ impl eframe::App for GuiApp {
                             kind: mode_from_kind(job.kind),
                             seed: job.seed,
                             dest: job.dest.clone(),
-                            route: job.debrid.as_ref().map(|debrid| debrid.service),
+                            route: job.debrid.as_ref().map(|debrid| debrid.account.clone()),
                         });
                     }
                 } else if let Some(index) = clear_index {
@@ -1413,52 +1547,114 @@ impl eframe::App for GuiApp {
 impl GuiApp {
     /// Full settings page in place of the input row and jobs (the cog turns
     /// into a back arrow). Downloads keep running underneath.
+    /// Settings: a category sidebar on the left (stays put) and the chosen
+    /// category's setting cards on the right — title and description on the
+    /// left of each card, its control flush right, like the download rows.
     fn show_settings_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
-        #[cfg(target_os = "macos")]
-        let mut persist_tint = false;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_max_width(640.0);
-                ui.spacing_mut().item_spacing.y = 6.0;
-                settings_heading(ui, "appearance", palette);
-                ui.horizontal(|ui| {
-                    glass_label(ui, "theme", 12.0, palette.dim);
-                    ui.add_space(12.0);
-                    ui.scope(|ui| {
-                        ui.style_mut().interaction.interact_radius = 0.0;
-                        for (id, name) in [
-                            (ThemeId::Phosphor, "phosphor"),
-                            (ThemeId::Amber, "amber"),
-                            (ThemeId::Ice, "ice"),
-                            (ThemeId::Scarlet, "scarlet"),
-                            (ThemeId::Violet, "violet"),
-                        ] {
-                            if theme_swatch(ui, theme(id).fg, self.theme == id, name).clicked()
-                                && self.theme != id
-                            {
-                                self.theme = id;
-                                let _ = update::set_theme(id.as_str());
-                            }
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(SIDEBAR_W, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(SIDEBAR_W);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add_space(4.0);
+                    for tab in SettingsTab::ALL {
+                        if menu_row(ui, tab.label(), "", self.settings_tab == tab, palette)
+                            .clicked()
+                        {
+                            self.settings_tab = tab;
+                        }
+                    }
+                },
+            );
+            let (line, _) = ui.allocate_exact_size(egui::vec2(1.0, height), Sense::hover());
+            let edge = Color32::from_rgba_unmultiplied(
+                palette.dim.r(),
+                palette.dim.g(),
+                palette.dim.b(),
+                90,
+            );
+            ui.painter().line_segment(
+                [line.center_top(), line.center_bottom()],
+                Stroke::new(1.0_f32, edge),
+            );
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = CARD_GAP;
+                        match self.settings_tab {
+                            SettingsTab::Appearance => self.appearance_page(ui, palette),
+                            SettingsTab::Downloads => self.downloads_page(ui, palette),
+                            SettingsTab::Accounts => self.accounts_page(ui, palette),
+                            SettingsTab::Updates => self.updates_page(ui, palette),
                         }
                     });
-                });
-                #[cfg(target_os = "macos")]
-                {
-                    let locked = self.viewport_fullscreen;
-                    let shown = update::effective_glass_tint(self.glass_tint, locked);
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        glass_label(ui, "tint", 12.0, palette.dim);
-                        ui.add_space(12.0);
-                        glass_label(
-                            ui,
-                            format!("{}%", update::glass_tint_percent(shown)),
-                            12.0,
-                            palette.fg,
-                        );
-                    });
-                    ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+            });
+        });
+    }
+
+    fn appearance_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = self.card_fill(palette.row);
+        page_title(ui, "appearance", palette);
+        // Swatches centred in the same box as the tint slider below.
+        setting_card(
+            ui,
+            fill,
+            palette,
+            ("theme", "colour theme for every screen"),
+            APPEARANCE_CONTROL_W,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let (swatch, gap) = (16.0, 10.0);
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.add_space((APPEARANCE_CONTROL_W - (5.0 * swatch + 4.0 * gap)) / 2.0);
+                ui.style_mut().interaction.interact_radius = 0.0;
+                for (id, name) in [
+                    (ThemeId::Phosphor, "phosphor"),
+                    (ThemeId::Amber, "amber"),
+                    (ThemeId::Ice, "ice"),
+                    (ThemeId::Scarlet, "scarlet"),
+                    (ThemeId::Violet, "violet"),
+                ] {
+                    if theme_swatch(ui, theme(id).fg, self.theme == id, name).clicked()
+                        && self.theme != id
+                    {
+                        self.theme = id;
+                        let _ = update::set_theme(id.as_str());
+                    }
+                }
+            },
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let locked = self.viewport_fullscreen;
+            let shown = update::effective_glass_tint(self.glass_tint, locked);
+            let description = if locked {
+                "locked at 100% in fullscreen"
+            } else {
+                "how strongly the theme colour sits on the window blur"
+            };
+            let mut persist = false;
+            setting_card(
+                ui,
+                fill,
+                palette,
+                ("window tint", description),
+                APPEARANCE_CONTROL_W,
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    glass_label(
+                        ui,
+                        format!("{}%", update::glass_tint_percent(shown)),
+                        12.0,
+                        palette.fg,
+                    );
+                    ui.allocate_ui(egui::vec2(ui.available_width(), 22.0), |ui| {
                         if locked {
                             let mut locked_tint = shown;
                             tint_slider(ui, &mut locked_tint, palette, true);
@@ -1467,19 +1663,82 @@ impl GuiApp {
                             if response.drag_stopped()
                                 || (response.changed() && !response.dragged())
                             {
-                                persist_tint = true;
+                                persist = true;
                             }
                         }
                     });
-                }
+                },
+            );
+            if persist {
+                let _ = update::set_glass_tint(self.glass_tint);
+            }
+        }
+    }
 
-                settings_heading(ui, "updates", palette);
-                if labeled_switch(ui, "auto-update", self.auto_update, palette)
-                    .on_hover_text(
-                        "check GitHub Releases and replace this app when a newer version exists",
-                    )
-                    .clicked()
-                {
+    fn downloads_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = self.card_fill(palette.row);
+        page_title(ui, "downloads", palette);
+        setting_card(
+            ui,
+            fill,
+            palette,
+            (
+                "connections per download",
+                "parallel connections for new HTTP and debrid downloads; auto is 4, and each provider caps it",
+            ),
+            200.0,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // right-to-left: listed in reverse so they read auto → 16
+                for parts in [16u8, 8, 4, 2, 1] {
+                    let on = self.connections == Some(parts);
+                    if route_chip(ui, &parts.to_string(), on, palette).clicked() && !on {
+                        self.set_connections(Some(parts));
+                    }
+                }
+                let auto = self.connections.is_none();
+                if route_chip(ui, "auto", auto, palette).clicked() && !auto {
+                    self.set_connections(None);
+                }
+            },
+        );
+        setting_card(
+            ui,
+            fill,
+            palette,
+            (
+                "remove from debrid account after download",
+                "once every file has arrived; only torrents torrenter added",
+            ),
+            SWITCH_CONTROL_W,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if toggle_switch(ui, self.debrid_remove_after, palette).clicked() {
+                    self.debrid_remove_after = !self.debrid_remove_after;
+                    self.session
+                        .set_debrid_remove_after(self.debrid_remove_after);
+                    let _ = update::set_debrid_remove_after(self.debrid_remove_after);
+                }
+            },
+        );
+    }
+
+    fn updates_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = self.card_fill(palette.row);
+        page_title(ui, "updates", palette);
+        setting_card(
+            ui,
+            fill,
+            palette,
+            (
+                "auto-update",
+                "check GitHub Releases on launch and install newer versions (same switch as the header)",
+            ),
+            SWITCH_CONTROL_W,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if toggle_switch(ui, self.auto_update, palette).clicked() {
                     self.auto_update = !self.auto_update;
                     let _ = update::set_auto_update(self.auto_update);
                     if self.auto_update {
@@ -1487,62 +1746,66 @@ impl GuiApp {
                         self.toast_hold(CHECKING_UPDATES);
                     }
                 }
+            },
+        );
+    }
 
-                settings_heading(ui, "debrid accounts", palette);
-                glass_label(
-                    ui,
-                    "Uses your own account. The provider's terms apply.",
-                    12.0,
-                    palette.dim,
-                );
-                ui.add_space(4.0);
-                for service in Service::shipped().iter().copied() {
-                    self.debrid_account_card(ui, service, palette);
-                    ui.add_space(6.0);
-                }
-
-                settings_heading(ui, "downloads", palette);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    glass_label(ui, "connections per download", 12.0, palette.dim);
-                    let auto = self.connections.is_none();
-                    if route_chip(ui, "auto (4)", auto, palette).clicked() && !auto {
-                        self.set_connections(None);
-                    }
-                    for parts in [1u8, 2, 4, 8, 16] {
-                        let label = parts.to_string();
-                        let on = self.connections == Some(parts);
-                        if route_chip(ui, &label, on, palette).clicked() && !on {
-                            self.set_connections(Some(parts));
-                        }
+    /// One card per account (like a download row), "+ add account" beside
+    /// the title, the add form as its own card. More providers or keys only
+    /// add cards.
+    fn accounts_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        let fill = self.card_fill(palette.row);
+        let accounts = self.accounts();
+        let mut open_form = false;
+        ui.horizontal(|ui| {
+            page_title(ui, "debrid accounts", palette);
+            if self.add_form.is_none() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(ink("+ add account", 12.0, palette.fg))
+                        .on_hover_text("paste an API key from your provider's account page")
+                        .clicked()
+                    {
+                        open_form = true;
                     }
                 });
-                glass_label(
-                    ui,
-                    "applies to new HTTP and debrid downloads; each service caps it (Premiumize 1)",
-                    11.0,
-                    palette.dim,
-                );
-                ui.add_space(4.0);
-                if labeled_switch(
-                    ui,
-                    "remove from service after download",
-                    self.debrid_remove_after,
-                    palette,
-                )
-                .on_hover_text("only torrents torrenter added, and only once every file landed")
-                .clicked()
-                {
-                    self.debrid_remove_after = !self.debrid_remove_after;
-                    self.session
-                        .set_debrid_remove_after(self.debrid_remove_after);
-                    let _ = update::set_debrid_remove_after(self.debrid_remove_after);
-                }
-            });
-        #[cfg(target_os = "macos")]
-        if persist_tint {
-            let _ = update::set_glass_tint(self.glass_tint);
+            }
+        });
+        if open_form {
+            self.add_form = Some(AddAccountForm::default());
         }
+        if self.add_form.is_some() {
+            settings_card(ui, fill, palette, |ui| {
+                card_title(ui, "add account", palette);
+                self.add_account_form(ui, &accounts, palette);
+            });
+        }
+        if accounts.is_empty() && self.add_form.is_none() {
+            settings_card(ui, fill, palette, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(10.0);
+                    glass_label(ui, "no accounts yet", 13.0, palette.fg);
+                    glass_label(
+                        ui,
+                        "add one to download magnets through a debrid service instead of from peers",
+                        12.0,
+                        palette.dim,
+                    );
+                    ui.add_space(10.0);
+                });
+            });
+        }
+        for account in &accounts {
+            settings_card(ui, fill, palette, |ui| {
+                self.account_row(ui, account, palette)
+            });
+        }
+        glass_label(
+            ui,
+            "uses your own account; the provider's terms apply",
+            11.0,
+            palette.dim,
+        );
     }
 
     fn set_connections(&mut self, parts: Option<u8>) {
@@ -1551,105 +1814,178 @@ impl GuiApp {
         let _ = update::set_connections(parts);
     }
 
-    fn debrid_account_card(&mut self, ui: &mut egui::Ui, service: Service, palette: Theme) {
-        let source = self.key_source(service);
-        let fill = self.card_fill(palette.row);
-        egui::Frame::NONE
-            .fill(fill)
-            .corner_radius(8)
-            .stroke(Stroke::new(1.0_f32, palette.dim))
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    glass_label(ui, service.label(), 14.0, palette.fg);
-                    ui.add_space(8.0);
-                    let (text, color) = match source {
-                        Some(KeySource::Env) => {
-                            (format!("key from {}", service.env_var()), palette.fg)
-                        }
-                        Some(KeySource::File) => ("key saved".to_string(), palette.fg),
-                        None => ("no key".to_string(), palette.dim),
-                    };
-                    glass_label(ui, text, 12.0, color);
-                });
-                if let Some(note) = self.account_notes.get(&service) {
-                    glass_label(ui, note, 12.0, palette.dim);
+    fn account_row(&mut self, ui: &mut egui::Ui, account: &AccountInfo, palette: Theme) {
+        let provider = account.service.label();
+        let detail = match (self.account_notes.get(&account.id), account.source) {
+            (Some(note), _) => format!("{provider} · {note}"),
+            (None, KeySource::Env) => format!("{provider} · from {}", account.service.env_var()),
+            (None, KeySource::File) => format!("{provider} · key saved"),
+        };
+        let mut test = false;
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
+            glass_label(ui, &account.name, 13.0, palette.fg);
+            glass_label(ui, detail, 12.0, palette.dim);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if account.source == KeySource::File
+                    && ui
+                        .button(ink("remove", 12.0, palette.fail))
+                        .on_hover_text("forget this key on this computer")
+                        .clicked()
+                {
+                    remove = true;
                 }
-                ui.add_space(4.0);
-                let mut save = false;
-                let mut test = false;
-                let mut remove = false;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let draft = self.key_drafts.entry(service).or_default();
-                    let id = ui.make_persistent_id(("debrid-key", service.id()));
-                    let focused = ui.memory(|memory| memory.has_focus(id));
-                    let mut edit = TextEdit::singleline(draft)
-                        .id(id)
-                        .password(true)
-                        .font(FontId::new(13.0, FontFamily::Monospace))
-                        .desired_width(260.0)
-                        .margin(egui::Margin::symmetric(8, 5));
-                    if !focused {
-                        edit = edit.hint_text("paste API key");
-                    }
-                    let response = ui.add(edit);
-                    let typed = !draft.trim().is_empty();
-                    if typed
-                        && (ui.button(ink("save", 12.0, palette.fg)).clicked()
-                            || (response.lost_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))))
-                    {
-                        save = true;
-                    }
-                    if (typed || source.is_some())
-                        && ui.button(ink("test", 12.0, palette.fg)).clicked()
-                    {
-                        test = true;
-                    }
-                    if source == Some(KeySource::File)
-                        && ui.button(ink("remove", 12.0, palette.fail)).clicked()
-                    {
-                        remove = true;
-                    }
-                });
-                let draft = self.key_drafts.get(&service).cloned().unwrap_or_default();
-                if save {
-                    if let Some(key) = Secret::new(draft) {
-                        let saved = credentials::set_key(service, &key);
-                        self.key_sources = None;
-                        match saved {
-                            Ok(()) => {
-                                self.key_drafts.remove(&service);
-                                self.toast_info(format!("{} key saved", service.label()));
-                                self.start_account_check(service, key);
-                            }
-                            Err(error) => self.toast_fail(format!("{error:#}")),
-                        }
-                    }
-                } else if test {
-                    let key = Secret::new(draft)
-                        .or_else(|| credentials::key_for(service).map(|(key, _)| key));
-                    if let Some(key) = key {
-                        self.start_account_check(service, key);
-                    }
-                } else if remove {
-                    let removed = credentials::remove_key(service);
-                    self.key_sources = None;
-                    match removed {
-                        Ok(()) => {
-                            self.account_notes.remove(&service);
-                            if self.debrid_route == Some(service) {
-                                self.debrid_route = None;
-                                let _ = update::set_debrid_route(None);
-                            }
-                            self.toast_info(format!("{} key removed", service.label()));
-                        }
-                        Err(error) => self.toast_fail(format!("{error:#}")),
-                    }
+                if ui
+                    .button(ink("test", 12.0, palette.fg))
+                    .on_hover_text("check the key and the account's plan")
+                    .clicked()
+                {
+                    test = true;
                 }
             });
+        });
+        if test {
+            if let Some((service, key)) = credentials::account_key(&account.id) {
+                self.start_account_check(account.id.clone(), service, key);
+            }
+        } else if remove {
+            let removed = credentials::remove_account(&account.id);
+            self.accounts_cache = None;
+            match removed {
+                Ok(()) => {
+                    self.account_notes.remove(&account.id);
+                    if self.debrid_route.as_deref() == Some(account.id.as_str()) {
+                        self.set_debrid_route(None);
+                    }
+                    self.toast_info(format!("{} removed", account.name));
+                }
+                Err(error) => self.toast_fail(format!("{error:#}")),
+            }
+        }
+    }
+
+    /// Provider first, then a name (optional: defaults to the provider's
+    /// name) and the key. Saving runs the account check.
+    fn add_account_form(&mut self, ui: &mut egui::Ui, accounts: &[AccountInfo], palette: Theme) {
+        let Some(mut form) = self.add_form.take() else {
+            return;
+        };
+        let mut keep = true;
+        let mut save = false;
+        inline_setting(
+            ui,
+            "provider",
+            "the debrid service this key belongs to",
+            palette,
+            |ui| {
+                let text = form
+                    .service
+                    .map(|service| service.label().to_string())
+                    .unwrap_or_else(|| "choose a provider".to_string());
+                let width = route_select_width(ui, "choose a provider");
+                let select = route_select(
+                    ui,
+                    &text,
+                    width,
+                    26.0,
+                    form.service.is_some(),
+                    true,
+                    palette,
+                );
+                let popup_id = ui.make_persistent_id("add-account-provider");
+                if select.clicked() {
+                    ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+                }
+                egui::popup::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &select,
+                    egui::PopupCloseBehavior::CloseOnClick,
+                    |ui| {
+                        ui.set_min_width(width.max(200.0));
+                        for service in Service::shipped() {
+                            if menu_row(
+                                ui,
+                                service.label(),
+                                "",
+                                form.service == Some(*service),
+                                palette,
+                            )
+                            .clicked()
+                            {
+                                form.service = Some(*service);
+                            }
+                        }
+                    },
+                );
+            },
+        );
+        if let Some(service) = form.service {
+            let default_name = credentials::default_name(service, accounts);
+            inline_setting(
+                ui,
+                "name",
+                "shown in the download menu; optional",
+                palette,
+                |ui| {
+                    let edit = TextEdit::singleline(&mut form.name)
+                        .hint_text(default_name.as_str())
+                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .desired_width(ui.available_width().min(280.0))
+                        .margin(egui::Margin::symmetric(8, 5));
+                    form_field(ui, edit, palette);
+                },
+            );
+            let hint = format!(
+                "from your {} account settings; stored only on this computer",
+                service.label()
+            );
+            inline_setting(ui, "api key", &hint, palette, |ui| {
+                let edit = TextEdit::singleline(&mut form.key)
+                    .password(true)
+                    .hint_text("paste the key")
+                    .font(FontId::new(13.0, FontFamily::Monospace))
+                    .desired_width(ui.available_width().min(280.0))
+                    .margin(egui::Margin::symmetric(8, 5));
+                let response = form_field(ui, edit, palette);
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(LABEL_W);
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let ready = form.service.is_some() && !form.key.trim().is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new(ink("save", 12.0, palette.fg)))
+                .clicked()
+            {
+                save = true;
+            }
+            if ui.button(ink("cancel", 12.0, palette.dim)).clicked() {
+                keep = false;
+            }
+        });
+        if save {
+            if let (Some(service), Some(key)) = (form.service, Secret::new(form.key.trim())) {
+                let added = credentials::add_account(service, &form.name, &key);
+                self.accounts_cache = None;
+                match added {
+                    Ok(account) => {
+                        self.toast_info(format!("{} saved", account.name));
+                        self.start_account_check(account.id, service, key);
+                        keep = false;
+                    }
+                    Err(error) => self.toast_fail(format!("{error:#}")),
+                }
+            }
+        }
+        if keep {
+            self.add_form = Some(form);
+        }
     }
 
     /// Clearing an unfinished debrid job torrenter added, or moving it off
@@ -1664,11 +2000,14 @@ impl GuiApp {
             self.remote_confirm = None;
             return;
         };
-        let label = job
-            .debrid
-            .as_ref()
-            .map(|debrid| debrid.service.label())
-            .unwrap_or("the service");
+        // The account's name, with its provider when the name differs.
+        let label = match job.debrid.as_ref() {
+            Some(debrid) => match self.account(&debrid.account) {
+                Some(account) => account_title(&account.name, account.service),
+                None => debrid.service.label().to_string(),
+            },
+            None => "the service".to_string(),
+        };
         let mut open = true;
         let mut choice = None;
         let title = match ask {
@@ -1743,10 +2082,10 @@ impl GuiApp {
         let mut picked = None;
         let mut start = false;
         let mut seed = draft.seed;
-        let mut route = draft.route;
+        let mut route = draft.route.clone();
         let dest = draft.dest.clone();
         let kind = draft.kind;
-        let ready = self.ready_services();
+        let ready = self.accounts();
         egui::Window::new("restart")
             .collapsible(false)
             .resizable(false)
@@ -1768,11 +2107,13 @@ impl GuiApp {
                         if route_chip(ui, "peers", route.is_none(), palette).clicked() {
                             route = None;
                         }
-                        for service in &ready {
-                            if route_chip(ui, service.label(), route == Some(*service), palette)
+                        for account in &ready {
+                            let on = route.as_deref() == Some(account.id.as_str());
+                            if route_chip(ui, &account.name, on, palette)
+                                .on_hover_text(account.service.label())
                                 .clicked()
                             {
-                                route = Some(*service);
+                                route = Some(account.id.clone());
                             }
                         }
                     });
@@ -1820,7 +2161,7 @@ impl GuiApp {
             let seed = draft.seed;
             let dest = draft.dest.clone();
             let id = draft.id;
-            let route = draft.route;
+            let route = draft.route.clone();
             if self.restart_job(id, route, seed, dest) {
                 self.restart = None;
             }
@@ -2095,66 +2436,333 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     click_cursor(response).on_hover_text("settings")
 }
 
-fn settings_heading(ui: &mut egui::Ui, text: &str, palette: Theme) {
-    ui.add_space(14.0);
-    glass_label(ui, text, 13.0, palette.fg);
-    let width = ui.available_width().min(640.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), Sense::hover());
-    ui.painter().line_segment(
-        [rect.left_center(), rect.right_center()],
-        Stroke::new(1.0_f32, palette.dim),
-    );
-    ui.add_space(4.0);
+/// Settings layout: sidebar width, gap between cards, and the label column
+/// of the add-account form.
+const SIDEBAR_W: f32 = 190.0;
+/// Control boxes on the right of a setting tile: theme and tint share one so
+/// they line up; a switch needs little.
+const APPEARANCE_CONTROL_W: f32 = 260.0;
+const SWITCH_CONTROL_W: f32 = 40.0;
+const CARD_GAP: f32 = 10.0;
+const LABEL_W: f32 = 120.0;
+
+/// The content pane's heading (the chosen category).
+fn page_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
+    ui.add_space(2.0);
+    glass_label(ui, text, 15.0, palette.fg);
 }
 
-/// Width the input row reserves for the debrid control.
-const DEBRID_CONTROL_W: f32 = 120.0;
-
-/// "debrid" (off) or "via TorBox" (on); faded outside MAGNET mode.
-fn debrid_control(
+/// One setting as a full-width tile: title and description on the left,
+/// the control in a box of `control_w` on the right. Both are centred on the
+/// tile's middle line; the tile is only as tall as its content.
+fn setting_card(
     ui: &mut egui::Ui,
-    via: Option<Service>,
+    fill: Color32,
+    palette: Theme,
+    text: (&str, &str),
+    control_w: f32,
+    layout: egui::Layout,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    let (title, description) = text;
+    settings_card(ui, fill, palette, |ui| {
+        let width = ui.available_width();
+        let text_w = (width - control_w - 24.0).max(80.0);
+        let painter = ui.painter();
+        let title = painter.layout_no_wrap(
+            title.to_string(),
+            FontId::new(13.0, FontFamily::Monospace),
+            palette.fg,
+        );
+        let description = painter.layout(
+            description.to_string(),
+            FontId::new(11.0, FontFamily::Monospace),
+            palette.dim,
+            text_w,
+        );
+        let gap = 3.0;
+        let text_h = title.size().y + gap + description.size().y;
+        let row_h = text_h.max(30.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), Sense::hover());
+        let top = rect.center().y - text_h / 2.0;
+        let title_h = title.size().y;
+        let painter = ui.painter();
+        painter.galley(egui::pos2(rect.left(), top), title, palette.fg);
+        painter.galley(
+            egui::pos2(rect.left(), top + title_h + gap),
+            description,
+            palette.dim,
+        );
+        let control_rect =
+            egui::Rect::from_min_max(egui::pos2(rect.right() - control_w, rect.top()), rect.max);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(control_rect).layout(layout));
+        control(&mut child);
+    });
+}
+
+/// A settings card: the same frame as a download row.
+fn settings_card(
+    ui: &mut egui::Ui,
+    fill: Color32,
+    palette: Theme,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::NONE
+        .fill(fill)
+        .corner_radius(8)
+        .stroke(Stroke::new(1.0_f32, palette.dim))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 6.0;
+            add_contents(ui);
+        });
+}
+
+/// A card's title, styled like a download row's badge.
+fn card_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
+    glass_label(ui, text, 13.0, palette.fg);
+}
+
+/// A short dim label in a fixed column (help on hover), then the control.
+fn inline_setting(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: &str,
+    palette: Theme,
+    control: impl FnOnce(&mut egui::Ui),
+) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(LABEL_W, 28.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let response = glass_label(ui, label, 12.0, palette.dim);
+                if !hint.is_empty() {
+                    response.on_hover_text(hint);
+                }
+            },
+        );
+        control(ui);
+    });
+}
+
+/// A text field styled like the URL field (dim border, bright on hover/focus).
+fn form_field(ui: &mut egui::Ui, edit: TextEdit<'_>, palette: Theme) -> egui::Response {
+    ui.scope(|ui| {
+        let dim = Stroke::new(1.0_f32, palette.dim);
+        let lit = Stroke::new(1.0_f32, palette.fg);
+        ui.visuals_mut().extreme_bg_color = palette.bg;
+        ui.visuals_mut().widgets.inactive.bg_stroke = dim;
+        ui.visuals_mut().widgets.hovered.bg_stroke = lit;
+        ui.visuals_mut().widgets.active.bg_stroke = lit;
+        ui.add(edit)
+    })
+    .inner
+}
+
+/// A bare on/off switch (no label), the same track as the header toggle.
+fn toggle_switch(ui: &mut egui::Ui, on: bool, palette: Theme) -> egui::Response {
+    let track_w = 34.0_f32;
+    let track_h = 18.0_f32;
+    let (track, response) = ui.allocate_exact_size(egui::vec2(track_w, track_h), Sense::click());
+    let painter = ui.painter();
+    let rounding = track_h / 2.0;
+    if on {
+        painter.rect_filled(track, rounding, palette.fg);
+    }
+    painter.rect_stroke(
+        track,
+        rounding,
+        Stroke::new(1.0_f32, if on { palette.fg } else { palette.dim }),
+        egui::StrokeKind::Inside,
+    );
+    let knob_r = 5.5_f32;
+    let knob_x = if on {
+        track.right() - 3.0 - knob_r
+    } else {
+        track.left() + 3.0 + knob_r
+    };
+    painter.circle_filled(
+        egui::pos2(knob_x, track.center().y),
+        knob_r,
+        if on { palette.bg } else { palette.dim },
+    );
+    click_cursor(response)
+}
+
+/// What the route menu picked.
+enum RoutePick {
+    Route(Option<String>),
+    Settings,
+}
+
+/// The input row's route select text: the account name, or "default (none)".
+fn route_label(route: Option<&AccountInfo>) -> String {
+    match route {
+        Some(account) => account.name.clone(),
+        None => "default (none)".to_string(),
+    }
+}
+
+const ROUTE_PAD: f32 = 10.0;
+const ROUTE_ARROW: f32 = 14.0;
+
+fn route_select_width(ui: &egui::Ui, text: &str) -> f32 {
+    let width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(
+                text.to_string(),
+                FontId::new(13.0, FontFamily::Monospace),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+    });
+    ROUTE_PAD + width + 8.0 + ROUTE_ARROW + ROUTE_PAD
+}
+
+/// A select styled like the URL field: the route text and a ▾ drawn as a
+/// triangle. Bright when a provider is picked; faded outside MAGNET mode.
+fn route_select(
+    ui: &mut egui::Ui,
+    text: &str,
+    width: f32,
+    height: f32,
+    on: bool,
     enabled: bool,
     palette: Theme,
 ) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(DEBRID_CONTROL_W, 22.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+    let faded =
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70);
+    let hovered = enabled && response.hovered();
+    let color = match (enabled, on || hovered) {
+        (false, _) => faded,
+        (true, true) => palette.fg,
+        (true, false) => palette.dim,
+    };
     let painter = ui.painter();
-    let (text, color) = match via {
-        Some(service) => (format!("via {}", service.label()), palette.fg),
-        None => ("debrid".to_string(), palette.dim),
-    };
-    let color = if enabled {
-        color
-    } else {
-        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
-    };
-    let galley = painter.layout_no_wrap(text, FontId::new(12.0, FontFamily::Monospace), color);
-    let pos = egui::pos2(
-        rect.center().x - galley.size().x / 2.0,
+    painter.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    let font = FontId::new(13.0, FontFamily::Monospace);
+    let room = (width - ROUTE_PAD - 8.0 - ROUTE_ARROW - ROUTE_PAD).max(0.0);
+    let shown = fit_text(ui, text, &font, room);
+    let shortened = shown != text;
+    let galley = painter.layout_no_wrap(shown, font, color);
+    let text_pos = egui::pos2(
+        rect.left() + ROUTE_PAD,
         rect.center().y - galley.size().y / 2.0,
     );
-    painter.galley(pos, galley, color);
-    if via.is_some() && enabled {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            4.0,
-            Stroke::new(1.0_f32, color),
-            egui::StrokeKind::Inside,
-        );
-    }
+    painter.galley(text_pos, galley, color);
+    let arrow = egui::pos2(
+        rect.right() - ROUTE_PAD - ROUTE_ARROW / 2.0,
+        rect.center().y,
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            arrow + egui::vec2(-4.5, -2.5),
+            arrow + egui::vec2(4.5, -2.5),
+            arrow + egui::vec2(0.0, 3.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
     let response = if enabled {
         click_cursor(response)
     } else {
         response
     };
-    response.on_hover_text(if !enabled {
-        "debrid applies to magnet downloads"
-    } else if via.is_some() {
-        "download through your debrid service (click to switch or turn off)"
+    let hint = if !enabled {
+        "debrid applies to magnet downloads".to_string()
+    } else if on {
+        "magnets download through your debrid account; click to change".to_string()
     } else {
-        "download from peers; click to use your debrid service"
+        "magnets download from peers; click to use a debrid account".to_string()
+    };
+    response.on_hover_text(if shortened {
+        format!("{text}\n{hint}")
+    } else {
+        hint
     })
+}
+
+/// `text`, or as much of it as fits in `width` followed by "…".
+fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, width: f32) -> String {
+    let measure = |candidate: &str| {
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(candidate.to_string(), font.clone(), Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    if measure(text) <= width {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    (0..chars.len())
+        .rev()
+        .map(|keep| format!("{}…", chars[..keep].iter().collect::<String>().trim_end()))
+        .find(|candidate| measure(candidate) <= width)
+        .unwrap_or_else(|| "…".to_string())
+}
+
+/// One route menu row: a marker for the current pick, the title, and a dim
+/// detail on the right.
+fn menu_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    selected: bool,
+    palette: Theme,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 26.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 3.0, palette.row_alt);
+    }
+    let color = if selected || response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    if selected {
+        painter.circle_filled(
+            egui::pos2(rect.left() + 9.0, rect.center().y),
+            3.0,
+            palette.fg,
+        );
+    }
+    let font = FontId::new(13.0, FontFamily::Monospace);
+    let title = painter.layout_no_wrap(title.to_string(), font, color);
+    painter.galley(
+        egui::pos2(rect.left() + 20.0, rect.center().y - title.size().y / 2.0),
+        title,
+        color,
+    );
+    if !detail.is_empty() {
+        let detail = painter.layout_no_wrap(
+            detail.to_string(),
+            FontId::new(11.0, FontFamily::Monospace),
+            palette.dim,
+        );
+        painter.galley(
+            egui::pos2(
+                rect.right() - 8.0 - detail.size().x,
+                rect.center().y - detail.size().y / 2.0,
+            ),
+            detail,
+            palette.dim,
+        );
+    }
+    click_cursor(response)
 }
 
 fn route_chip(ui: &mut egui::Ui, text: &str, selected: bool, palette: Theme) -> egui::Response {

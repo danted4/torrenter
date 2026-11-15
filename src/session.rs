@@ -53,6 +53,8 @@ pub struct Job {
 #[derive(Clone)]
 pub struct JobDebrid {
     pub service: Service,
+    /// The account (named key) the job runs through; its torrent lives there.
+    pub account: String,
     pub state: SharedDebridState,
 }
 
@@ -65,12 +67,13 @@ impl JobDebrid {
     }
 }
 
-/// How a restart routes a magnet: as before, from peers, or via a provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a restart routes a magnet: as before, from peers, or via a debrid
+/// account (by id).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Keep,
     Peers,
-    Via(Service),
+    Via(String),
 }
 
 pub fn persist_record(job: &Job) -> PersistedJob {
@@ -91,6 +94,7 @@ pub fn persist_record(job: &Job) -> PersistedJob {
         part_count: (job.kind != JobKind::Magnet)
             .then(|| u8::try_from(job.part_count).unwrap_or(u8::MAX)),
         service: job.debrid.as_ref().map(|d| d.service.id().to_string()),
+        account: job.debrid.as_ref().map(|d| d.account.clone()),
         remote_id: debrid.as_ref().and_then(|d| d.remote_id.clone()),
         added_by_us: debrid.as_ref().is_some_and(|d| d.added_by_us),
         files: debrid.map(|d| d.files).unwrap_or_default(),
@@ -195,7 +199,8 @@ struct Inner {
     debrid_remove_after: bool,
     /// Keys handed in at runtime (mobile keychains, tests). Desktop also reads
     /// `credentials.json` / env when no key is held here.
-    keys: HashMap<Service, Secret>,
+    /// Mobile accounts held in memory: id → provider and key.
+    keys: HashMap<String, (Service, Secret)>,
     desktop_keys: bool,
     debrid_bases: HashMap<Service, Url>,
 }
@@ -284,20 +289,26 @@ impl Session {
         mutex_lock(&self.inner).desktop_keys = false;
     }
 
-    pub fn set_debrid_key(&self, service: Service, key: Option<Secret>) {
+    /// Mobile: hold an account's key in memory (`None` forgets it).
+    pub fn set_debrid_account(&self, id: &str, service: Service, key: Option<Secret>) {
         let mut inner = mutex_lock(&self.inner);
         match key {
             Some(key) => {
-                inner.keys.insert(service, key);
+                inner.keys.insert(id.to_string(), (service, key));
             }
             None => {
-                inner.keys.remove(&service);
+                inner.keys.remove(id);
             }
         }
     }
 
-    pub fn has_debrid_key(&self, service: Service) -> bool {
-        resolve_key(&mutex_lock(&self.inner), service).is_some()
+    /// One account per provider, its id the provider id (today's phones).
+    pub fn set_debrid_key(&self, service: Service, key: Option<Secret>) {
+        self.set_debrid_account(service.id(), service, key);
+    }
+
+    pub fn has_account(&self, id: &str) -> bool {
+        resolve_account(&mutex_lock(&self.inner), id).is_some()
     }
 
     #[doc(hidden)]
@@ -340,6 +351,11 @@ impl Session {
                         .flatten()
                         .map(|service| JobDebrid {
                             service,
+                            // Jobs saved before accounts used the provider id.
+                            account: record
+                                .account
+                                .clone()
+                                .unwrap_or_else(|| service.id().to_string()),
                             state: Arc::new(Mutex::new(DebridState {
                                 remote_id: record.remote_id.clone(),
                                 added_by_us: record.added_by_us,
@@ -462,12 +478,13 @@ impl Session {
         self.queue_with(kind, source, None)
     }
 
-    /// Queue a job; a magnet with `via` goes through that debrid provider.
+    /// Queue a job; a magnet with `via` (an account id) goes through that
+    /// debrid account.
     pub fn queue_with(
         &self,
         kind: JobKind,
         source: &str,
-        via: Option<Service>,
+        via: Option<&str>,
     ) -> Result<u64, String> {
         let source = source.trim();
         if source.is_empty() {
@@ -492,6 +509,14 @@ impl Session {
             return Err(format!("invalid {shown} URL"));
         }
         let mut inner = mutex_lock(&self.inner);
+        let debrid = match via {
+            Some(account) => Some(JobDebrid {
+                service: account_service(&inner, account)?,
+                account: account.to_string(),
+                state: SharedDebridState::default(),
+            }),
+            None => None,
+        };
         if let Some(note) = duplicate_note(&inner.jobs, kind, source) {
             return Err(note);
         }
@@ -521,10 +546,7 @@ impl Session {
             seed,
             dest: inner.dest.clone(),
             part_count: inner.part_count,
-            debrid: via.map(|service| JobDebrid {
-                service,
-                state: SharedDebridState::default(),
-            }),
+            debrid,
         };
         let cmd = launch(&inner, &job)?;
         inner.next_id += 1;
@@ -541,7 +563,7 @@ impl Session {
     /// True when this re-route should ask whether to remove the job's torrent
     /// from the service it leaves: torrenter added it, it has a remote id, the
     /// job is not done and `route` leaves that service. Same wording as clear.
-    pub fn reroute_asks_about_remote(&self, id: u64, route: Route) -> bool {
+    pub fn reroute_asks_about_remote(&self, id: u64, route: &Route) -> bool {
         let inner = mutex_lock(&self.inner);
         inner
             .jobs
@@ -570,21 +592,25 @@ impl Session {
         };
         let old = inner.jobs[index].clone();
         let source = old.source.clone();
-        let debrid = match (old.kind, route) {
+        let debrid = match (old.kind, &route) {
             (JobKind::Http, Route::Via(_)) => return Err("debrid applies to magnet links".into()),
             (_, Route::Peers) => None,
-            (_, Route::Via(service)) => Some(match &old.debrid {
-                Some(existing) if existing.service == service => JobDebrid {
-                    service,
+            (_, Route::Via(account)) => Some(match &old.debrid {
+                // Same account: its torrent and finished files carry over.
+                Some(existing) if &existing.account == account => JobDebrid {
+                    service: existing.service,
+                    account: account.clone(),
                     state: Arc::new(Mutex::new(existing.view())),
                 },
                 _ => JobDebrid {
-                    service,
+                    service: account_service(&inner, account)?,
+                    account: account.clone(),
                     state: SharedDebridState::default(),
                 },
             }),
             (_, Route::Keep) => old.debrid.as_ref().map(|existing| JobDebrid {
                 service: existing.service,
+                account: existing.account.clone(),
                 state: Arc::new(Mutex::new(existing.view())),
             }),
         };
@@ -613,9 +639,9 @@ impl Session {
         // Claim the id now: a failed launch still stores the job under it.
         let new_id = inner.next_id;
         inner.next_id += 1;
-        let leave_remote = left_remote(&old, route)
+        let leave_remote = left_remote(&old, &route)
             .filter(|_| remove_from_service)
-            .map(|(service, remote_id)| delete_remote_cmd(&inner, service, remote_id));
+            .map(|left| delete_remote_cmd(&inner, left));
         if let Some(cmd) = leave_remote {
             let _ = self.engine.send(cmd);
         }
@@ -709,7 +735,14 @@ impl Session {
                 if !state.added_by_us {
                     return None;
                 }
-                Some(delete_remote_cmd(&inner, debrid.service, state.remote_id?))
+                Some(delete_remote_cmd(
+                    &inner,
+                    LeftRemote {
+                        account: debrid.account.clone(),
+                        service: debrid.service,
+                        remote_id: state.remote_id?,
+                    },
+                ))
             })
         };
         self.remove(id);
@@ -799,13 +832,21 @@ fn duplicate_note(jobs: &[Job], kind: JobKind, source: &str) -> Option<String> {
     })
 }
 
+/// A provider torrent a job leaves behind.
+struct LeftRemote {
+    account: String,
+    service: Service,
+    remote_id: String,
+}
+
 /// The provider torrent a re-route would leave behind and that is worth asking
-/// about: torrenter added it, the job is not done, and `route` leaves it.
-fn left_remote(job: &Job, route: Route) -> Option<(Service, String)> {
+/// about: torrenter added it, the job is not done, and `route` leaves its
+/// account (another account of the same provider counts as leaving).
+fn left_remote(job: &Job, route: &Route) -> Option<LeftRemote> {
     let existing = job.debrid.as_ref()?;
     let staying = match route {
         Route::Keep => true,
-        Route::Via(service) => service == existing.service,
+        Route::Via(account) => *account == existing.account,
         Route::Peers => false,
     };
     if staying || job.snapshot.is_done() {
@@ -815,45 +856,67 @@ fn left_remote(job: &Job, route: Route) -> Option<(Service, String)> {
     if !state.added_by_us {
         return None;
     }
-    Some((existing.service, state.remote_id?))
+    Some(LeftRemote {
+        account: existing.account.clone(),
+        service: existing.service,
+        remote_id: state.remote_id?,
+    })
 }
 
-/// Delete a torrent from a provider the user said yes to. Without a key (it
-/// was removed since) nothing can be deleted, so say so instead of dropping it.
-fn delete_remote_cmd(inner: &Inner, service: Service, remote_id: String) -> EngineCmd {
-    match resolve_key(inner, service) {
-        Some(key) => EngineCmd::DeleteRemote {
+/// Delete a torrent from a provider the user said yes to. Without the
+/// account's key (it was removed since) nothing can be deleted, so say so
+/// instead of dropping it.
+fn delete_remote_cmd(inner: &Inner, left: LeftRemote) -> EngineCmd {
+    match resolve_account(inner, &left.account) {
+        Some((service, key)) => EngineCmd::DeleteRemote {
             service,
             key,
-            remote_id,
+            remote_id: left.remote_id,
             base: inner.debrid_bases.get(&service).cloned(),
         },
         None => EngineCmd::Notice(format!(
-            "could not remove it from {}: no {} API key any more; it is still on the account",
-            service.label(),
-            service.label()
+            "could not remove it from {}: no API key for that account any more; it is still on the account",
+            left.service.label()
         )),
     }
 }
 
-/// Memory first (mobile keychains, tests), then on desktop the env override and
-/// `credentials.json`.
-fn resolve_key(inner: &Inner, service: Service) -> Option<Secret> {
-    if let Some(key) = inner.keys.get(&service) {
-        return Some(key.clone());
+/// An account's provider and key: memory first (mobile keychains, tests),
+/// then on desktop `credentials.json` and the env overrides.
+fn resolve_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    if let Some((service, key)) = inner.keys.get(id) {
+        return Some((*service, key.clone()));
     }
     if inner.desktop_keys {
-        return crate::credentials::key_for(service).map(|(key, _)| key);
+        return crate::credentials::account_key(id);
     }
     None
+}
+
+/// The provider of an account a new route names, or why it cannot be used.
+fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
+    if let Some((service, _)) = resolve_account(inner, id) {
+        return Ok(service);
+    }
+    Err(match Service::parse(id) {
+        Some(service) => format!("add a {} API key in settings first", service.label()),
+        None => "that debrid account is gone; pick another in settings".into(),
+    })
 }
 
 /// The engine command for a job. Debrid jobs need a key for their provider.
 fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
     let debrid = match &job.debrid {
         Some(debrid) => {
-            let key = resolve_key(inner, debrid.service).ok_or_else(|| {
-                format!("add a {} API key in settings first", debrid.service.label())
+            let (_, key) = resolve_account(inner, &debrid.account).ok_or_else(|| {
+                if debrid.account == debrid.service.id() {
+                    format!("add a {} API key in settings first", debrid.service.label())
+                } else {
+                    format!(
+                        "this job's {} account is gone; add it again in settings or download it as a torrent",
+                        debrid.service.label()
+                    )
+                }
             })?;
             Some(DebridLaunch {
                 service: debrid.service,
@@ -1266,7 +1329,7 @@ mod tests {
         let (session, _server, _fake) = torbox_session(dir.path(), 0).await;
         session.set_connections(Some(8));
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
             .unwrap();
         let job = session.job(id).unwrap();
         assert_eq!(job.kind, JobKind::Debrid);
@@ -1300,7 +1363,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
             .unwrap();
         // Same torrent (base32 spelling) as a plain magnet: one job per torrent.
         let b32 = "zhqvoy7xelzd5gfctxwn7lrudomnkmcw";
@@ -1314,16 +1377,12 @@ mod tests {
         let other = "magnet:?xt=urn:btih:1111111111111111111111111111111111111111";
         assert_eq!(
             session
-                .queue_with(JobKind::Magnet, other, Some(Service::TorBox))
+                .queue_with(JobKind::Magnet, other, Some("torbox"))
                 .unwrap_err(),
             "add a TorBox API key in settings first"
         );
         assert!(session
-            .queue_with(
-                JobKind::Http,
-                "https://example.com/a",
-                Some(Service::TorBox)
-            )
+            .queue_with(JobKind::Http, "https://example.com/a", Some("torbox"))
             .is_err());
         session.stop(id);
         assert!(session.job(id).unwrap().snapshot.is_stopped());
@@ -1335,7 +1394,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
             .unwrap();
         let session = tokio::task::spawn_blocking(move || {
             wait_for(|| {
@@ -1371,14 +1430,14 @@ mod tests {
         session.set_debrid_key(Service::TorBox, Secret::new(KEY));
         let other_magnet = "magnet:?xt=urn:btih:2222222222222222222222222222222222222222";
         let other = session
-            .queue_with(JobKind::Magnet, other_magnet, Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, other_magnet, Some("torbox"))
             .unwrap();
         assert_ne!(other, failed, "ids stay unique after a failed restart");
         let dest = dir.path().join("dl");
         // Nothing to ask while staying on the service.
-        assert!(session.reroute_asks_about_remote(failed, Route::Peers));
-        assert!(!session.reroute_asks_about_remote(failed, Route::Keep));
-        assert!(!session.reroute_asks_about_remote(failed, Route::Via(Service::TorBox)));
+        assert!(session.reroute_asks_about_remote(failed, &Route::Peers));
+        assert!(!session.reroute_asks_about_remote(failed, &Route::Keep));
+        assert!(!session.reroute_asks_about_remote(failed, &Route::Via("torbox".into())));
         // "as torrent", answer no: same job from peers (seed stays off in
         // tests); the torrent stays on the account.
         let peers = session
@@ -1389,7 +1448,7 @@ mod tests {
         assert!(job.debrid.is_none());
         session.stop(peers);
         assert!(
-            !session.reroute_asks_about_remote(peers, Route::Peers),
+            !session.reroute_asks_about_remote(peers, &Route::Peers),
             "a peers job has nothing on a service"
         );
         // "as torrent", answer yes: the torrent torrenter added is removed.
@@ -1409,7 +1468,7 @@ mod tests {
         .await
         .unwrap();
         session.stop(other);
-        assert!(session.reroute_asks_about_remote(other, Route::Peers));
+        assert!(session.reroute_asks_about_remote(other, &Route::Peers));
         let other_peers = session
             .restart_with(other, Route::Peers, false, dest, true)
             .unwrap();
@@ -1432,7 +1491,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
             .unwrap();
         tokio::task::spawn_blocking(move || {
             wait_for(|| {
@@ -1447,7 +1506,7 @@ mod tests {
             });
             session.stop(id);
             session.set_debrid_key(Service::TorBox, None);
-            assert!(session.reroute_asks_about_remote(id, Route::Peers));
+            assert!(session.reroute_asks_about_remote(id, &Route::Peers));
             let peers = session
                 .restart_with(id, Route::Peers, false, dir.path().join("dl"), true)
                 .unwrap();
@@ -1462,7 +1521,10 @@ mod tests {
                 ));
                 !notices.is_empty()
             });
-            assert!(notices[0].contains("no TorBox API key"), "{notices:?}");
+            assert!(
+                notices[0].contains("no API key for that account"),
+                "{notices:?}"
+            );
             assert!(fake.lock().unwrap().torrents.contains_key(&1));
         })
         .await
@@ -1475,7 +1537,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some(Service::TorBox))
+            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
             .unwrap();
         let session = tokio::task::spawn_blocking(move || {
             wait_for(|| {

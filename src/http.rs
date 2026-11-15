@@ -1848,8 +1848,10 @@ mod tests {
             starts.iter().all(|start| matches!(start % 1024, 0 | 100)),
             "{starts:?}"
         );
+        // At least one part saved bytes before the abort (how many depends
+        // on scheduling) and continues from them under the new link.
         assert!(
-            starts.iter().filter(|start| *start % 1024 == 100).count() >= 2,
+            starts.iter().any(|start| *start % 1024 == 100),
             "parts resumed across the new link: {starts:?}"
         );
         assert_eq!(

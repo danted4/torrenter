@@ -82,6 +82,10 @@ pub struct PersistedJob {
     /// Debrid route: provider id (`torbox`, …). Never a key or a link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
+    /// Debrid route: the account id (a named key; never the key). Missing on
+    /// jobs saved before accounts, which used the provider id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// Debrid route: the provider's id for this torrent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_id: Option<String>,

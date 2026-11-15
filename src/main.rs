@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use torrenter::credentials::{self, KeySource};
+use torrenter::credentials::{self, AccountInfo, KeySource};
 use torrenter::debrid::run::{start_debrid_reported, DebridRun, SharedDebridState};
 use torrenter::debrid::{check_account, Secret, Service};
 use torrenter::http::{start_url_download_in, DownloadLayout};
@@ -58,8 +58,9 @@ enum Command {
         /// One-shot download folder (does not persist)
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Fetch through a debrid service instead of peers (e.g. `torbox`)
-        #[arg(long, value_name = "SERVICE")]
+        /// Fetch through a debrid account instead of peers: its name, or the
+        /// provider (e.g. `torbox`) when it has one account
+        #[arg(long, value_name = "ACCOUNT")]
         debrid: Option<String>,
     },
     /// Check GitHub and replace this binary if a newer release exists
@@ -75,13 +76,18 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum DebridAction {
-    /// Save an API key (typed hidden, or piped on stdin)
-    Add { service: String },
-    /// Check the saved key with the service
-    Test { service: String },
-    /// Delete the saved key
-    Remove { service: String },
-    /// Show which services have a key
+    /// Add an account: a provider's API key (typed hidden, or piped on stdin)
+    Add {
+        service: String,
+        /// Name shown in menus (default: the provider's name, then "TorBox 2", …)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Check an account's key with its provider
+    Test { account: String },
+    /// Delete a saved account
+    Remove { account: String },
+    /// List accounts (names and providers; never keys)
     List,
 }
 
@@ -129,7 +135,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Http { url, dir }) => run_http(url.trim(), dir).await,
         Some(Command::Magnet { uri, dir, debrid }) => {
-            let via = debrid.as_deref().map(service_arg).transpose()?;
+            let via = debrid.as_deref().map(account_arg).transpose()?;
             run_magnet(uri.trim(), dir, via).await
         }
         Some(Command::Update | Command::Mcp | Command::Debrid { .. }) => unreachable!(),
@@ -160,11 +166,11 @@ async fn run_http(url: &str, dir: Option<PathBuf>) -> Result<()> {
     start_url_download_in(url, DownloadLayout::in_dir(dest).with_part_count(parts)).await
 }
 
-async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<Service>) -> Result<()> {
+async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -> Result<()> {
     let dest = dest_for_run(dir)?;
     println!("download: {}", dest.display());
     match via {
-        Some(service) => run_debrid_download(uri, dest, service).await,
+        Some(account) => run_debrid_download(uri, dest, &account).await,
         None => start_download(uri, load_config().seed, dest).await,
     }
 }
@@ -185,23 +191,47 @@ fn service_arg(value: &str) -> Result<Service> {
     }
 }
 
-fn key_or_hint(service: Service) -> Result<Secret> {
-    credentials::key_for(service)
-        .map(|(key, _)| key)
-        .with_context(|| {
-            format!(
-                "no {} API key; run: torrenter debrid add {}",
-                service.label(),
-                service.id()
-            )
-        })
+/// Accounts for providers this build offers.
+fn offered_accounts() -> Vec<AccountInfo> {
+    credentials::accounts()
+        .into_iter()
+        .filter(|account| Service::shipped().contains(&account.service))
+        .collect()
 }
 
-async fn run_debrid_download(uri: &str, dest: PathBuf, service: Service) -> Result<()> {
+/// An account by name, id, or provider (when that provider has one account).
+fn account_arg(value: &str) -> Result<AccountInfo> {
+    let accounts = offered_accounts();
+    if let Some(found) = credentials::resolve(value)
+        .filter(|found| accounts.iter().any(|account| account.id == found.id))
+    {
+        return Ok(found);
+    }
+    if accounts.is_empty() {
+        bail!("no debrid accounts; run: torrenter debrid add torbox");
+    }
+    bail!(
+        "no single debrid account matches {value:?}; accounts: {}",
+        accounts
+            .iter()
+            .map(|account| format!("{} ({})", account.name, account.service.id()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn account_key(account: &AccountInfo) -> Result<Secret> {
+    credentials::account_key(&account.id)
+        .map(|(_, key)| key)
+        .with_context(|| format!("no key for {}", account.name))
+}
+
+async fn run_debrid_download(uri: &str, dest: PathBuf, account: &AccountInfo) -> Result<()> {
     if !is_valid_magnet_url(uri) {
         bail!("Invalid magnet URL!");
     }
-    let key = key_or_hint(service)?;
+    let service = account.service;
+    let key = account_key(account)?;
     let config = load_config();
     let snapshot = Arc::new(JobSnapshot::default());
     let state = SharedDebridState::default();
@@ -216,7 +246,7 @@ async fn run_debrid_download(uri: &str, dest: PathBuf, service: Service) -> Resu
         base: None,
         stall_timeout: torrenter::debrid::run::STALL_TIMEOUT,
     };
-    println!("\nvia {}\n[1] pause/resume   [2] stop\n", service.label());
+    println!("\nvia {}\n[1] pause/resume   [2] stop\n", account.name);
     let task = tokio::spawn(start_debrid_reported(run, Arc::clone(&snapshot)));
     let controls = tokio::spawn(watch_cli_controls(Arc::clone(&snapshot)));
     let bar = ProgressBar::new(1);
@@ -278,81 +308,80 @@ fn read_secret(prompt: &str) -> Result<Secret> {
 async fn run_debrid_command(action: &DebridAction) -> Result<()> {
     match action {
         DebridAction::List => {
-            let configured = credentials::configured();
-            for service in Service::shipped() {
-                let source = configured
-                    .iter()
-                    .find(|(found, _)| found == service)
-                    .map(|(_, source)| match source {
-                        KeySource::Env => "key from environment",
-                        KeySource::File => "key saved",
-                    })
-                    .unwrap_or("no key");
-                println!("{:<12} {source}", service.id());
+            let accounts = offered_accounts();
+            if accounts.is_empty() {
+                println!("no debrid accounts; run: torrenter debrid add torbox");
+            }
+            for account in accounts {
+                let source = match account.source {
+                    KeySource::Env => format!("from {}", account.service.env_var()),
+                    KeySource::File => "saved".to_string(),
+                };
+                println!("{:<20} {:<12} {source}", account.name, account.service.id());
             }
             Ok(())
         }
-        DebridAction::Add { service } => {
+        DebridAction::Add { service, name } => {
             let service = service_arg(service)?;
             let key = read_secret(&format!("{} API key: ", service.label()))?;
-            credentials::set_key(service, &key)?;
-            println!("saved {} key", service.label());
-            report_account(service, &key).await;
-            if credentials::key_for(service).is_some_and(|(_, source)| source == KeySource::Env) {
-                println!("note: {} overrides the saved key", service.env_var());
+            let account = credentials::add_account(service, name.as_deref().unwrap_or(""), &key)?;
+            println!("saved {} ({})", account.name, service.label());
+            report_account(&account.name, service, &key).await;
+            Ok(())
+        }
+        DebridAction::Test { account } => {
+            let account = account_arg(account)?;
+            let key = account_key(&account)?;
+            report_account(&account.name, account.service, &key).await;
+            Ok(())
+        }
+        DebridAction::Remove { account } => {
+            let account = account_arg(account)?;
+            credentials::remove_account(&account.id)?;
+            if load_config().debrid_route.as_deref() == Some(account.id.as_str()) {
+                update::set_debrid_route(None)?;
             }
-            Ok(())
-        }
-        DebridAction::Test { service } => {
-            let service = service_arg(service)?;
-            let key = key_or_hint(service)?;
-            report_account(service, &key).await;
-            Ok(())
-        }
-        DebridAction::Remove { service } => {
-            let service = service_arg(service)?;
-            credentials::remove_key(service)?;
-            println!("removed {} key", service.label());
+            println!("removed {}", account.name);
             Ok(())
         }
     }
 }
 
-async fn report_account(service: Service, key: &Secret) {
+async fn report_account(name: &str, service: Service, key: &Secret) {
     match check_account(service, key).await {
         Ok(account) if account.premium => println!(
-            "{}: premium{}",
-            service.label(),
+            "{name}: premium{}",
             account
                 .expires
                 .map(|until| format!(" until {until}"))
                 .unwrap_or_default()
         ),
-        Ok(_) => println!(
-            "{}: key works but the account is not premium",
-            service.label()
-        ),
-        Err(error) => eprintln!("{}: {error}", service.label()),
+        Ok(_) => println!("{name}: key works but the account is not premium"),
+        Err(error) => eprintln!("{name}: {error}"),
     }
+}
+
+/// The remembered route's account, if it still exists.
+fn route_account(config: &update::AppConfig) -> Option<AccountInfo> {
+    let id = config.debrid_route.as_deref()?;
+    offered_accounts()
+        .into_iter()
+        .find(|account| account.id == id)
 }
 
 fn route_label(config: &update::AppConfig) -> String {
-    match config.debrid_route.as_deref().and_then(Service::parse) {
-        Some(service) => format!("via {}", service.label()),
-        None => "off".into(),
+    match route_account(config) {
+        Some(account) => format!("via {}", account.name),
+        None => "default (none)".into(),
     }
 }
 
-/// Next route in the cycle: off → each service with a key → off.
-fn next_route(current: Option<Service>) -> Option<Service> {
-    let ready: Vec<Service> = Service::shipped()
-        .iter()
-        .copied()
-        .filter(|service| credentials::key_for(*service).is_some())
-        .collect();
-    match current.and_then(|now| ready.iter().position(|service| *service == now)) {
-        None => ready.first().copied(),
-        Some(index) => ready.get(index + 1).copied(),
+/// Next route in the cycle: default → each account → default.
+fn next_route(current: Option<&AccountInfo>) -> Option<AccountInfo> {
+    let accounts = offered_accounts();
+    match current.and_then(|now| accounts.iter().position(|account| account.id == now.id)) {
+        None => accounts.first().cloned(),
+        Some(index) => accounts.get(index + 1).cloned(),
     }
 }
 
@@ -452,49 +481,58 @@ async fn prompt_user() -> Result<()> {
                 continue;
             }
             "7" => {
-                let current = config.debrid_route.as_deref().and_then(Service::parse);
-                let next = next_route(current);
+                let current = route_account(&config);
+                let next = next_route(current.as_ref());
                 if next.is_none() && current.is_none() {
-                    println!("add a key first (menu 8)");
+                    println!("add an account first (menu 8)");
                 }
-                let config = update::set_debrid_route(next.map(Service::id))?;
+                let config = update::set_debrid_route(next.as_ref().map(|a| a.id.as_str()))?;
                 println!("debrid: {}", route_label(&config));
                 continue;
             }
             "8" => {
-                let shipped = Service::shipped();
-                print!(
-                    "\nService ({}):\n\n",
-                    shipped
-                        .iter()
-                        .map(|s| s.id())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                std::io::stdout().flush()?;
-                let mut name = String::new();
-                stdin.read_line(&mut name).await?;
-                let service = match service_arg(name.trim()) {
-                    Ok(service) => service,
-                    Err(error) => {
-                        eprintln!("{error:#}");
-                        continue;
-                    }
-                };
-                print!("\na. add key   t. test key   r. remove key\n\n");
+                let _ = run_debrid_command(&DebridAction::List).await;
+                print!("\na. add account   t. test account   r. remove account\n\n");
                 std::io::stdout().flush()?;
                 let mut pick = String::new();
                 stdin.read_line(&mut pick).await?;
-                let action = match pick.trim() {
-                    "a" => DebridAction::Add {
-                        service: service.id().into(),
-                    },
-                    "t" => DebridAction::Test {
-                        service: service.id().into(),
-                    },
-                    "r" => DebridAction::Remove {
-                        service: service.id().into(),
-                    },
+                let pick = pick.trim().to_string();
+                let ask = |prompt: String| {
+                    print!("\n{prompt}\n\n");
+                    let _ = std::io::stdout().flush();
+                };
+                let action = match pick.as_str() {
+                    "a" => {
+                        ask(format!(
+                            "Provider ({}):",
+                            Service::shipped()
+                                .iter()
+                                .map(|s| s.id())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        let mut service = String::new();
+                        stdin.read_line(&mut service).await?;
+                        ask("Name (Enter for the provider's name):".into());
+                        let mut name = String::new();
+                        stdin.read_line(&mut name).await?;
+                        let name = name.trim();
+                        DebridAction::Add {
+                            service: service.trim().into(),
+                            name: (!name.is_empty()).then(|| name.to_string()),
+                        }
+                    }
+                    "t" | "r" => {
+                        ask("Account name:".into());
+                        let mut account = String::new();
+                        stdin.read_line(&mut account).await?;
+                        let account = account.trim().to_string();
+                        if pick == "t" {
+                            DebridAction::Test { account }
+                        } else {
+                            DebridAction::Remove { account }
+                        }
+                    }
                     _ => continue,
                 };
                 if let Err(error) = run_debrid_command(&action).await {
@@ -552,11 +590,7 @@ async fn prompt_user() -> Result<()> {
                     eprintln!("\nInvalid magnet URL! Try again ...");
                     continue;
                 }
-                let via = load_config()
-                    .debrid_route
-                    .as_deref()
-                    .and_then(Service::parse)
-                    .filter(|service| Service::shipped().contains(service));
+                let via = route_account(&load_config());
                 return run_magnet(&magnet, None, via).await;
             }
         }
@@ -624,7 +658,13 @@ mod tests {
         let cli = Cli::try_parse_from(["torrenter", "debrid", "add", "torbox"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Debrid { action: DebridAction::Add { ref service } }) if service == "torbox"
+            Some(Command::Debrid { action: DebridAction::Add { ref service, name: None } }) if service == "torbox"
+        ));
+        let named = Cli::try_parse_from(["torrenter", "debrid", "add", "torbox", "--name", "work"])
+            .unwrap();
+        assert!(matches!(
+            named.command,
+            Some(Command::Debrid { action: DebridAction::Add { name: Some(ref name), .. } }) if name == "work"
         ));
         assert!(
             Cli::try_parse_from(["torrenter", "debrid", "add", "torbox", "SECRET"]).is_err(),

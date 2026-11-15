@@ -187,7 +187,7 @@ impl Engine {
     }
 
     pub fn has_debrid_key(&self, service: String) -> bool {
-        service_from(&service).is_ok_and(|service| self.session.has_debrid_key(service))
+        service_from(&service).is_ok_and(|service| self.session.has_account(service.id()))
     }
 
     /// Settings "Test": blocking network call — run it off the UI thread.
@@ -213,11 +213,12 @@ impl Engine {
             })
     }
 
-    /// Queue a magnet through a debrid service.
+    /// Queue a magnet through a debrid service. On phones each service is
+    /// one account whose id is the service id.
     pub fn queue_debrid(&self, source: String, service: String) -> Result<u64, EngineError> {
         let service = service_from(&service)?;
         self.session
-            .queue_with(JobKind::Magnet, &source, Some(service))
+            .queue_with(JobKind::Magnet, &source, Some(service.id()))
             .map_err(Into::into)
     }
 
@@ -233,7 +234,7 @@ impl Engine {
         remove_from_service: bool,
     ) -> Result<u64, EngineError> {
         let route = match service {
-            Some(id) => Route::Via(service_from(&id)?),
+            Some(id) => Route::Via(service_from(&id)?.id().to_string()),
             None => Route::Peers,
         };
         self.session
@@ -246,12 +247,12 @@ impl Engine {
     pub fn reroute_asks_about_remote(&self, id: u64, service: Option<String>) -> bool {
         let route = match service {
             Some(id) => match service_from(&id) {
-                Ok(service) => Route::Via(service),
+                Ok(service) => Route::Via(service.id().to_string()),
                 Err(_) => return false,
             },
             None => Route::Peers,
         };
-        self.session.reroute_asks_about_remote(id, route)
+        self.session.reroute_asks_about_remote(id, &route)
     }
 
     /// Connections per download for new jobs (`None` = Auto = 4).

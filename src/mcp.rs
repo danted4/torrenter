@@ -35,8 +35,9 @@ struct Mcp {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct MagnetArg {
     uri: String,
-    /// Optional debrid service id (see `debrid_services`). Omit to download
-    /// from peers. Uses the user's own configured key; never ask for one.
+    /// Optional debrid account: its name, or a provider id when that provider
+    /// has one account (see `debrid_services`). Omit to download from peers.
+    /// Uses the user's own configured key; never ask for one.
     #[serde(default)]
     debrid: Option<String>,
 }
@@ -72,7 +73,7 @@ struct JobToolView {
     finished: bool,
     active: bool,
     error: Option<String>,
-    /// Debrid route only: service id, provider fetch progress (0–100) and file i/n.
+    /// Debrid route only: account name, provider fetch progress (0–100) and file i/n.
     #[serde(skip_serializing_if = "Option::is_none")]
     debrid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,6 +90,8 @@ struct DebridServiceView {
     label: String,
     /// A key is configured (env or settings). The key itself is never exposed.
     configured: bool,
+    /// Names of the user's accounts for this provider (pass one as `debrid`).
+    accounts: Vec<String>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -118,7 +121,7 @@ fn job_view(job: &Job) -> JobToolView {
     let debrid = job
         .debrid
         .as_ref()
-        .map(|debrid| (debrid.service, debrid.view()));
+        .map(|debrid| (debrid.account.clone(), debrid.view()));
     JobToolView {
         id: job.id,
         kind: job.kind.as_str().to_string(),
@@ -139,7 +142,13 @@ fn job_view(job: &Job) -> JobToolView {
         finished: job.snapshot.is_done(),
         active: job.snapshot.is_active(),
         error,
-        debrid: debrid.as_ref().map(|(service, _)| service.id().to_string()),
+        debrid: debrid.as_ref().map(|(account, _)| {
+            torrenter::credentials::accounts()
+                .into_iter()
+                .find(|each| &each.id == account)
+                .map(|each| each.name)
+                .unwrap_or_else(|| account.clone())
+        }),
         debrid_progress: debrid
             .as_ref()
             .map(|(_, state)| f32::from(state.remote_permille) / 10.0),
@@ -231,7 +240,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Queue a magnet download (leech). Pass `debrid` (a service id from debrid_services) only when the user asks to download through their debrid service."
+        description = "Queue a magnet download (leech). Pass `debrid` (an account name from debrid_services) only when the user asks to download through their debrid account."
     )]
     fn queue_magnet(
         &self,
@@ -242,28 +251,49 @@ impl Mcp {
         }
         let via = match debrid.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
             None => None,
-            Some(id) => Some(
-                Service::parse(id)
-                    .filter(|service| Service::shipped().contains(service))
-                    .ok_or_else(|| format!("unknown debrid service {id:?}; see debrid_services"))?,
+            Some(query) => Some(
+                torrenter::credentials::resolve(query)
+                    .filter(|account| Service::shipped().contains(&account.service))
+                    .map(|account| account.id)
+                    .ok_or_else(|| match Service::parse(query) {
+                        // A provider with no account: the user adds one.
+                        Some(service)
+                            if !torrenter::credentials::accounts()
+                                .iter()
+                                .any(|account| account.service == service) =>
+                        {
+                            format!("add a {} API key in settings first", service.label())
+                        }
+                        _ => format!(
+                            "no single debrid account matches {query:?}; see debrid_services"
+                        ),
+                    })?,
             ),
         };
         self.session
-            .queue_with(JobKind::Magnet, &uri, via)
+            .queue_with(JobKind::Magnet, &uri, via.as_deref())
             .map(|id| Json(QueueOut { id }))
     }
 
     #[tool(
-        description = "Debrid services this build supports and whether the user configured a key for each (keys are never shown)"
+        description = "Debrid providers this build supports, with the names of the user's accounts for each (keys are never shown)"
     )]
     fn debrid_services(&self) -> Json<DebridServicesOut> {
         Json(DebridServicesOut {
             services: Service::shipped()
                 .iter()
-                .map(|service| DebridServiceView {
-                    id: service.id().into(),
-                    label: service.label().into(),
-                    configured: self.session.has_debrid_key(*service),
+                .map(|service| {
+                    let accounts: Vec<String> = torrenter::credentials::accounts()
+                        .into_iter()
+                        .filter(|account| account.service == *service)
+                        .map(|account| account.name)
+                        .collect();
+                    DebridServiceView {
+                        id: service.id().into(),
+                        label: service.label().into(),
+                        configured: !accounts.is_empty(),
+                        accounts,
+                    }
                 })
                 .collect(),
         })
