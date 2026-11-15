@@ -574,52 +574,48 @@ impl GuiApp {
         }
         let accounts = self.accounts();
         let current = self.route_account().map(|account| account.id);
-        let picked = egui::popup::popup_below_widget(
-            ui,
-            popup_id,
-            select,
-            egui::PopupCloseBehavior::CloseOnClick,
-            |ui| {
-                ui.set_min_width(select.rect.width().max(240.0));
-                ui.spacing_mut().item_spacing.y = 2.0;
-                glass_label(ui, "download magnets", 11.0, palette.dim);
-                let mut picked = None;
+        let picked = solid_popup_below(ui, popup_id, select, palette, |ui| {
+            ui.set_min_width(select.rect.width().max(240.0));
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.vertical_centered(|ui| {
+                ui.label(ink("download magnets", 11.0, palette.dim));
+            });
+            let mut picked = None;
+            if menu_row(
+                ui,
+                "default (none)",
+                "from peers",
+                current.is_none(),
+                palette,
+            )
+            .clicked()
+            {
+                picked = Some(RoutePick::Route(None));
+            }
+            for account in &accounts {
                 if menu_row(
                     ui,
-                    "default (none)",
-                    "from peers",
-                    current.is_none(),
+                    &account.name,
+                    account.service.label(),
+                    current.as_deref() == Some(account.id.as_str()),
                     palette,
                 )
                 .clicked()
                 {
-                    picked = Some(RoutePick::Route(None));
+                    picked = Some(RoutePick::Route(Some(account.id.clone())));
                 }
-                for account in &accounts {
-                    if menu_row(
-                        ui,
-                        &account.name,
-                        account.service.label(),
-                        current.as_deref() == Some(account.id.as_str()),
-                        palette,
-                    )
-                    .clicked()
-                    {
-                        picked = Some(RoutePick::Route(Some(account.id.clone())));
-                    }
-                }
-                ui.separator();
-                let manage = if accounts.is_empty() {
-                    "add a debrid account…"
-                } else {
-                    "manage accounts…"
-                };
-                if menu_row(ui, manage, "", false, palette).clicked() {
-                    picked = Some(RoutePick::Settings);
-                }
-                picked
-            },
-        )
+            }
+            ui.separator();
+            let manage = if accounts.is_empty() {
+                "add a debrid account…"
+            } else {
+                "manage accounts…"
+            };
+            if menu_row_centered(ui, manage, None, false, palette).clicked() {
+                picked = Some(RoutePick::Settings);
+            }
+            picked
+        })
         .flatten();
         match picked {
             Some(RoutePick::Route(route)) => self.set_debrid_route(route),
@@ -1884,6 +1880,16 @@ impl GuiApp {
         // One width for the select and both fields, flush right: just wide
         // enough for the select's placeholder.
         let field_w = route_select_width(ui, "choose a provider") + 8.0;
+        // A typed name must be free (any provider, any case); checked as
+        // you type, shown on the field, and save stays off meanwhile.
+        let name_error = {
+            let typed = form.name.trim();
+            (!typed.is_empty()
+                && accounts
+                    .iter()
+                    .any(|account| account.name.eq_ignore_ascii_case(typed)))
+            .then(|| format!("\"{typed}\" is already one of your accounts"))
+        };
         card_title(ui, "add account", palette);
         ui.label(ink(
             "paste an API key from your provider's account page; it is stored only on this computer",
@@ -1924,46 +1930,52 @@ impl GuiApp {
                         if select.clicked() {
                             ui.memory_mut(|memory| memory.toggle_popup(popup_id));
                         }
-                        egui::popup::popup_below_widget(
-                            ui,
-                            popup_id,
-                            &select,
-                            egui::PopupCloseBehavior::CloseOnClick,
-                            |ui| {
-                                ui.set_min_width(field_w);
-                                for service in Service::shipped() {
-                                    if menu_row(
-                                        ui,
-                                        service.label(),
-                                        "",
-                                        form.service == Some(*service),
-                                        palette,
-                                    )
-                                    .clicked()
-                                    {
-                                        form.service = Some(*service);
-                                    }
+                        solid_popup_below(ui, popup_id, &select, palette, |ui| {
+                            // Exactly as wide as the select above it.
+                            let margin = ui.style().spacing.menu_margin;
+                            let inner = field_w - f32::from(margin.left) - f32::from(margin.right);
+                            ui.set_width(inner);
+                            for service in Service::shipped() {
+                                if menu_row_centered(
+                                    ui,
+                                    service.label(),
+                                    None,
+                                    form.service == Some(*service),
+                                    palette,
+                                )
+                                .clicked()
+                                {
+                                    form.service = Some(*service);
                                 }
-                            },
-                        );
+                            }
+                        });
                     },
                 );
                 if let Some(service) = form.service {
                     let default_name = credentials::default_name(service, accounts);
                     tile_divider(ui, palette);
-                    setting_row(
+                    let (name_note, name_tint) = match &name_error {
+                        Some(error) => (error.as_str(), palette.fail),
+                        None => ("shown in the download menu; optional", palette.dim),
+                    };
+                    setting_row_tinted(
                         ui,
                         palette,
-                        ("name", "shown in the download menu; optional"),
+                        ("name", name_note),
+                        name_tint,
                         field_w,
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
+                            // Placeholder centred like the select; typed
+                            // text reads from the left.
+                            let align = placeholder_align(&form.name);
                             let edit = TextEdit::singleline(&mut form.name)
+                                .horizontal_align(align)
                                 .hint_text(default_name.as_str())
                                 .font(FontId::new(13.0, FontFamily::Monospace))
                                 .desired_width(field_w - 16.0)
                                 .margin(egui::Margin::symmetric(8, 5));
-                            form_field(ui, edit, palette);
+                            form_field_checked(ui, edit, palette, name_error.is_some());
                         },
                     );
                     tile_divider(ui, palette);
@@ -1975,7 +1987,9 @@ impl GuiApp {
                         field_w,
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
+                            let align = placeholder_align(&form.key);
                             let edit = TextEdit::singleline(&mut form.key)
+                                .horizontal_align(align)
                                 .password(true)
                                 .hint_text("paste the key")
                                 .font(FontId::new(13.0, FontFamily::Monospace))
@@ -2015,7 +2029,8 @@ impl GuiApp {
                 if ui.button(ink("cancel", 12.0, palette.fail)).clicked() {
                     keep = false;
                 }
-                let ready = form.service.is_some() && !form.key.trim().is_empty();
+                let ready =
+                    form.service.is_some() && !form.key.trim().is_empty() && name_error.is_none();
                 let mut primary = egui::Button::new(ink(
                     "save account",
                     12.0,
@@ -2029,7 +2044,7 @@ impl GuiApp {
                 }
             },
         );
-        if save {
+        if save && name_error.is_none() {
             if let (Some(service), Some(key)) = (form.service, Secret::new(form.key.trim())) {
                 let added = credentials::add_account(service, &form.name, &key);
                 self.accounts_cache = None;
@@ -2538,6 +2553,20 @@ fn setting_row(
     layout: egui::Layout,
     control: impl FnOnce(&mut egui::Ui),
 ) {
+    setting_row_tinted(ui, palette, text, palette.dim, control_w, layout, control);
+}
+
+/// `setting_row` with the description in `tint` (an inline error uses
+/// `palette.fail`).
+fn setting_row_tinted(
+    ui: &mut egui::Ui,
+    palette: Theme,
+    text: (&str, &str),
+    tint: Color32,
+    control_w: f32,
+    layout: egui::Layout,
+    control: impl FnOnce(&mut egui::Ui),
+) {
     let (title, description) = text;
     let width = ui.available_width();
     let text_w = (width - control_w - 24.0).max(80.0);
@@ -2550,7 +2579,7 @@ fn setting_row(
     let description = painter.layout(
         description.to_string(),
         FontId::new(11.0, FontFamily::Monospace),
-        palette.dim,
+        tint,
         text_w,
     );
     let gap = 3.0;
@@ -2564,7 +2593,7 @@ fn setting_row(
     painter.galley(
         egui::pos2(rect.left(), top + title_h + gap),
         description,
-        palette.dim,
+        tint,
     );
     let control_rect =
         egui::Rect::from_min_max(egui::pos2(rect.right() - control_w, rect.top()), rect.max);
@@ -2608,11 +2637,40 @@ fn card_title(ui: &mut egui::Ui, text: &str, palette: Theme) {
     ui.label(ink(text, 13.0, palette.fg));
 }
 
+/// Centre a field's placeholder (matching the dropdowns) but keep typed text
+/// left-aligned, so the cursor does not jump and a long key shows its start.
+fn placeholder_align(text: &str) -> egui::Align {
+    if text.is_empty() {
+        egui::Align::Center
+    } else {
+        egui::Align::Min
+    }
+}
+
 /// A text field styled like the URL field (dim border, bright on hover/focus).
 fn form_field(ui: &mut egui::Ui, edit: TextEdit<'_>, palette: Theme) -> egui::Response {
+    form_field_checked(ui, edit, palette, false)
+}
+
+/// `form_field` with a fail-coloured border while `error` is set.
+fn form_field_checked(
+    ui: &mut egui::Ui,
+    edit: TextEdit<'_>,
+    palette: Theme,
+    error: bool,
+) -> egui::Response {
     ui.scope(|ui| {
-        let dim = Stroke::new(1.0_f32, palette.dim);
-        let lit = Stroke::new(1.0_f32, palette.fg);
+        let (dim, lit) = if error {
+            (
+                Stroke::new(1.0_f32, palette.fail),
+                Stroke::new(1.0_f32, palette.fail),
+            )
+        } else {
+            (
+                Stroke::new(1.0_f32, palette.dim),
+                Stroke::new(1.0_f32, palette.fg),
+            )
+        };
         ui.visuals_mut().extreme_bg_color = palette.bg;
         ui.visuals_mut().widgets.inactive.bg_stroke = dim;
         ui.visuals_mut().widgets.hovered.bg_stroke = lit;
@@ -2715,9 +2773,16 @@ fn route_select(
     let shown = fit_text(ui, text, &font, room);
     let shortened = shown != text;
     let galley = painter.layout_no_wrap(shown, font, color);
-    // Centred in the space left of the arrow.
+    // Centred on the whole box, like the fields below it; a label too long
+    // for that is centred in the space left of the arrow instead.
     let text_left = rect.left() + ROUTE_PAD;
-    let text_x = text_left + ((room - galley.size().x) / 2.0).max(0.0);
+    let arrow_left = rect.right() - ROUTE_PAD - ROUTE_ARROW;
+    let centred = rect.center().x - galley.size().x / 2.0;
+    let text_x = if centred >= text_left && centred + galley.size().x <= arrow_left - 4.0 {
+        centred
+    } else {
+        text_left + ((room - galley.size().x) / 2.0).max(0.0)
+    };
     let text_pos = egui::pos2(text_x, rect.center().y - galley.size().y / 2.0);
     painter.galley(text_pos, galley, color);
     let arrow = egui::pos2(
@@ -2773,8 +2838,87 @@ fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, width: f32) -> String {
         .unwrap_or_else(|| "…".to_string())
 }
 
+/// A dropdown list under `select` with a solid fill, so lines behind it do
+/// not show through the window's glass. Closes on any click.
+fn solid_popup_below<R>(
+    ui: &mut egui::Ui,
+    popup_id: egui::Id,
+    select: &egui::Response,
+    palette: Theme,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let mut solid = ui.new_child(egui::UiBuilder::new());
+    let fill = Color32::from_rgb(palette.row.r(), palette.row.g(), palette.row.b());
+    solid.visuals_mut().window_fill = fill;
+    solid.visuals_mut().panel_fill = fill;
+    egui::popup::popup_below_widget(
+        &solid,
+        popup_id,
+        select,
+        egui::PopupCloseBehavior::CloseOnClick,
+        add_contents,
+    )
+}
+
+/// A list row with its text centred (and an optional dim detail after it),
+/// for a dropdown whose own label is centred.
+fn menu_row_centered(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: Option<&str>,
+    selected: bool,
+    palette: Theme,
+) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 26.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, 3.0, palette.row_alt);
+    }
+    let color = if selected || response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    if selected {
+        painter.circle_filled(
+            egui::pos2(rect.left() + 9.0, rect.center().y),
+            3.0,
+            palette.fg,
+        );
+    }
+    let title = painter.layout_no_wrap(
+        title.to_string(),
+        FontId::new(13.0, FontFamily::Monospace),
+        color,
+    );
+    let detail = detail.map(|text| {
+        painter.layout_no_wrap(
+            format!("  {text}"),
+            FontId::new(11.0, FontFamily::Monospace),
+            palette.dim,
+        )
+    });
+    let total = title.size().x + detail.as_ref().map_or(0.0, |d| d.size().x);
+    let left = rect.center().x - total / 2.0;
+    let title_w = title.size().x;
+    painter.galley(
+        egui::pos2(left, rect.center().y - title.size().y / 2.0),
+        title,
+        color,
+    );
+    if let Some(detail) = detail {
+        let y = rect.center().y - detail.size().y / 2.0;
+        painter.galley(egui::pos2(left + title_w, y), detail, palette.dim);
+    }
+    click_cursor(response)
+}
+
+/// Space a list row keeps on both sides: the current pick's ● and its gap.
+const MENU_INSET: f32 = 20.0;
+
 /// One route menu row: a marker for the current pick, the title, and a dim
-/// detail on the right.
+/// detail at the far right.
 fn menu_row(
     ui: &mut egui::Ui,
     title: &str,
@@ -2803,7 +2947,10 @@ fn menu_row(
     let font = FontId::new(13.0, FontFamily::Monospace);
     let title = painter.layout_no_wrap(title.to_string(), font, color);
     painter.galley(
-        egui::pos2(rect.left() + 20.0, rect.center().y - title.size().y / 2.0),
+        egui::pos2(
+            rect.left() + MENU_INSET,
+            rect.center().y - title.size().y / 2.0,
+        ),
         title,
         color,
     );
@@ -2815,7 +2962,7 @@ fn menu_row(
         );
         painter.galley(
             egui::pos2(
-                rect.right() - 8.0 - detail.size().x,
+                rect.right() - MENU_INSET - detail.size().x,
                 rect.center().y - detail.size().y / 2.0,
             ),
             detail,
