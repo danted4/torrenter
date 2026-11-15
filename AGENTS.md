@@ -54,7 +54,7 @@ cargo test --locked --all-features <name_substring>
 cargo run --locked --features ios-xcframework --bin ios-xcframework
 ```
 
-CI also sets `RUSTFLAGS=-D warnings`. Clippy and tests always use `--all-features` so `src/gui.rs` and `src/icon.rs` compile. On Linux, install the same GUI libs CI does before `--all-features` builds: `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`. The iOS job rebuilds `TorrenterFFI.xcframework` and runs unsigned Simulator XCTest; it does not sign or install on a device.
+CI also sets `RUSTFLAGS=-D warnings`. Clippy and tests always use `--all-features` so `src/gui.rs` and `src/icon.rs` compile. On Linux, install the same GUI libs CI does before `--all-features` builds: `libgtk-3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`. The iOS job builds only an unoptimised simulator slice (`TORRENTER_IOS_SIM_ONLY=1`), type-checks the device target with `cargo check`, and runs unsigned Simulator XCTest; it does not sign or install on a device. A device-only link or release-profile problem therefore shows up at the next local `cargo run --features ios-xcframework --bin ios-xcframework` (both slices, release), not in CI.
 
 Release (do not tag unless the user asks): `git tag vX.Y.Z && git push origin vX.Y.Z` only after the commit is on `main`. Workflow: `.github/workflows/release.yml`. Bump `version` in `Cargo.toml` and add a [CHANGELOG.md](CHANGELOG.md) entry when shipping a release.
 
