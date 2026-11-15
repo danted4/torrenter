@@ -197,19 +197,31 @@ final class EngineOwner: ObservableObject {
         }
     }
 
-    /// Saved accounts whose key is still in the Keychain. A key saved per
-    /// provider before accounts existed becomes an account with that id.
+    /// Accounts this build can use. A key saved per provider before accounts
+    /// existed becomes an account with that id. An entry leaves the stored list
+    /// only when its Keychain item is provably gone; a read that fails for
+    /// another reason (before first unlock) or an unknown provider never
+    /// removes it, and the shipped-provider filter applies in memory only.
     private func loadAccounts() -> [DebridAccount] {
-        var list = Prefs.accounts()
+        let stored = Self.storedAccounts()
+        var list = stored
         for service in debridServices() where !list.contains(where: { $0.id == service.id }) {
-            if Keychain.read(service.id) != nil {
+            if Keychain.exists(service.id) {
                 list.append(DebridAccount(id: service.id, name: service.label, service: service.id))
             }
         }
+        list = list.filter { Keychain.exists($0.id) }
+        if list != stored {
+            Prefs.saveAccounts(list)
+        }
         let shipped = Set(debridServices().map(\.id))
-        list = list.filter { shipped.contains($0.service) && Keychain.read($0.id) != nil }
-        Prefs.saveAccounts(list)
-        return list
+        return list.filter { shipped.contains($0.service) }
+    }
+
+    /// The saved list, one entry per id (a hand-edited list may repeat one).
+    private static func storedAccounts() -> [DebridAccount] {
+        var seen = Set<String>()
+        return Prefs.accounts().filter { seen.insert($0.id).inserted }
     }
 
     func account(_ id: String?) -> DebridAccount? {
@@ -226,7 +238,7 @@ final class EngineOwner: ObservableObject {
 
     /// Account names by id, for job rows.
     var accountNames: [String: String] {
-        Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0.name) })
+        Dictionary(accounts.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// The name a new account gets when none is typed: the provider's, then
@@ -266,8 +278,10 @@ final class EngineOwner: ObservableObject {
             return false
         }
         try? engine?.setDebridAccount(id: id, service: service, key: trimmed)
-        accounts.append(DebridAccount(id: id, name: finalName, service: service))
-        Prefs.saveAccounts(accounts)
+        let added = DebridAccount(id: id, name: finalName, service: service)
+        accounts.append(added)
+        // Edit the stored list so accounts this build hides are kept.
+        Prefs.saveAccounts(Self.storedAccounts().filter { $0.id != id } + [added])
         testAccount(id: id, key: trimmed)
         return true
     }
@@ -277,7 +291,7 @@ final class EngineOwner: ObservableObject {
         Keychain.delete(id)
         try? engine?.setDebridAccount(id: id, service: account.service, key: nil)
         accounts.removeAll { $0.id == id }
-        Prefs.saveAccounts(accounts)
+        Prefs.saveAccounts(Self.storedAccounts().filter { $0.id != id })
         accountNotes[id] = nil
         if debridRoute == id {
             debridRoute = nil

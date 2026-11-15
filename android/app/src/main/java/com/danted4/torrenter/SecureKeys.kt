@@ -75,6 +75,14 @@ object SecureKeys {
             false
         }
 
+    /** A stored (encrypted) key exists for this id, without decrypting it.
+     *  False only when it is gone (never saved, removed, or dropped by [read]
+     *  as unusable). */
+    fun has(
+        context: Context,
+        id: String,
+    ): Boolean = prefs(context).contains(id)
+
     fun delete(
         context: Context,
         service: String,

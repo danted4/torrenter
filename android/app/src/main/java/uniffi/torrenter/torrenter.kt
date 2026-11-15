@@ -766,10 +766,6 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
-
-
-
-
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -801,8 +797,6 @@ fun uniffi_torrenter_checksum_method_engine_drain_notices(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_has_account(
 ): Short
-fun uniffi_torrenter_checksum_method_engine_has_debrid_key(
-): Short
 fun uniffi_torrenter_checksum_method_engine_hydrate(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_jobs(
@@ -828,8 +822,6 @@ fun uniffi_torrenter_checksum_method_engine_seed(
 fun uniffi_torrenter_checksum_method_engine_set_connections(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_debrid_account(
-): Short
-fun uniffi_torrenter_checksum_method_engine_set_debrid_key(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(
 ): Short
@@ -908,8 +900,6 @@ fun uniffi_torrenter_fn_method_engine_drain_notices(`ptr`: Pointer,uniffi_out_er
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_method_engine_has_account(`ptr`: Pointer,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
-fun uniffi_torrenter_fn_method_engine_has_debrid_key(`ptr`: Pointer,`service`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
 fun uniffi_torrenter_fn_method_engine_hydrate(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_jobs(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
@@ -935,8 +925,6 @@ fun uniffi_torrenter_fn_method_engine_seed(`ptr`: Pointer,uniffi_out_err: Uniffi
 fun uniffi_torrenter_fn_method_engine_set_connections(`ptr`: Pointer,`parts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_set_debrid_account(`ptr`: Pointer,`id`: RustBuffer.ByValue,`service`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-fun uniffi_torrenter_fn_method_engine_set_debrid_key(`ptr`: Pointer,`service`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_set_debrid_remove_after(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1100,9 +1088,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_has_account() != 2350.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_has_debrid_key() != 63083.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_torrenter_checksum_method_engine_hydrate() != 18602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1115,7 +1100,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_queue() != 33011.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 53234.toShort()) {
+    if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_remove() != 13505.toShort()) {
@@ -1140,9 +1125,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_account() != 34681.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_key() != 60581.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_remove_after() != 8005.toShort()) {
@@ -1617,8 +1599,6 @@ public interface EngineInterface {
     
     fun `hasAccount`(`id`: kotlin.String): kotlin.Boolean
     
-    fun `hasDebridKey`(`service`: kotlin.String): kotlin.Boolean
-    
     fun `hydrate`()
     
     fun `jobs`(): List<JobView>
@@ -1628,8 +1608,7 @@ public interface EngineInterface {
     fun `queue`(`kind`: Kind, `source`: kotlin.String): kotlin.ULong
     
     /**
-     * Queue a magnet through a debrid account (its id; an account set with
-     * `set_debrid_key` uses the service id).
+     * Queue a magnet through a debrid account (its id).
      */
     fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong
     
@@ -1668,12 +1647,6 @@ public interface EngineInterface {
      * id; call before `hydrate` so restored jobs can start.
      */
     fun `setDebridAccount`(`id`: kotlin.String, `service`: kotlin.String, `key`: kotlin.String?)
-    
-    /**
-     * Hand a key from the platform keychain to the engine (memory only), or
-     * `None` to forget it. Call before `hydrate` so restored jobs can start.
-     */
-    fun `setDebridKey`(`service`: kotlin.String, `key`: kotlin.String?)
     
     fun `setDebridRemoveAfter`(`enabled`: kotlin.Boolean)
     
@@ -1847,18 +1820,6 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     }
     
 
-    override fun `hasDebridKey`(`service`: kotlin.String): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_has_debrid_key(
-        it, FfiConverterString.lower(`service`),_status)
-}
-    }
-    )
-    }
-    
-
     
     @Throws(EngineException::class)override fun `hydrate`()
         = 
@@ -1909,8 +1870,7 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 
     
     /**
-     * Queue a magnet through a debrid account (its id; an account set with
-     * `set_debrid_key` uses the service id).
+     * Queue a magnet through a debrid account (its id).
      */
     @Throws(EngineException::class)override fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong {
             return FfiConverterULong.lift(
@@ -2034,22 +1994,6 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     uniffiRustCallWithError(EngineException) { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_debrid_account(
         it, FfiConverterString.lower(`id`),FfiConverterString.lower(`service`),FfiConverterOptionalString.lower(`key`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * Hand a key from the platform keychain to the engine (memory only), or
-     * `None` to forget it. Call before `hydrate` so restored jobs can start.
-     */
-    @Throws(EngineException::class)override fun `setDebridKey`(`service`: kotlin.String, `key`: kotlin.String?)
-        = 
-    callWithPointer {
-    uniffiRustCallWithError(EngineException) { _status ->
-    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_debrid_key(
-        it, FfiConverterString.lower(`service`),FfiConverterOptionalString.lower(`key`),_status)
 }
     }
     

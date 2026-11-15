@@ -296,11 +296,6 @@ RustBuffer uniffi_torrenter_fn_method_engine_drain_notices(void*_Nonnull ptr, Ru
 int8_t uniffi_torrenter_fn_method_engine_has_account(void*_Nonnull ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
-#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HAS_DEBRID_KEY
-int8_t uniffi_torrenter_fn_method_engine_has_debrid_key(void*_Nonnull ptr, RustBuffer service, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HYDRATE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_HYDRATE
 void uniffi_torrenter_fn_method_engine_hydrate(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -364,11 +359,6 @@ void uniffi_torrenter_fn_method_engine_set_connections(void*_Nonnull ptr, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_ACCOUNT
 void uniffi_torrenter_fn_method_engine_set_debrid_account(void*_Nonnull ptr, RustBuffer id, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_KEY
-#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_KEY
-void uniffi_torrenter_fn_method_engine_set_debrid_key(void*_Nonnull ptr, RustBuffer service, RustBuffer key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
@@ -731,12 +721,6 @@ uint16_t uniffi_torrenter_checksum_method_engine_has_account(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
-#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HAS_DEBRID_KEY
-uint16_t uniffi_torrenter_checksum_method_engine_has_debrid_key(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HYDRATE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_HYDRATE
 uint16_t uniffi_torrenter_checksum_method_engine_hydrate(void
@@ -812,12 +796,6 @@ uint16_t uniffi_torrenter_checksum_method_engine_set_connections(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_ACCOUNT
 uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_account(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_KEY
-#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_KEY
-uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_key(void
     
 );
 #endif

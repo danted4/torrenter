@@ -194,9 +194,15 @@ fn account_key_at(
 
 fn resolve_in(accounts: &[AccountInfo], query: &str) -> Option<AccountInfo> {
     let query = query.trim();
+    // Ids first across every account, then names, so no name can shadow an id.
     if let Some(found) = accounts
         .iter()
-        .find(|account| account.id == query || account.name.eq_ignore_ascii_case(query))
+        .find(|account| account.id == query)
+        .or_else(|| {
+            accounts
+                .iter()
+                .find(|account| account.name.eq_ignore_ascii_case(query))
+        })
     {
         return Some(found.clone());
     }
@@ -262,6 +268,13 @@ fn add_account_at(
         };
         if taken.iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
             bail!("an account named \"{name}\" already exists");
+        }
+        // A name that reads as an id (another account's, or an env one)
+        // would be ambiguous for the CLI and MCP.
+        if name.to_ascii_lowercase().starts_with("env:")
+            || taken.iter().any(|a| a.id.eq_ignore_ascii_case(&name))
+        {
+            bail!("\"{name}\" is reserved; pick another name");
         }
         let id = new_id(service, &file.accounts);
         file.accounts.push(StoredAccount {
@@ -363,6 +376,29 @@ mod tests {
             "env keys are never written"
         );
         assert_eq!(resolve_in(&all[1..], "torbox").unwrap().id, "env:torbox");
+    }
+
+    #[test]
+    fn names_cannot_shadow_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.json");
+        std::fs::write(&path, r#"{"keys":{"torbox":"old"}}"#).unwrap();
+        // The migrated account has id "torbox"; renaming that slot is out.
+        let all = accounts_at(&path, no_env);
+        assert_eq!(all[0].id, "torbox");
+        for bad in ["torbox", "TORBOX", "env:torbox", "Env:anything"] {
+            let error = add_account_at(&path, Service::TorBox, bad, &key("k"), no_env)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("reserved") || error.contains("already exists"),
+                "{bad}: {error}"
+            );
+        }
+        let work = add_account_at(&path, Service::TorBox, "work", &key("k2"), no_env).unwrap();
+        let all = accounts_at(&path, no_env);
+        assert_eq!(resolve_in(&all, "torbox").unwrap().id, "torbox");
+        assert_eq!(resolve_in(&all, &work.id).unwrap().name, "work");
     }
 
     #[test]

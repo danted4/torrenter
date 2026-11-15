@@ -565,8 +565,6 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     func hasAccount(id: String)  -> Bool
     
-    func hasDebridKey(service: String)  -> Bool
-    
     func hydrate() throws 
     
     func jobs()  -> [JobView]
@@ -576,8 +574,7 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func queue(kind: Kind, source: String) throws  -> UInt64
     
     /**
-     * Queue a magnet through a debrid account (its id; an account set with
-     * `set_debrid_key` uses the service id).
+     * Queue a magnet through a debrid account (its id).
      */
     func queueDebrid(source: String, account: String) throws  -> UInt64
     
@@ -616,12 +613,6 @@ public protocol EngineProtocol: AnyObject, Sendable {
      * id; call before `hydrate` so restored jobs can start.
      */
     func setDebridAccount(id: String, service: String, key: String?) throws 
-    
-    /**
-     * Hand a key from the platform keychain to the engine (memory only), or
-     * `None` to forget it. Call before `hydrate` so restored jobs can start.
-     */
-    func setDebridKey(service: String, key: String?) throws 
     
     func setDebridRemoveAfter(enabled: Bool) 
     
@@ -746,14 +737,6 @@ open func hasAccount(id: String) -> Bool  {
 })
 }
     
-open func hasDebridKey(service: String) -> Bool  {
-    return try!  FfiConverterBool.lift(try! rustCall() {
-    uniffi_torrenter_fn_method_engine_has_debrid_key(self.uniffiClonePointer(),
-        FfiConverterString.lower(service),$0
-    )
-})
-}
-    
 open func hydrate()throws   {try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_hydrate(self.uniffiClonePointer(),$0
     )
@@ -784,8 +767,7 @@ open func queue(kind: Kind, source: String)throws  -> UInt64  {
 }
     
     /**
-     * Queue a magnet through a debrid account (its id; an account set with
-     * `set_debrid_key` uses the service id).
+     * Queue a magnet through a debrid account (its id).
      */
 open func queueDebrid(source: String, account: String)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
@@ -878,18 +860,6 @@ open func setConnections(parts: UInt8?)  {try! rustCall() {
 open func setDebridAccount(id: String, service: String, key: String?)throws   {try rustCallWithError(FfiConverterTypeEngineError_lift) {
     uniffi_torrenter_fn_method_engine_set_debrid_account(self.uniffiClonePointer(),
         FfiConverterString.lower(id),
-        FfiConverterString.lower(service),
-        FfiConverterOptionString.lower(key),$0
-    )
-}
-}
-    
-    /**
-     * Hand a key from the platform keychain to the engine (memory only), or
-     * `None` to forget it. Call before `hydrate` so restored jobs can start.
-     */
-open func setDebridKey(service: String, key: String?)throws   {try rustCallWithError(FfiConverterTypeEngineError_lift) {
-    uniffi_torrenter_fn_method_engine_set_debrid_key(self.uniffiClonePointer(),
         FfiConverterString.lower(service),
         FfiConverterOptionString.lower(key),$0
     )
@@ -1725,9 +1695,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_has_account() != 2350) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_has_debrid_key() != 63083) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_torrenter_checksum_method_engine_hydrate() != 18602) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1740,7 +1707,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_queue() != 33011) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 53234) {
+    if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_remove() != 13505) {
@@ -1765,9 +1732,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_debrid_account() != 34681) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_torrenter_checksum_method_engine_set_debrid_key() != 60581) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_debrid_remove_after() != 8005) {

@@ -116,7 +116,15 @@ fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn job_view(job: &Job) -> JobToolView {
+/// Account names by id, read once per tool call.
+fn account_names() -> std::collections::HashMap<String, String> {
+    torrenter::credentials::accounts()
+        .into_iter()
+        .map(|account| (account.id, account.name))
+        .collect()
+}
+
+fn job_view(job: &Job, names: &std::collections::HashMap<String, String>) -> JobToolView {
     let error = job.snapshot.error();
     let debrid = job
         .debrid
@@ -143,10 +151,9 @@ fn job_view(job: &Job) -> JobToolView {
         active: job.snapshot.is_active(),
         error,
         debrid: debrid.as_ref().map(|(account, _)| {
-            torrenter::credentials::accounts()
-                .into_iter()
-                .find(|each| &each.id == account)
-                .map(|each| each.name)
+            names
+                .get(account)
+                .cloned()
                 .unwrap_or_else(|| account.clone())
         }),
         debrid_progress: debrid
@@ -279,14 +286,15 @@ impl Mcp {
         description = "Debrid providers this build supports, with the names of the user's accounts for each (keys are never shown)"
     )]
     fn debrid_services(&self) -> Json<DebridServicesOut> {
+        let all = torrenter::credentials::accounts();
         Json(DebridServicesOut {
             services: Service::shipped()
                 .iter()
                 .map(|service| {
-                    let accounts: Vec<String> = torrenter::credentials::accounts()
-                        .into_iter()
+                    let accounts: Vec<String> = all
+                        .iter()
                         .filter(|account| account.service == *service)
-                        .map(|account| account.name)
+                        .map(|account| account.name.clone())
                         .collect();
                     DebridServiceView {
                         id: service.id().into(),
@@ -315,7 +323,14 @@ impl Mcp {
     #[tool(description = "List jobs and one-shot notices")]
     fn jobs(&self) -> Json<JobsOut> {
         Json(JobsOut {
-            jobs: self.session.jobs().iter().map(job_view).collect(),
+            jobs: {
+                let names = account_names();
+                self.session
+                    .jobs()
+                    .iter()
+                    .map(|job| job_view(job, &names))
+                    .collect()
+            },
             notices: take_notices(&self.notices),
         })
     }

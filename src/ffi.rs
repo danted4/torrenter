@@ -181,19 +181,6 @@ impl Engine {
         Arc::new(Self { session })
     }
 
-    /// Hand a key from the platform keychain to the engine (memory only), or
-    /// `None` to forget it. Call before `hydrate` so restored jobs can start.
-    pub fn set_debrid_key(&self, service: String, key: Option<String>) -> Result<(), EngineError> {
-        let service = service_from(&service)?;
-        self.session
-            .set_debrid_key(service, key.and_then(Secret::new));
-        Ok(())
-    }
-
-    pub fn has_debrid_key(&self, service: String) -> bool {
-        service_from(&service).is_ok_and(|service| self.session.has_account(service.id()))
-    }
-
     /// Hand a named account's key from the platform keychain to the engine
     /// (memory only), or `None` to forget it. `id` is the app's stable account
     /// id; call before `hydrate` so restored jobs can start.
@@ -236,8 +223,7 @@ impl Engine {
             })
     }
 
-    /// Queue a magnet through a debrid account (its id; an account set with
-    /// `set_debrid_key` uses the service id).
+    /// Queue a magnet through a debrid account (its id).
     pub fn queue_debrid(&self, source: String, account: String) -> Result<u64, EngineError> {
         self.session
             .queue_with(JobKind::Magnet, &source, Some(&account))
@@ -434,7 +420,7 @@ mod tests {
             false,
         );
         let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10".to_string();
-        assert!(!engine.has_debrid_key("torbox".into()));
+        assert!(!engine.has_account("torbox-1a2b3c".into()));
         let error = engine
             .queue_debrid(magnet.clone(), "torbox".into())
             .unwrap_err();
@@ -443,13 +429,17 @@ mod tests {
             "{error}"
         );
         engine
-            .set_debrid_key("torbox".into(), Some("k".into()))
+            .set_debrid_account("torbox-1a2b3c".into(), "torbox".into(), Some("k".into()))
             .unwrap();
-        assert!(engine.has_debrid_key("torbox".into()));
-        engine.set_debrid_key("torbox".into(), None).unwrap();
-        assert!(!engine.has_debrid_key("torbox".into()));
+        assert!(engine.has_account("torbox-1a2b3c".into()));
+        // A job saved before accounts names the provider: its only account.
+        assert!(engine.has_account("torbox".into()));
+        engine
+            .set_debrid_account("torbox-1a2b3c".into(), "torbox".into(), None)
+            .unwrap();
+        assert!(!engine.has_account("torbox-1a2b3c".into()));
         assert!(engine
-            .set_debrid_key("nope".into(), Some("k".into()))
+            .set_debrid_account("x".into(), "nope".into(), Some("k".into()))
             .is_err());
         assert_eq!(debrid_services()[0].id, "torbox");
         assert!(

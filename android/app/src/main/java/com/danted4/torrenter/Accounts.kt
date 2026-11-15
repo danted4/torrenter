@@ -21,22 +21,43 @@ data class DebridAccount(
 object Accounts {
     private const val KEY = "debridAccounts"
 
-    /** Saved accounts whose key is still stored. A key saved per provider
-     *  before accounts existed becomes an account with that id. */
+    /**
+     * Accounts this build can use. A key saved per provider before accounts
+     * existed becomes an account with that id. An entry is dropped from the
+     * stored list only when its key is provably gone ([SecureKeys.has]); a
+     * transient Keystore failure or an unknown provider never removes it, and
+     * the shipped-provider filter applies in memory only.
+     */
     fun load(context: Context): List<DebridAccount> {
-        val prefs = context.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
-        val list = parse(prefs.getString(KEY, null)).toMutableList()
-        val services = runCatching { debridServices() }.getOrDefault(emptyList())
-        for (service in services) {
-            if (list.none { it.id == service.id } && SecureKeys.read(context, service.id) != null) {
+        val stored = stored(context)
+        val services = runCatching { debridServices() }.getOrNull()
+        val list = stored.toMutableList()
+        for (service in services.orEmpty()) {
+            if (list.none { it.id == service.id } && SecureKeys.has(context, service.id)) {
                 list += DebridAccount(service.id, service.label, service.id)
             }
         }
-        val shipped = services.map { it.id }.toSet()
-        val kept = list.filter { it.service in shipped && SecureKeys.read(context, it.id) != null }
-        save(context, kept)
-        return kept
+        val kept = list.filter { SecureKeys.has(context, it.id) }
+        if (kept != stored) save(context, kept)
+        val shipped = services?.map { it.id }?.toSet() ?: return kept
+        return kept.filter { it.service in shipped }
     }
+
+    /** Add one account to the stored list (others, even hidden ones, kept). */
+    fun add(
+        context: Context,
+        account: DebridAccount,
+    ) = save(context, stored(context).filterNot { it.id == account.id } + account)
+
+    fun remove(
+        context: Context,
+        id: String,
+    ) = save(context, stored(context).filterNot { it.id == id })
+
+    private fun stored(context: Context): List<DebridAccount> =
+        parse(
+            context.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE).getString(KEY, null),
+        ).distinctBy { it.id }
 
     fun save(
         context: Context,

@@ -229,8 +229,9 @@ private fun AppScreen(
             return false
         }
         engine?.setDebridAccount(id, service, key.trim())
-        accounts = accounts + DebridAccount(id, finalName, service)
-        Accounts.save(activity, accounts)
+        val added = DebridAccount(id, finalName, service)
+        accounts = accounts + added
+        Accounts.add(activity, added)
         testAccount(id)
         return true
     }
@@ -240,7 +241,7 @@ private fun AppScreen(
         SecureKeys.delete(activity, id)
         engine?.setDebridAccount(id, gone.service, null)
         accounts = accounts.filterNot { it.id == id }
-        Accounts.save(activity, accounts)
+        Accounts.remove(activity, id)
         notes.remove(id)
         if (debridRoute == id) {
             setRoute(null)

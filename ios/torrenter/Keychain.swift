@@ -29,6 +29,14 @@ enum Keychain {
         return key
     }
 
+    /// False only when the item is provably gone (`errSecItemNotFound`); any
+    /// other failure (e.g. before first unlock) counts as still there.
+    static func exists(_ service: String) -> Bool {
+        var query = query(service)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil) != errSecItemNotFound
+    }
+
     @discardableResult
     static func save(_ service: String, key: String) -> Bool {
         let data = Data(key.utf8)

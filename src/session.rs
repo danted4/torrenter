@@ -888,9 +888,33 @@ fn resolve_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
         return Some((*service, key.clone()));
     }
     if inner.desktop_keys {
-        return crate::credentials::account_key(id);
+        if let Some(found) = crate::credentials::account_key(id) {
+            return Some(found);
+        }
     }
-    None
+    legacy_account(inner, id)
+}
+
+/// Jobs and routes saved before accounts name the provider (`torbox`). With
+/// no account of that id, use the provider's only account (saved, env or in
+/// memory), as the CLI and MCP resolve a provider name.
+fn legacy_account(inner: &Inner, id: &str) -> Option<(Service, Secret)> {
+    let service = Service::parse(id).filter(|service| service.id() == id)?;
+    let mut memory = inner.keys.values().filter(|(each, _)| *each == service);
+    if let Some((_, key)) = memory.next() {
+        return memory.next().is_none().then(|| (service, key.clone()));
+    }
+    if !inner.desktop_keys {
+        return None;
+    }
+    let accounts: Vec<_> = crate::credentials::accounts()
+        .into_iter()
+        .filter(|account| account.service == service)
+        .collect();
+    match accounts.as_slice() {
+        [only] => crate::credentials::account_key(&only.id),
+        _ => None,
+    }
 }
 
 /// The provider of an account a new route names, or why it cannot be used.
