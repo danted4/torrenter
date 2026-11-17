@@ -164,12 +164,34 @@ jobs:
           TORRENTER_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleRelease
         working-directory: android
+      # The APK must be signed with exactly the project key (its certificate
+      # SHA-256, a public value kept in the ANDROID_CERT_SHA256 repo
+      # variable) and must not be debuggable: a swapped key would silently
+      # break in-place updates for everyone.
       - name: Check the signature
+        shell: bash
+        env:
+          EXPECTED_CERT: ${{ vars.ANDROID_CERT_SHA256 }}
         run: |
+          set -euo pipefail
           apk=android/app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
-          if grep -q "CN=Android Debug" "$RUNNER_TEMP/certs.txt"; then
-            echo "::error::the APK is debug-signed"
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ': ' | tr 'A-F' 'a-f')
+          if [ -z "$expected" ]; then
+            echo "::error::ANDROID_CERT_SHA256 repo variable is not set"
+            exit 1
+          fi
+          "$tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+          cat "$RUNNER_TEMP/certs.txt"
+          signers=$(grep -c '^Signer #[0-9]* certificate SHA-256 digest:' "$RUNNER_TEMP/certs.txt" || true)
+          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
+          if [ "$signers" != "1" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::the APK is not signed with the project key (got '$actual', expected '$expected')"
+            exit 1
+          fi
+          "$tools/aapt2" dump badging "$apk" > "$RUNNER_TEMP/badging.txt"
+          if grep -q "application-debuggable" "$RUNNER_TEMP/badging.txt"; then
+            echo "::error::the APK is debuggable"
             exit 1
           fi
       - name: Remove the keystore
