@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.9.1] - 2026-11-18
+
+### Changed
+
+- Android: the release APK is now a release build signed with the project's own key instead of a new throwaway debug key every release. Updates from 3.9.1 on install over the previous version; moving from 3.9.0 or older needs one uninstall (different key).
+- Android: "Open with torrenter" registers only for `application/x-bittorrent`, not any file whose name ends in `.torrent` (Play Protect flagged 3.9.0 as harmful for that catch-all). Files a file manager labels generically can still be opened with the upload icon.
+
 ## [3.9.0] - 2026-11-18
 
 ### Added

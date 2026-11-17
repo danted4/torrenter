@@ -144,13 +144,41 @@ jobs:
         run: |
           cargo ndk -P 30 -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
             build --locked --features ffi --release --lib
-      - name: Assemble debug APK
-        run: gradle assembleDebug
+      # Signed with the project's release key (GitHub secrets), never a debug
+      # key: a stable signer lets updates install over earlier versions and
+      # lets Play Protect recognise the publisher across releases.
+      - name: Release keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 is not set; refusing to ship an APK without the release key"
+            exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - name: Assemble release APK
+        env:
+          TORRENTER_KEYSTORE: ${{ runner.temp }}/release.jks
+          TORRENTER_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TORRENTER_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          TORRENTER_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle assembleRelease
         working-directory: android
+      - name: Check the signature
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          if grep -q "CN=Android Debug" "$RUNNER_TEMP/certs.txt"; then
+            echo "::error::the APK is debug-signed"
+            exit 1
+          fi
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
       - name: Package
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/torrenter-android.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist/torrenter-android.apk
       - uses: actions/upload-artifact@v6
         with:
           name: torrenter-android.apk
