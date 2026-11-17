@@ -2,7 +2,7 @@
 
 Open-source torrent client and magnet downloader for Windows, macOS, Linux, Android (APK) and iOS (build from source): an ad-free alternative to uTorrent for magnet links, with IDM-style multi-connection downloads for direct links (up to 16 parallel connections, resumable), optional debrid support (TorBox; Real-Debrid, AllDebrid, Premiumize and Debrid-Link experimental), and an MCP server so AI agents can queue downloads. Not affiliated with uTorrent or Internet Download Manager.
 
-| Where | How to get it | Type |
+| Platform&nbsp;/&nbsp;feature | How to get it | Type |
 |---|---|---|
 | <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-pc-windows-msvc.exe` (CLI), `torrenter-gui-x86_64-pc-windows-msvc.exe` (GUI) | Platform support |
 | <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/torrenter/releases/latest): CLI and GUI for Apple Silicon (`aarch64`) and Intel (`x86_64`); the GUI also as `torrenter.app` (`.app.zip`) | Platform support |
