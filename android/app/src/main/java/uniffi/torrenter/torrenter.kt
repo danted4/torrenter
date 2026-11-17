@@ -768,6 +768,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -786,6 +788,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
     fun uniffi_torrenter_checksum_func_banner(
 ): Short
 fun uniffi_torrenter_checksum_func_debrid_services(
+): Short
+fun uniffi_torrenter_checksum_func_inspect_torrent_file(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_any_active(
 ): Short
@@ -944,6 +948,8 @@ fun uniffi_torrenter_fn_func_banner(uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_func_debrid_services(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+fun uniffi_torrenter_fn_func_inspect_torrent_file(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun ffi_torrenter_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun ffi_torrenter_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1074,6 +1080,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_func_debrid_services() != 34755.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_func_inspect_torrent_file() != 47923.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_any_active() != 33237.toShort()) {
@@ -2352,6 +2361,42 @@ public object FfiConverterTypeServiceView: FfiConverterRustBuffer<ServiceView> {
 
 
 
+/**
+ * What a `.torrent` is, read before asking whether to start it ("Open with"
+ * files are confirmed first). Nothing is queued or saved.
+ */
+data class TorrentFileView (
+    var `name`: kotlin.String, 
+    var `private`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTorrentFileView: FfiConverterRustBuffer<TorrentFileView> {
+    override fun read(buf: ByteBuffer): TorrentFileView {
+        return TorrentFileView(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TorrentFileView) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`private`)
+    )
+
+    override fun write(value: TorrentFileView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`private`, buf)
+    }
+}
+
+
+
 
 
 sealed class EngineException: kotlin.Exception() {
@@ -2603,6 +2648,16 @@ public object FfiConverterSequenceTypeServiceView: FfiConverterRustBuffer<List<S
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_func_debrid_services(
         _status)
+}
+    )
+    }
+    
+
+    @Throws(EngineException::class) fun `inspectTorrentFile`(`bytes`: kotlin.ByteArray): TorrentFileView {
+            return FfiConverterTypeTorrentFileView.lift(
+    uniffiRustCallWithError(EngineException) { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_func_inspect_torrent_file(
+        FfiConverterByteArray.lower(`bytes`),_status)
 }
     )
     }

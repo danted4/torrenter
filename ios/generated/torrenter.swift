@@ -1417,6 +1417,80 @@ public func FfiConverterTypeServiceView_lower(_ value: ServiceView) -> RustBuffe
 }
 
 
+/**
+ * What a `.torrent` is, read before asking whether to start it ("Open with"
+ * files are confirmed first). Nothing is queued or saved.
+ */
+public struct TorrentFileView {
+    public var name: String
+    public var `private`: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, `private`: Bool) {
+        self.name = name
+        self.`private` = `private`
+    }
+}
+
+#if compiler(>=6)
+extension TorrentFileView: Sendable {}
+#endif
+
+
+extension TorrentFileView: Equatable, Hashable {
+    public static func ==(lhs: TorrentFileView, rhs: TorrentFileView) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.`private` != rhs.`private` {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(`private`)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTorrentFileView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TorrentFileView {
+        return
+            try TorrentFileView(
+                name: FfiConverterString.read(from: &buf), 
+                private: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TorrentFileView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.`private`, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTorrentFileView_lift(_ buf: RustBuffer) throws -> TorrentFileView {
+    return try FfiConverterTypeTorrentFileView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTorrentFileView_lower(_ value: TorrentFileView) -> RustBuffer {
+    return FfiConverterTypeTorrentFileView.lower(value)
+}
+
+
 public enum EngineError: Swift.Error {
 
     
@@ -1706,6 +1780,13 @@ public func debridServices() -> [ServiceView]  {
     )
 })
 }
+public func inspectTorrentFile(bytes: Data)throws  -> TorrentFileView  {
+    return try  FfiConverterTypeTorrentFileView_lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_func_inspect_torrent_file(
+        FfiConverterData.lower(bytes),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -1726,6 +1807,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_func_debrid_services() != 34755) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_func_inspect_torrent_file() != 47923) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_any_active() != 33237) {

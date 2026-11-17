@@ -72,6 +72,7 @@ import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
 import uniffi.torrenter.banner
 import uniffi.torrenter.debridServices
+import uniffi.torrenter.inspectTorrentFile
 
 class MainActivity : ComponentActivity() {
     private val notify =
@@ -154,6 +155,9 @@ private fun AppScreen(
     var clearAsk by remember { mutableStateOf<JobView?>(null) }
     // "as torrent" on a debrid job torrenter added: ask before it leaves the service.
     var rerouteAsk by remember { mutableStateOf<JobView?>(null) }
+    // A .torrent from "Open with" (another app can send one): its bytes and
+    // name, started only after a tap.
+    var torrentAsk by remember { mutableStateOf<Pair<ByteArray, String>?>(null) }
     val scope = rememberCoroutineScope()
     val buttons =
         ButtonDefaults.buttonColors(
@@ -172,16 +176,29 @@ private fun AppScreen(
         }
     }
 
-    // A .torrent from the picker or "Open with": read (capped) off the main
-    // thread, then queued at once through the current route, like START.
-    fun queueTorrent(uri: Uri) {
+    // Queue .torrent bytes through the current route, like START.
+    fun queueTorrentBytes(bytes: ByteArray) {
         val live = engine ?: return
+        try {
+            live.queueTorrentFile(bytes, debridRoute)
+            notice = null
+            refresh()
+        } catch (error: Exception) {
+            notice = error.message
+        }
+    }
+
+    // A .torrent read (capped) off the main thread: the picker starts it at
+    // once (the user chose it); "Open with" asks first.
+    fun takeTorrent(uri: Uri, ask: Boolean) {
         scope.launch {
             try {
                 val bytes = withContext(Dispatchers.IO) { readTorrent(activity, uri) }
-                live.queueTorrentFile(bytes, debridRoute)
-                notice = null
-                refresh()
+                if (ask) {
+                    torrentAsk = bytes to inspectTorrentFile(bytes).name
+                } else {
+                    queueTorrentBytes(bytes)
+                }
             } catch (error: Exception) {
                 notice = error.message
             }
@@ -189,7 +206,7 @@ private fun AppScreen(
     }
     val pickTorrent =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            uri?.let { queueTorrent(it) }
+            uri?.let { takeTorrent(it, ask = false) }
         }
 
     // Stop waiting for the service and download the same torrent from peers.
@@ -311,7 +328,7 @@ private fun AppScreen(
     LaunchedEffect(engine, opened) {
         if (engine != null && opened != null) {
             activity.openedTorrent.value = null
-            queueTorrent(opened)
+            takeTorrent(opened, ask = true)
         }
     }
 
@@ -557,6 +574,26 @@ private fun AppScreen(
                 dismissButton = {
                     TextButton(onClick = { answer(false) }) {
                         Text("keep it on $label", color = palette.fg, fontFamily = FontFamily.Monospace)
+                    }
+                },
+                containerColor = palette.row,
+            )
+        }
+        torrentAsk?.let { (bytes, name) ->
+            val route = account(debridRoute)?.name ?: "peers"
+            AlertDialog(
+                onDismissRequest = { torrentAsk = null },
+                title = { Text("Start this torrent?", fontFamily = FontFamily.Monospace) },
+                text = { Text("$name\nvia $route", fontFamily = FontFamily.Monospace) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        torrentAsk = null
+                        queueTorrentBytes(bytes)
+                    }) { Text("start", color = palette.fg, fontFamily = FontFamily.Monospace) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { torrentAsk = null }) {
+                        Text("cancel", color = palette.dim, fontFamily = FontFamily.Monospace)
                     }
                 },
                 containerColor = palette.row,

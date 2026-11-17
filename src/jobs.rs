@@ -95,6 +95,10 @@ pub struct PersistedJob {
     /// Debrid route: files reported by the provider (ids and relative paths only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<PersistedFile>,
+    /// Queued from a private `.torrent`: runs only from its stored copy (never
+    /// the magnet, which would ask the DHT) and never through debrid.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_torrent: bool,
     /// Fields written by newer builds, kept so a rewrite does not drop them.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,

@@ -31,8 +31,12 @@ pub struct Imported {
     /// The torrent's name, or the hash when it has none.
     pub name: String,
     pub trackers: Vec<String>,
-    /// `magnet:?xt=urn:btih:<hex>&dn=<name>&tr=…`
+    /// `magnet:?xt=urn:btih:<hex>&dn=<name>&tr=…` (no `tr` when private).
     pub magnet: String,
+    /// The tracker forbids DHT / peer exchange: never resolve it through the
+    /// DHT, and keep its tracker URLs (they carry the user's passkey) out of
+    /// the magnet.
+    pub private: bool,
 }
 
 /// Parse `.torrent` bytes. Rejects empty, oversize and anything librqbit cannot
@@ -67,6 +71,7 @@ pub fn parse(bytes: &[u8]) -> Result<Imported> {
             }
         }
     }
+    let private = meta.info.data.private;
     let info = meta
         .info
         .data
@@ -81,21 +86,31 @@ pub fn parse(bytes: &[u8]) -> Result<Imported> {
         "magnet:?xt=urn:btih:{hash_hex}&dn={}",
         utf8_percent_encode(&name, NON_ALPHANUMERIC)
     );
-    for tracker in &trackers {
-        magnet.push_str("&tr=");
-        magnet.extend(utf8_percent_encode(tracker, NON_ALPHANUMERIC));
+    if !private {
+        for tracker in &trackers {
+            magnet.push_str("&tr=");
+            magnet.extend(utf8_percent_encode(tracker, NON_ALPHANUMERIC));
+        }
     }
     Ok(Imported {
         hash_hex,
         name,
         trackers,
         magnet,
+        private,
     })
 }
 
 /// Read a local `.torrent`, refusing anything over `MAX_TORRENT_FILE` before
 /// reading it all (never librqbit's uncapped `from_local_filename`).
 pub fn read_capped(path: &Path) -> Result<Vec<u8>> {
+    // Only a regular file: a FIFO or device could block the read forever (MCP).
+    let is_file = std::fs::metadata(path)
+        .with_context(|| format!("could not open {}", path.display()))?
+        .is_file();
+    if !is_file {
+        bail!("{} is not a file", path.display());
+    }
     let file =
         std::fs::File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let mut bytes = Vec::new();
@@ -178,7 +193,7 @@ pub(crate) mod tests {
     }
 
     /// The bencoded info dict of a one-piece single-file torrent.
-    fn info_dict(name: &str) -> Vec<u8> {
+    fn info_dict_with(name: &str, private: bool) -> Vec<u8> {
         let mut info = b"d".to_vec();
         info.extend(bstr(b"length"));
         info.extend(b"i5e");
@@ -188,12 +203,25 @@ pub(crate) mod tests {
         info.extend(b"i16384e");
         info.extend(bstr(b"pieces"));
         info.extend(bstr(&[7u8; 20]));
+        if private {
+            info.extend(bstr(b"private"));
+            info.extend(b"i1e");
+        }
         info.extend(b"e");
         info
     }
 
     /// A minimal single-file `.torrent`, with optional trackers.
     pub(crate) fn torrent_bytes(name: &str, trackers: &[&str]) -> Vec<u8> {
+        torrent_bytes_with(name, trackers, false)
+    }
+
+    /// The same, marked private (`info.private = 1`).
+    pub(crate) fn private_torrent_bytes(name: &str, trackers: &[&str]) -> Vec<u8> {
+        torrent_bytes_with(name, trackers, true)
+    }
+
+    fn torrent_bytes_with(name: &str, trackers: &[&str], private: bool) -> Vec<u8> {
         let mut out = b"d".to_vec();
         if let Some(first) = trackers.first() {
             out.extend(bstr(b"announce"));
@@ -208,7 +236,7 @@ pub(crate) mod tests {
             out.extend(b"e");
         }
         out.extend(bstr(b"info"));
-        out.extend(info_dict(name));
+        out.extend(info_dict_with(name, private));
         out.extend(b"e");
         out
     }
@@ -260,6 +288,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn private_torrents_keep_their_trackers_out_of_the_magnet() {
+        let passkey = "https://tracker.example/announce?passkey=SECRET123";
+        let imported = parse(&private_torrent_bytes("Private.mkv", &[passkey])).unwrap();
+        assert!(imported.private);
+        assert!(!imported.magnet.contains("tr="), "{}", imported.magnet);
+        assert!(
+            !imported.magnet.contains("SECRET123"),
+            "{}",
+            imported.magnet
+        );
+        assert!(is_valid_magnet_url(&imported.magnet));
+        assert!(
+            !parse(&torrent_bytes("Public.mkv", &[passkey]))
+                .unwrap()
+                .private
+        );
+    }
+
+    #[test]
     fn trackers_are_capped() {
         let many: Vec<String> = (0..40)
             .map(|i| format!("udp://t{i}.example:80/announce"))
@@ -290,6 +337,11 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("larger than"));
+        // Only regular files are read (a FIFO would block).
+        assert!(read_capped(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("is not a file"));
     }
 
     #[test]

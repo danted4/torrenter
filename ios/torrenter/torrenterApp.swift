@@ -11,7 +11,7 @@ struct TorrenterApp: App {
                 // "Open with torrenter" on a .torrent (Files, Safari).
                 .onOpenURL { url in
                     if url.isFileURL {
-                        owner.queueTorrentFile(at: url)
+                        owner.askTorrentFile(at: url)
                     }
                 }
         }

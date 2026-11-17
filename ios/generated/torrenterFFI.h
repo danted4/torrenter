@@ -398,6 +398,11 @@ RustBuffer uniffi_torrenter_fn_func_debrid_services(RustCallStatus *_Nonnull out
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_INSPECT_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_INSPECT_TORRENT_FILE
+RustBuffer uniffi_torrenter_fn_func_inspect_torrent_file(RustBuffer bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_TORRENTER_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_TORRENTER_RUSTBUFFER_ALLOC
 RustBuffer ffi_torrenter_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -687,6 +692,12 @@ uint16_t uniffi_torrenter_checksum_func_banner(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_DEBRID_SERVICES
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_DEBRID_SERVICES
 uint16_t uniffi_torrenter_checksum_func_debrid_services(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_INSPECT_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_INSPECT_TORRENT_FILE
+uint16_t uniffi_torrenter_checksum_func_inspect_torrent_file(void
     
 );
 #endif

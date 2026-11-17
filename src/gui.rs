@@ -1071,14 +1071,18 @@ impl eframe::App for GuiApp {
                         let button_w = 80.0_f32;
                         let gap = 10.0_f32;
                         let magnet = self.mode == Mode::Magnet;
+                        // Open a .torrent: beside the mode it belongs to.
+                        ui.add_space(gap);
+                        if upload_glyph(ui, palette, magnet).clicked() {
+                            self.pick_torrent();
+                        }
                         let picked = self.route_account();
                         let via = picked.as_ref().filter(|_| magnet);
                         let route_text = route_label(picked.as_ref());
                         // Fixed width (that of "default (none)"); longer
                         // account names are shortened with "…".
                         let route_w = route_select_width(ui, &route_label(None));
-                        // Upload glyph + gap, seed toggle, route select.
-                        let glyphs_w = 16.0_f32 + gap + 42.0 + route_w + gap;
+                        let glyphs_w = 42.0_f32 + route_w + gap;
                         let edit_margin = 16.0_f32;
                         ui.add_space(gap);
                         // The field takes whatever the controls leave.
@@ -1114,10 +1118,6 @@ impl eframe::App for GuiApp {
                                 ui.add(edit)
                             },
                         );
-                        ui.add_space(gap);
-                        if upload_glyph(ui, palette, magnet).clicked() {
-                            self.pick_torrent();
-                        }
                         ui.add_space(gap);
                         let select = route_select(
                             ui,
@@ -3537,15 +3537,15 @@ fn truncate_middle(value: &str, max: usize) -> String {
     )
 }
 
-/// Next to the magnet box: open a `.torrent` file. Faded and inert in HTTP
-/// mode, like the seed toggle.
+/// Beside the MAGNET / HTTP switch: open a `.torrent` file. Faded and inert in
+/// HTTP mode, like the seed toggle.
 fn upload_glyph(ui: &mut egui::Ui, palette: Theme, enabled: bool) -> egui::Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), sense);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), sense);
     let color = if !enabled {
         Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
     } else if response.hovered() {
@@ -3553,7 +3553,7 @@ fn upload_glyph(ui: &mut egui::Ui, palette: Theme, enabled: bool) -> egui::Respo
     } else {
         palette.dim
     };
-    paint_upload(ui.painter(), rect, color);
+    paint_file(ui.painter(), rect, color);
     if enabled {
         click_cursor(response).on_hover_text("open a .torrent file (or drop one on the window)")
     } else {
@@ -3563,22 +3563,25 @@ fn upload_glyph(ui: &mut egui::Ui, palette: Theme, enabled: bool) -> egui::Respo
     }
 }
 
-/// A tray with an arrow up out of it.
-fn paint_upload(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+/// A page with a folded corner: open a file (unlike the download-folder
+/// glyph on the row below).
+fn paint_file(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let stroke = Stroke::new(1.2_f32, color);
-    let (left, right, bottom) = (rect.left() + 2.0, rect.right() - 2.0, rect.bottom() - 2.0);
-    let lip = bottom - 4.0;
-    painter.line_segment([egui::pos2(left, lip), egui::pos2(left, bottom)], stroke);
-    painter.line_segment(
-        [egui::pos2(left, bottom), egui::pos2(right, bottom)],
+    let p = |x: f32, y: f32| egui::pos2(rect.left() + x, rect.top() + y);
+    painter.add(egui::Shape::closed_line(
+        vec![
+            p(4.0, 1.5),
+            p(11.0, 1.5),
+            p(14.5, 5.0),
+            p(14.5, 16.5),
+            p(4.0, 16.5),
+        ],
         stroke,
-    );
-    painter.line_segment([egui::pos2(right, bottom), egui::pos2(right, lip)], stroke);
-    let x = rect.center().x;
-    let tip = rect.top() + 2.0;
-    painter.line_segment([egui::pos2(x, bottom - 3.0), egui::pos2(x, tip)], stroke);
-    painter.line_segment([egui::pos2(x - 3.5, tip + 3.5), egui::pos2(x, tip)], stroke);
-    painter.line_segment([egui::pos2(x + 3.5, tip + 3.5), egui::pos2(x, tip)], stroke);
+    ));
+    painter.add(egui::Shape::line(
+        vec![p(11.0, 1.5), p(11.0, 5.0), p(14.5, 5.0)],
+        stroke,
+    ));
 }
 
 /// While files are dragged over the window: say what a drop does.
@@ -3791,6 +3794,7 @@ mod tests {
             dest: PathBuf::from(dest),
             part_count: 4,
             debrid: None,
+            private_torrent: false,
         }
     }
 

@@ -178,6 +178,9 @@ async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -
         let path = PathBuf::from(cleaned);
         let bytes = torrent_file::read_capped(&path)?;
         let imported = torrent_file::parse(&bytes)?;
+        if imported.private && via.is_some() {
+            bail!("a private torrent downloads only from its own tracker's peers, not through a debrid service");
+        }
         println!("torrent: {}", imported.name);
         (imported.magnet, Some(bytes))
     } else {
@@ -191,12 +194,16 @@ async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -
     }
 }
 
-/// A pasted or dragged-in path: surrounding quotes and the `\ ` terminals add
-/// for spaces are removed.
+/// A pasted or dragged-in path: surrounding quotes are removed, and on macOS
+/// and Linux the `\ ` terminals add for spaces (on Windows `\` separates
+/// folders, so it stays).
 fn clean_path_arg(arg: &str) -> String {
-    arg.trim()
-        .trim_matches(|c| c == '"' || c == '\'')
-        .replace("\\ ", " ")
+    let trimmed = arg.trim().trim_matches(|c| c == '"' || c == '\'');
+    if cfg!(windows) {
+        trimmed.to_string()
+    } else {
+        trimmed.replace("\\ ", " ")
+    }
 }
 
 /// Services this build offers (experimental ones included).
@@ -650,10 +657,13 @@ mod tests {
     fn pasted_and_dragged_paths_are_cleaned() {
         assert_eq!(clean_path_arg("  '/tmp/a b.torrent' "), "/tmp/a b.torrent");
         assert_eq!(clean_path_arg("\"/tmp/x.torrent\""), "/tmp/x.torrent");
+        #[cfg(not(windows))]
         assert_eq!(
             clean_path_arg("/tmp/My\\ File.torrent"),
             "/tmp/My File.torrent"
         );
+        #[cfg(windows)]
+        assert_eq!(clean_path_arg(r"C:\x\ y.torrent"), r"C:\x\ y.torrent");
     }
 
     #[test]

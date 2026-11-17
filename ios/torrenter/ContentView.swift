@@ -43,6 +43,19 @@ struct ContentView: View {
                 owner.enterForeground()
             }
         }
+        .alert(
+            "Start this torrent?",
+            isPresented: Binding(
+                get: { owner.torrentAsk != nil },
+                set: { if !$0 { owner.torrentAsk = nil } }
+            ),
+            presenting: owner.torrentAsk
+        ) { ask in
+            Button("start") { owner.confirmTorrent(ask) }
+            Button("cancel", role: .cancel) { owner.torrentAsk = nil }
+        } message: { ask in
+            Text("\(ask.name)\nvia \(owner.routeName)")
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [torrentType]) { result in
             if case .success(let url) = result {
                 owner.queueTorrentFile(at: url)
@@ -211,7 +224,7 @@ struct ContentView: View {
                 Button {
                     importing = true
                 } label: {
-                    Image(systemName: "arrow.up.doc")
+                    Image(systemName: "doc")
                         .font(.system(size: 16))
                         .foregroundColor(colors.dim)
                         .frame(width: 40, height: 40)

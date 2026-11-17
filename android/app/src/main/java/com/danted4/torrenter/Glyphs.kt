@@ -294,7 +294,7 @@ fun Chip(
     )
 }
 
-/** Next to the magnet box: open a .torrent file (a tray with an arrow up). */
+/** Next to the magnet box: open a .torrent file (a page with a folded corner). */
 @Composable
 fun UploadGlyph(
     color: Color,
@@ -306,19 +306,19 @@ fun UploadGlyph(
             .clickable(onClick = onClick)
             .padding(9.dp),
     ) {
-        val unit = size.minDimension / 16f
-        val stroke = 1.2f * unit * 1.4f
-        val left = 2f * unit
-        val right = size.width - 2f * unit
-        val bottom = size.height - 2f * unit
-        val lip = bottom - 4f * unit
-        drawLine(color, Offset(left, lip), Offset(left, bottom), stroke, StrokeCap.Round)
-        drawLine(color, Offset(left, bottom), Offset(right, bottom), stroke, StrokeCap.Round)
-        drawLine(color, Offset(right, bottom), Offset(right, lip), stroke, StrokeCap.Round)
-        val x = size.width / 2f
-        val tip = 2f * unit
-        drawLine(color, Offset(x, bottom - 3f * unit), Offset(x, tip), stroke, StrokeCap.Round)
-        drawLine(color, Offset(x - 3.5f * unit, tip + 3.5f * unit), Offset(x, tip), stroke, StrokeCap.Round)
-        drawLine(color, Offset(x + 3.5f * unit, tip + 3.5f * unit), Offset(x, tip), stroke, StrokeCap.Round)
+        val u = size.minDimension / 16f
+        val stroke = 1.2f * u * 1.4f
+        val page =
+            Path().apply {
+                moveTo(3f * u, 1.5f * u)
+                lineTo(10f * u, 1.5f * u)
+                lineTo(13f * u, 4.5f * u)
+                lineTo(13f * u, 14.5f * u)
+                lineTo(3f * u, 14.5f * u)
+                close()
+            }
+        drawPath(page, color, style = Stroke(width = stroke, cap = StrokeCap.Round))
+        drawLine(color, Offset(10f * u, 1.5f * u), Offset(10f * u, 4.5f * u), stroke, StrokeCap.Round)
+        drawLine(color, Offset(10f * u, 4.5f * u), Offset(13f * u, 4.5f * u), stroke, StrokeCap.Round)
     }
 }

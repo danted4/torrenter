@@ -119,6 +119,26 @@ fn service_from(id: &str) -> Result<Service, EngineError> {
         })
 }
 
+/// What a `.torrent` is, read before asking whether to start it ("Open with"
+/// files are confirmed first). Nothing is queued or saved.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TorrentFileView {
+    pub name: String,
+    pub private: bool,
+}
+
+#[uniffi::export]
+pub fn inspect_torrent_file(bytes: Vec<u8>) -> Result<TorrentFileView, EngineError> {
+    crate::torrent_file::parse(&bytes)
+        .map(|imported| TorrentFileView {
+            name: imported.name,
+            private: imported.private,
+        })
+        .map_err(|error| EngineError::Failed {
+            msg: format!("{error:#}"),
+        })
+}
+
 #[uniffi::export]
 pub fn debrid_services() -> Vec<ServiceView> {
     Service::offered()
@@ -370,6 +390,20 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_reads_a_torrent_without_queueing_it() {
+        use crate::torrent_file::tests::{private_torrent_bytes, torrent_bytes};
+        let view = inspect_torrent_file(torrent_bytes("Sintel.mkv", &[])).unwrap();
+        assert_eq!(view.name, "Sintel.mkv");
+        assert!(!view.private);
+        assert!(
+            inspect_torrent_file(private_torrent_bytes("P", &[]))
+                .unwrap()
+                .private
+        );
+        assert!(inspect_torrent_file(b"junk".to_vec()).is_err());
+    }
     use crate::progress::JobSnapshot;
     use std::time::Instant;
 
@@ -393,6 +427,7 @@ mod tests {
             dest: PathBuf::from("/tmp/films"),
             part_count: 4,
             debrid: None,
+            private_torrent: false,
         }
     }
 
