@@ -131,7 +131,13 @@ final class EngineOwner: ObservableObject {
 
     func confirmTorrent(_ ask: TorrentAsk) {
         torrentAsk = nil
-        queueTorrentData(ask.data)
+        // A private torrent never goes through debrid: from its peers.
+        queueTorrentData(ask.data, peersOnly: ask.isPrivate)
+    }
+
+    /// The confirm's second line: the route, or why a private torrent ignores it.
+    func routeLine(_ ask: TorrentAsk) -> String {
+        ask.isPrivate ? "private torrent: from its tracker's peers only" : "via \(routeName)"
     }
 
     /// Where a new magnet goes: the chosen debrid account's name, or peers.
@@ -149,7 +155,7 @@ final class EngineOwner: ObservableObject {
             case .success(let data) where ask:
                 do {
                     let view = try inspectTorrentFile(bytes: data)
-                    self.torrentAsk = TorrentAsk(data: data, name: view.name)
+                    self.torrentAsk = TorrentAsk(data: data, name: view.name, isPrivate: view.private)
                 } catch {
                     self.notice = engineMessage(error)
                 }
@@ -196,13 +202,13 @@ final class EngineOwner: ObservableObject {
         return file.hasPrefix(inbox + "/")
     }
 
-    private func queueTorrentData(_ data: Data) {
+    private func queueTorrentData(_ data: Data, peersOnly: Bool = false) {
         guard let engine else {
             pendingTorrents.append(data)
             return
         }
         do {
-            _ = try engine.queueTorrentFile(bytes: data, account: debridRoute)
+            _ = try engine.queueTorrentFile(bytes: data, account: peersOnly ? nil : debridRoute)
             notice = nil
             refresh()
         } catch {
@@ -634,4 +640,5 @@ struct TorrentAsk: Identifiable {
     let id = UUID()
     let data: Data
     let name: String
+    let isPrivate: Bool
 }

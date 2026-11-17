@@ -54,7 +54,7 @@ struct ContentView: View {
             Button("start") { owner.confirmTorrent(ask) }
             Button("cancel", role: .cancel) { owner.torrentAsk = nil }
         } message: { ask in
-            Text("\(ask.name)\nvia \(owner.routeName)")
+            Text("\(ask.name)\n\(owner.routeLine(ask))")
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [torrentType]) { result in
             if case .success(let url) = result {

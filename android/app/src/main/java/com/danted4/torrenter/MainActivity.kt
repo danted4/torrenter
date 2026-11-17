@@ -157,7 +157,7 @@ private fun AppScreen(
     var rerouteAsk by remember { mutableStateOf<JobView?>(null) }
     // A .torrent from "Open with" (another app can send one): its bytes and
     // name, started only after a tap.
-    var torrentAsk by remember { mutableStateOf<Pair<ByteArray, String>?>(null) }
+    var torrentAsk by remember { mutableStateOf<Triple<ByteArray, String, Boolean>?>(null) }
     val scope = rememberCoroutineScope()
     val buttons =
         ButtonDefaults.buttonColors(
@@ -177,10 +177,10 @@ private fun AppScreen(
     }
 
     // Queue .torrent bytes through the current route, like START.
-    fun queueTorrentBytes(bytes: ByteArray) {
+    fun queueTorrentBytes(bytes: ByteArray, peersOnly: Boolean = false) {
         val live = engine ?: return
         try {
-            live.queueTorrentFile(bytes, debridRoute)
+            live.queueTorrentFile(bytes, if (peersOnly) null else debridRoute)
             notice = null
             refresh()
         } catch (error: Exception) {
@@ -195,7 +195,8 @@ private fun AppScreen(
             try {
                 val bytes = withContext(Dispatchers.IO) { readTorrent(activity, uri) }
                 if (ask) {
-                    torrentAsk = bytes to inspectTorrentFile(bytes).name
+                    val view = inspectTorrentFile(bytes)
+                    torrentAsk = Triple(bytes, view.name, view.`private`)
                 } else {
                     queueTorrentBytes(bytes)
                 }
@@ -579,16 +580,20 @@ private fun AppScreen(
                 containerColor = palette.row,
             )
         }
-        torrentAsk?.let { (bytes, name) ->
-            val route = account(debridRoute)?.name ?: "peers"
+        torrentAsk?.let { (bytes, name, isPrivate) ->
+            // A private torrent never goes through debrid: say so, and start
+            // it from its tracker's peers.
+            val route =
+                if (isPrivate) "private torrent: from its tracker's peers only"
+                else "via ${account(debridRoute)?.name ?: "peers"}"
             AlertDialog(
                 onDismissRequest = { torrentAsk = null },
                 title = { Text("Start this torrent?", fontFamily = FontFamily.Monospace) },
-                text = { Text("$name\nvia $route", fontFamily = FontFamily.Monospace) },
+                text = { Text("$name\n$route", fontFamily = FontFamily.Monospace) },
                 confirmButton = {
                     TextButton(onClick = {
                         torrentAsk = null
-                        queueTorrentBytes(bytes)
+                        queueTorrentBytes(bytes, peersOnly = isPrivate)
                     }) { Text("start", color = palette.fg, fontFamily = FontFamily.Monospace) }
                 },
                 dismissButton = {
