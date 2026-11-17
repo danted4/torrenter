@@ -1,6 +1,8 @@
 //! Debrid job runner: magnet → provider (fetch) → each file via the HTTP engine.
 
 use std::collections::{HashMap, HashSet};
+
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -434,63 +436,88 @@ fn plan_files(files: &[RemoteFile]) -> Result<Vec<PlannedFile>> {
 /// Two provider files must never land on one path: after sanitising ("a:b"
 /// and "a_b"), by case (macOS and Windows folders ignore it), after the
 /// shared-root strip, or a file named like another's folder. Every file in a
-/// clash gets its provider file id before the extension, so the result does
-/// not depend on the order the provider lists them in.
+/// clash gets a short hash of its provider file id before the extension (ids
+/// can differ only by case, e.g. Premiumize paths), then uniqueness is checked
+/// rather than assumed: anything still shared, including a rename that lands
+/// on a name the provider listed, gets " (2)", " (3)", … in order of the full
+/// id. Neither step depends on the order the provider lists files in.
 fn separate_clashes(planned: &mut [PlannedFile]) {
-    let key = |path: &Path| {
-        path.components()
-            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
-            .collect::<Vec<_>>()
-            .join("/")
-    };
-    let mut seen: HashMap<String, usize> = HashMap::new();
     let mut folders: HashSet<String> = HashSet::new();
     for item in planned.iter() {
-        *seen.entry(key(&item.relative)).or_default() += 1;
         let mut parent = item.relative.parent();
         while let Some(folder) = parent.filter(|folder| !folder.as_os_str().is_empty()) {
-            folders.insert(key(folder));
+            folders.insert(path_key(folder));
             parent = folder.parent();
         }
     }
-    for item in planned.iter_mut() {
-        let own = key(&item.relative);
-        if seen[&own] < 2 && !folders.contains(&own) {
-            continue;
-        }
-        let id: String = item
-            .file
-            .id
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .take(24)
-            .collect();
-        // An id with nothing safe in it still separates: its bytes in hex.
-        let id = if id.is_empty() {
-            item.file
-                .id
-                .bytes()
-                .take(12)
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        } else {
-            id
-        };
-        let name = item
-            .relative
-            .file_name()
-            .map(|name| Path::new(name).to_path_buf());
-        let Some(name) = name else { continue };
-        let stem = name
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let renamed = match name.extension() {
-            Some(ext) => format!("{stem} [{id}].{}", ext.to_string_lossy()),
-            None => format!("{stem} [{id}]"),
-        };
-        item.relative.set_file_name(renamed);
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for item in planned.iter() {
+        *seen.entry(path_key(&item.relative)).or_default() += 1;
     }
+    for item in planned.iter_mut() {
+        let own = path_key(&item.relative);
+        if seen[&own] > 1 || folders.contains(&own) {
+            let digest = sha2::Sha256::digest(item.file.id.as_bytes());
+            let hash: String = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
+            item.relative = with_suffix(&item.relative, &format!(" [{hash}]"));
+        }
+    }
+    // Postcondition: no two files share a key, and none is a folder's key.
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, item) in planned.iter().enumerate() {
+        groups
+            .entry(path_key(&item.relative))
+            .or_default()
+            .push(index);
+    }
+    let mut taken: HashSet<String> = groups.keys().cloned().chain(folders.clone()).collect();
+    let mut clashing: Vec<(String, Vec<usize>)> = groups
+        .into_iter()
+        .filter(|(key, members)| members.len() > 1 || folders.contains(key))
+        .collect();
+    clashing.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, mut members) in clashing {
+        members.sort_by(|&a, &b| {
+            (&planned[a].file.id, &planned[a].file.path)
+                .cmp(&(&planned[b].file.id, &planned[b].file.path))
+        });
+        // The first keeps the name unless the name is a folder.
+        let keep = usize::from(!folders.contains(&key));
+        for &index in &members[keep..] {
+            let base = planned[index].relative.clone();
+            let mut ordinal = 2;
+            let renamed = loop {
+                let candidate = with_suffix(&base, &format!(" ({ordinal})"));
+                if taken.insert(path_key(&candidate)) {
+                    break candidate;
+                }
+                ordinal += 1;
+            };
+            planned[index].relative = renamed;
+        }
+    }
+}
+
+/// Case-insensitive identity of a relative path, "/"-joined.
+fn path_key(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `dir/name.ext` with `suffix` before the extension: `dir/name suffix.ext`.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let name = path.file_name().map(Path::new).unwrap_or(Path::new(""));
+    let stem = name
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let renamed = match name.extension() {
+        Some(ext) => format!("{stem}{suffix}.{}", ext.to_string_lossy()),
+        None => format!("{stem}{suffix}"),
+    };
+    path.with_file_name(renamed)
 }
 
 fn sync_files(state: &SharedDebridState, plan: &[PlannedFile]) {
@@ -798,13 +825,22 @@ mod tests {
 
     #[test]
     fn clashing_provider_paths_never_share_a_file() {
+        use sha2::Digest;
         let file = |id: &str, path: &str| RemoteFile {
             id: id.into(),
             path: path.into(),
             size: 1,
         };
+        let hash = |id: &str| -> String {
+            sha2::Sha256::digest(id.as_bytes())[..4]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        // Every planned path differs from every other, ignoring case, and
+        // none is another file's folder; also independent of list order.
         let names = |files: &[RemoteFile]| -> Vec<String> {
-            plan_files(files)
+            let planned: Vec<String> = plan_files(files)
                 .unwrap()
                 .iter()
                 .map(|item| {
@@ -814,36 +850,70 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join("/")
                 })
-                .collect()
+                .collect();
+            let keys: HashSet<String> = planned.iter().map(|p| p.to_lowercase()).collect();
+            assert_eq!(keys.len(), planned.len(), "{planned:?}");
+            for key in &keys {
+                let folder = format!("{key}/");
+                assert!(
+                    !keys.iter().any(|other| other.starts_with(&folder)),
+                    "{planned:?}"
+                );
+            }
+            let mut reversed = files.to_vec();
+            reversed.reverse();
+            let mut again: Vec<String> = plan_files(&reversed)
+                .unwrap()
+                .iter()
+                .map(|item| item.relative.to_string_lossy().replace('\\', "/"))
+                .collect();
+            again.reverse();
+            assert_eq!(again, planned, "listing order changed the result");
+            planned
         };
-        // Same after sanitising, and by case: every file in the clash gets
-        // its id, so listing order does not decide which one keeps the name.
+        // Same after sanitising, and by case.
         assert_eq!(
             names(&[
                 file("7", "x/a:b.txt"),
                 file("8", "x/a_b.txt"),
                 file("9", "x/c.txt")
             ]),
-            ["a_b [7].txt", "a_b [8].txt", "c.txt"]
-        );
-        assert_eq!(
-            names(&[file("b", "Cover.JPG"), file("a", "cover.jpg")]),
-            ["Cover [b].JPG", "cover [a].jpg"]
+            [
+                format!("a_b [{}].txt", hash("7")),
+                format!("a_b [{}].txt", hash("8")),
+                "c.txt".into()
+            ]
         );
         // Bare names from two discs (Debrid-Link reports names).
         assert_eq!(
             names(&[file("1", "01.flac"), file("2", "01.flac")]),
-            ["01 [1].flac", "01 [2].flac"]
+            [
+                format!("01 [{}].flac", hash("1")),
+                format!("01 [{}].flac", hash("2"))
+            ]
         );
         // A file named like another file's folder.
         assert_eq!(
             names(&[file("1", "extras"), file("2", "Extras/a.txt")]),
-            ["extras [1]", "Extras/a.txt"]
+            [format!("extras [{}]", hash("1")), "Extras/a.txt".into()]
         );
-        // An id with nothing safe in it still separates.
-        assert_eq!(
-            names(&[file("..", "a.txt"), file("//", "A.txt")]),
-            ["a [2e2e].txt", "A [2f2f].txt"]
-        );
+        // Premiumize uses the path as the id: ids that differ only by case.
+        names(&[
+            file("Cover.JPG", "Cover.JPG"),
+            file("cover.jpg", "cover.jpg"),
+        ]);
+        // Ids with nothing safe in them, or the same first 24 characters.
+        names(&[file("..", "a.txt"), file("//", "A.txt")]);
+        let long = "x".repeat(30);
+        names(&[
+            file(&format!("{long}1"), "same.bin"),
+            file(&format!("{long}2"), "same.bin"),
+        ]);
+        // The same id twice (a provider bug) still yields two paths.
+        names(&[file("dup", "a.txt"), file("dup", "A.txt")]);
+        // A rename landing on a name the provider also listed.
+        let taken = format!("a [{}].txt", hash("7"));
+        let planned = names(&[file("7", "a.txt"), file("8", "A.txt"), file("9", &taken)]);
+        assert!(planned.contains(&taken), "{planned:?}");
     }
 }

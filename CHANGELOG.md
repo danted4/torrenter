@@ -10,7 +10,7 @@ All notable changes to this project are documented here.
 
 ### Fixed
 
-- Debrid: two files that map to the same path (after making names safe, or by case on macOS and Windows) no longer overwrite each other; each gets its service file id before the extension.
+- Debrid: two files that map to the same path (after making names safe, or by case on macOS and Windows) no longer overwrite each other; each gets a short tag from its service file id before the extension.
 - Debrid: download links must be HTTPS, and provider API answers are capped at 32 MB.
 
 ## [3.8.2] - 2026-11-15
