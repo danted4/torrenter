@@ -55,14 +55,30 @@ impl Api {
         if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
             return Err(DebridError::RateLimited(retry_after(&headers)));
         }
-        let bytes = response
-            .bytes()
+        // A provider answer has no natural bound (long torrent lists); stop
+        // reading past MAX_REPLY rather than buffer it all, on phones too.
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|error| DebridError::Network(network_text(&error)))?;
+            .map_err(|error| DebridError::Network(network_text(&error)))?
+        {
+            if bytes.len() + chunk.len() > MAX_REPLY {
+                return Err(DebridError::Service(format!(
+                    "the provider's answer was larger than {} MB",
+                    MAX_REPLY / (1024 * 1024)
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Ok(Reply { status, json })
     }
 }
+
+/// Largest provider API answer read. API replies are JSON, not downloads.
+pub(crate) const MAX_REPLY: usize = 32 * 1024 * 1024;
 
 /// A short, URL-free description of a transport error.
 pub(crate) fn network_text(error: &reqwest::Error) -> String {

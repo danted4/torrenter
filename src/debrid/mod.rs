@@ -124,6 +124,41 @@ impl fmt::Display for Service {
     }
 }
 
+/// A provider's download link, only over HTTPS: an answer must not move the
+/// payload to plain HTTP. Plain HTTP is allowed to loopback only (the tests'
+/// fake servers).
+fn secure_link(link: String) -> Result<String, DebridError> {
+    let ok = url::Url::parse(&link).is_ok_and(|url| match url.scheme() {
+        "https" => true,
+        "http" => {
+            matches!(url.host(), Some(url::Host::Domain("localhost")))
+                || matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+                || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback())
+        }
+        _ => false,
+    });
+    if ok {
+        Ok(link)
+    } else {
+        Err(DebridError::Service(
+            "the provider returned a download link that is not HTTPS".into(),
+        ))
+    }
+}
+
+/// Whether a failed job's error could be an adapter fault worth a report: an
+/// answer the adapter did not understand, a torrent that vanished again, or a
+/// file list with nothing safe to save. Not a bad key, a plan, blocked
+/// content, the network, rate limits or the stall timeout.
+pub(crate) fn worth_reporting(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DebridError>(),
+            Some(DebridError::Service(_) | DebridError::Gone)
+        )
+    })
+}
+
 /// An API key. `Debug`/`Display` never print it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
@@ -412,13 +447,14 @@ impl Provider {
         remote_id: &str,
         file: &RemoteFile,
     ) -> Result<String, DebridError> {
-        match self {
+        let link = match self {
             Provider::TorBox(api) => api.link(remote_id, file).await,
             Provider::RealDebrid(api) => api.link(remote_id, file).await,
             Provider::AllDebrid(api) => api.link(remote_id, file).await,
             Provider::Premiumize(api) => api.link(remote_id, file).await,
             Provider::DebridLink(api) => api.link(remote_id, file).await,
-        }
+        }?;
+        secure_link(link)
     }
 
     pub(crate) async fn delete(&self, remote_id: &str) -> Result<(), DebridError> {
@@ -483,6 +519,42 @@ mod tests {
                 && !hint.contains("http"),
             "{hint}"
         );
+    }
+
+    #[test]
+    fn only_adapter_faults_ask_for_a_report() {
+        let worth = |error: DebridError| worth_reporting(&anyhow::Error::from(error));
+        assert!(worth(DebridError::Service("unexpected answer".into())));
+        assert!(worth(DebridError::Gone));
+        assert!(!worth(DebridError::BadKey("bad_token".into())));
+        assert!(!worth(DebridError::NotPremium("free".into())));
+        assert!(!worth(DebridError::Blocked("infringing_file".into())));
+        assert!(!worth(DebridError::RateLimited(None)));
+        assert!(!worth(DebridError::Network("timed out".into())));
+        // The stall timeout and rate-limit exhaustion are plain messages.
+        assert!(!worth_reporting(&anyhow::anyhow!(
+            "Real-Debrid made no progress on this torrent for 30 minutes"
+        )));
+    }
+
+    #[test]
+    fn download_links_must_be_https() {
+        for good in [
+            "https://cdn.example/f/1",
+            "http://127.0.0.1:8080/f/1",
+            "http://localhost/f",
+            "http://[::1]/f",
+        ] {
+            assert_eq!(secure_link(good.into()).as_deref(), Ok(good));
+        }
+        for bad in [
+            "http://cdn.example/f/1",
+            "http://10.0.0.5/f",
+            "ftp://cdn.example/f",
+            "not a url",
+        ] {
+            assert!(secure_link(bad.into()).is_err(), "{bad}");
+        }
     }
 
     #[test]

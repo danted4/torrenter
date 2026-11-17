@@ -1,4 +1,4 @@
-//! Premiumize (www.premiumize.me/api). Research: .cursor/plans/debrid-research/premiumize.md
+//! Premiumize (www.premiumize.me/api). API docs: https://www.premiumize.me/api
 //!
 //! Two routes, told apart by the opaque `remote_id`:
 //!

@@ -1,5 +1,6 @@
 //! Debrid job runner: magnet → provider (fetch) → each file via the HTTP engine.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -86,7 +87,7 @@ pub async fn start_debrid_reported(run: DebridRun, snapshot: Arc<JobSnapshot>) -
         }
         Err(error) => {
             let mut text = redact(&format!("{error:#}"), Some(&key));
-            if let Some(hint) = hint {
+            if let Some(hint) = hint.filter(|_| crate::debrid::worth_reporting(&error)) {
                 text = format!("{text} ({hint})");
             }
             // Recorded here too, so the job is saved as failed (and not
@@ -402,7 +403,10 @@ fn plan_files(files: &[RemoteFile]) -> Result<Vec<PlannedFile>> {
         })
         .collect();
     if planned.is_empty() {
-        bail!("the provider listed no files that can be saved safely");
+        return Err(DebridError::Service(
+            "the provider listed no files that can be saved safely".into(),
+        )
+        .into());
     }
     let first_root = planned[0]
         .relative
@@ -423,7 +427,70 @@ fn plan_files(files: &[RemoteFile]) -> Result<Vec<PlannedFile>> {
             item.relative = item.relative.components().skip(1).collect();
         }
     }
+    separate_clashes(&mut planned);
     Ok(planned)
+}
+
+/// Two provider files must never land on one path: after sanitising ("a:b"
+/// and "a_b"), by case (macOS and Windows folders ignore it), after the
+/// shared-root strip, or a file named like another's folder. Every file in a
+/// clash gets its provider file id before the extension, so the result does
+/// not depend on the order the provider lists them in.
+fn separate_clashes(planned: &mut [PlannedFile]) {
+    let key = |path: &Path| {
+        path.components()
+            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut folders: HashSet<String> = HashSet::new();
+    for item in planned.iter() {
+        *seen.entry(key(&item.relative)).or_default() += 1;
+        let mut parent = item.relative.parent();
+        while let Some(folder) = parent.filter(|folder| !folder.as_os_str().is_empty()) {
+            folders.insert(key(folder));
+            parent = folder.parent();
+        }
+    }
+    for item in planned.iter_mut() {
+        let own = key(&item.relative);
+        if seen[&own] < 2 && !folders.contains(&own) {
+            continue;
+        }
+        let id: String = item
+            .file
+            .id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(24)
+            .collect();
+        // An id with nothing safe in it still separates: its bytes in hex.
+        let id = if id.is_empty() {
+            item.file
+                .id
+                .bytes()
+                .take(12)
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        } else {
+            id
+        };
+        let name = item
+            .relative
+            .file_name()
+            .map(|name| Path::new(name).to_path_buf());
+        let Some(name) = name else { continue };
+        let stem = name
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let renamed = match name.extension() {
+            Some(ext) => format!("{stem} [{id}].{}", ext.to_string_lossy()),
+            None => format!("{stem} [{id}]"),
+        };
+        item.relative.set_file_name(renamed);
+    }
 }
 
 fn sync_files(state: &SharedDebridState, plan: &[PlannedFile]) {
@@ -568,7 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn experimental_provider_failure_asks_for_a_report() {
+    async fn experimental_provider_network_failure_does_not_ask_for_a_report() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot = Arc::new(JobSnapshot::default());
         // Nothing listens on port 1: the provider call fails at once.
@@ -583,12 +650,9 @@ mod tests {
             .await
             .unwrap_err();
         let text = format!("{error:#}");
-        assert!(
-            text.ends_with(
-                "(Real-Debrid support is experimental; if this looks wrong, please report it at github.com/danted4/torrenter/issues)"
-            ),
-            "{text}"
-        );
+        // Unreachable is the user's network, not an adapter fault.
+        assert!(text.starts_with("network error"), "{text}");
+        assert!(!text.contains("experimental"), "{text}");
         assert!(!text.contains(KEY), "{text}");
         assert_eq!(snapshot.error().as_deref(), Some(text.as_str()));
     }
@@ -730,5 +794,56 @@ mod tests {
             size: 1
         }])
         .is_err());
+    }
+
+    #[test]
+    fn clashing_provider_paths_never_share_a_file() {
+        let file = |id: &str, path: &str| RemoteFile {
+            id: id.into(),
+            path: path.into(),
+            size: 1,
+        };
+        let names = |files: &[RemoteFile]| -> Vec<String> {
+            plan_files(files)
+                .unwrap()
+                .iter()
+                .map(|item| {
+                    item.relative
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .collect()
+        };
+        // Same after sanitising, and by case: every file in the clash gets
+        // its id, so listing order does not decide which one keeps the name.
+        assert_eq!(
+            names(&[
+                file("7", "x/a:b.txt"),
+                file("8", "x/a_b.txt"),
+                file("9", "x/c.txt")
+            ]),
+            ["a_b [7].txt", "a_b [8].txt", "c.txt"]
+        );
+        assert_eq!(
+            names(&[file("b", "Cover.JPG"), file("a", "cover.jpg")]),
+            ["Cover [b].JPG", "cover [a].jpg"]
+        );
+        // Bare names from two discs (Debrid-Link reports names).
+        assert_eq!(
+            names(&[file("1", "01.flac"), file("2", "01.flac")]),
+            ["01 [1].flac", "01 [2].flac"]
+        );
+        // A file named like another file's folder.
+        assert_eq!(
+            names(&[file("1", "extras"), file("2", "Extras/a.txt")]),
+            ["extras [1]", "Extras/a.txt"]
+        );
+        // An id with nothing safe in it still separates.
+        assert_eq!(
+            names(&[file("..", "a.txt"), file("//", "A.txt")]),
+            ["a [2e2e].txt", "A [2f2f].txt"]
+        );
     }
 }

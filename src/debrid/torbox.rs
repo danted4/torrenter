@@ -1,4 +1,4 @@
-//! TorBox (api.torbox.app/v1/api). Research: .cursor/plans/debrid-research/torbox.md
+//! TorBox (api.torbox.app/v1/api). API docs: https://api-docs.torbox.app/
 //!
 //! Quirks encoded here: `createtorrent` takes a form (JSON is rejected),
 //! `controltorrent` takes JSON, `requestdl` takes the key as `?token=` (so its

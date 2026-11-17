@@ -1,4 +1,4 @@
-//! Debrid-Link (debrid-link.com/api/v2). Research: .cursor/plans/debrid-research/debrid-link.md
+//! Debrid-Link (debrid-link.com/api/v2). API docs: https://debrid-link.com/api_doc/v2/introduction
 //!
 //! The user pastes a private API key, sent as `Authorization: Bearer` (the
 //! OAuth device flow is not implemented). Quirks encoded here:

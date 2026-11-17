@@ -1,4 +1,4 @@
-//! Real-Debrid (api.real-debrid.com/rest/1.0). Research: .cursor/plans/debrid-research/real-debrid.md
+//! Real-Debrid (api.real-debrid.com/rest/1.0). API docs: https://api.real-debrid.com/
 //!
 //! Auth is the user's private API token as `Authorization: Bearer` only, never
 //! the `?auth_token=` query, so no request URL carries it. The OAuth device
