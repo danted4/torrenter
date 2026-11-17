@@ -8,6 +8,12 @@ struct TorrenterApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(owner)
+                // "Open with torrenter" on a .torrent (Files, Safari).
+                .onOpenURL { url in
+                    if url.isFileURL {
+                        owner.askTorrentFile(at: url)
+                    }
+                }
         }
     }
 }

@@ -19,6 +19,7 @@ use torrenter::identity::{self, VERSION};
 use torrenter::jobs::JobKind;
 use torrenter::paths;
 use torrenter::session::{self, Job, Session, SessionEvent};
+use torrenter::torrent_file;
 use torrenter::update::load_config;
 use torrenter::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -38,6 +39,16 @@ struct MagnetArg {
     /// Optional debrid account: its name, or a provider id when that provider
     /// has one account (see `debrid_services`). Omit to download from peers.
     /// Uses the user's own configured key; never ask for one.
+    #[serde(default)]
+    debrid: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TorrentFileArg {
+    /// Absolute path of a local .torrent file (`~/` is expanded).
+    path: String,
+    /// Optional debrid account, as for `queue_magnet`. Omit to download from
+    /// peers.
     #[serde(default)]
     debrid: Option<String>,
 }
@@ -258,29 +269,24 @@ impl Mcp {
         if !is_valid_magnet_url(&uri) {
             return Err("Invalid magnet URL!".into());
         }
-        let via = match debrid.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-            None => None,
-            Some(query) => Some(
-                torrenter::credentials::resolve(query)
-                    .filter(|account| Service::offered().contains(&account.service))
-                    .map(|account| account.id)
-                    .ok_or_else(|| match Service::parse(query) {
-                        // A provider with no account: the user adds one.
-                        Some(service)
-                            if !torrenter::credentials::accounts()
-                                .iter()
-                                .any(|account| account.service == service) =>
-                        {
-                            format!("add a {} API key in settings first", service.label())
-                        }
-                        _ => format!(
-                            "no single debrid account matches {query:?}; see debrid_services"
-                        ),
-                    })?,
-            ),
-        };
+        let via = debrid_account(debrid.as_deref())?;
         self.session
             .queue_with(JobKind::Magnet, &uri, via.as_deref())
+            .map(|id| Json(QueueOut { id }))
+    }
+
+    #[tool(
+        description = "Queue a local .torrent file (leech), by its path. Pass `debrid` only when the user asks to download through their debrid account."
+    )]
+    fn queue_torrent_file(
+        &self,
+        Parameters(TorrentFileArg { path, debrid }): Parameters<TorrentFileArg>,
+    ) -> Result<Json<QueueOut>, String> {
+        let path = expand_home(path.trim());
+        let bytes = torrent_file::read_capped(&path).map_err(|error| format!("{error:#}"))?;
+        let via = debrid_account(debrid.as_deref())?;
+        self.session
+            .queue_torrent(&bytes, via.as_deref())
             .map(|id| Json(QueueOut { id }))
     }
 
@@ -381,13 +387,44 @@ impl Mcp {
     }
 }
 
+/// The account id for an optional `debrid` argument (a name, or a provider id
+/// when that provider has one account).
+fn debrid_account(debrid: Option<&str>) -> Result<Option<String>, String> {
+    let Some(query) = debrid.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    torrenter::credentials::resolve(query)
+        .filter(|account| Service::offered().contains(&account.service))
+        .map(|account| Some(account.id))
+        .ok_or_else(|| match Service::parse(query) {
+            // A provider with no account: the user adds one.
+            Some(service)
+                if !torrenter::credentials::accounts()
+                    .iter()
+                    .any(|account| account.service == service) =>
+            {
+                format!("add a {} API key in settings first", service.label())
+            }
+            _ => format!("no single debrid account matches {query:?}; see debrid_services"),
+        })
+}
+
+fn expand_home(path: &str) -> std::path::PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| std::path::PathBuf::from(path)),
+        None => std::path::PathBuf::from(path),
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for Mcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("torrenter", VERSION))
             .with_instructions(
-                "Magnet and HTTP downloads. A magnet can go through the user's own debrid service (queue_magnet `debrid`) only when they ask; keys are configured by the user, never through MCP. Poll jobs. Do not run the GUI at the same time.",
+                "Magnet, .torrent file (queue_torrent_file, by local path) and HTTP downloads. A magnet or .torrent can go through the user's own debrid service (`debrid`) only when they ask; keys are configured by the user, never through MCP. Poll jobs. Do not run the GUI at the same time.",
             )
     }
 }

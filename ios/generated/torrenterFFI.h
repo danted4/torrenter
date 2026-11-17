@@ -321,6 +321,11 @@ uint64_t uniffi_torrenter_fn_method_engine_queue(void*_Nonnull ptr, RustBuffer k
 uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustBuffer source, RustBuffer account, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_TORRENT_FILE
+uint64_t uniffi_torrenter_fn_method_engine_queue_torrent_file(void*_Nonnull ptr, RustBuffer bytes, RustBuffer account, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_REMOVE
 void uniffi_torrenter_fn_method_engine_remove(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
@@ -391,6 +396,11 @@ RustBuffer uniffi_torrenter_fn_func_banner(RustCallStatus *_Nonnull out_status
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_DEBRID_SERVICES
 RustBuffer uniffi_torrenter_fn_func_debrid_services(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_INSPECT_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_FUNC_INSPECT_TORRENT_FILE
+RustBuffer uniffi_torrenter_fn_func_inspect_torrent_file(RustBuffer bytes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_TORRENTER_RUSTBUFFER_ALLOC
@@ -685,6 +695,12 @@ uint16_t uniffi_torrenter_checksum_func_debrid_services(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_INSPECT_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_FUNC_INSPECT_TORRENT_FILE
+uint16_t uniffi_torrenter_checksum_func_inspect_torrent_file(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_ANY_ACTIVE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_ANY_ACTIVE
 uint16_t uniffi_torrenter_checksum_method_engine_any_active(void
@@ -748,6 +764,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_queue(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_DEBRID
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_DEBRID
 uint16_t uniffi_torrenter_checksum_method_engine_queue_debrid(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_TORRENT_FILE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_TORRENT_FILE
+uint16_t uniffi_torrenter_checksum_method_engine_queue_torrent_file(void
     
 );
 #endif

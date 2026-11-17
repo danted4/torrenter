@@ -1,5 +1,11 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
+
+/// `.torrent`, as declared in Info.plist (falls back to the extension).
+let torrentType = UTType("org.bittorrent.torrent")
+    ?? UTType(filenameExtension: "torrent", conformingTo: .data)
+    ?? .data
 
 struct ContentView: View {
     @EnvironmentObject private var owner: EngineOwner
@@ -7,6 +13,7 @@ struct ContentView: View {
     @State private var themeId = Prefs.theme()
     @State private var input = ""
     @State private var magnet = true
+    @State private var importing = false
     @State private var shareJob: JobView?
     @State private var settingsOpen = false
     @State private var settingsTab: SettingsTab = .appearance
@@ -34,6 +41,24 @@ struct ContentView: View {
                 owner.leaveForeground()
             } else if phase == .active {
                 owner.enterForeground()
+            }
+        }
+        .alert(
+            "Start this torrent?",
+            isPresented: Binding(
+                get: { owner.torrentAsk != nil },
+                set: { if !$0 { owner.torrentAsk = nil } }
+            ),
+            presenting: owner.torrentAsk
+        ) { ask in
+            Button("start") { owner.confirmTorrent(ask) }
+            Button("cancel", role: .cancel) { owner.torrentAsk = nil }
+        } message: { ask in
+            Text("\(ask.name)\n\(owner.routeLine(ask))")
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: [torrentType]) { result in
+            if case .success(let url) = result {
+                owner.queueTorrentFile(at: url)
             }
         }
         .sheet(item: shareSheetItem) { item in
@@ -189,8 +214,24 @@ struct ContentView: View {
         .font(.system(size: 14, design: .monospaced))
         .foregroundColor(colors.fg)
         .padding(10)
+        // Room for the upload button so text never runs under it.
+        .padding(.trailing, magnet ? 30 : 0)
         .background(colors.row)
         .overlay(RoundedRectangle(cornerRadius: 2).stroke(colors.dim, lineWidth: 1))
+        .overlay(alignment: .trailing) {
+            if magnet {
+                // Open a .torrent file; it starts at once, like START.
+                Button {
+                    importing = true
+                } label: {
+                    Image(systemName: "doc")
+                        .font(.system(size: 16))
+                        .foregroundColor(colors.dim)
+                        .frame(width: 40, height: 40)
+                }
+                .accessibilityLabel("open a .torrent file")
+            }
+        }
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
     }

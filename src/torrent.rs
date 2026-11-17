@@ -260,21 +260,38 @@ pub fn claim_magnet_sub_folder(dest: &Path, magnet_uri: &str) -> Result<String> 
     );
 }
 
-pub async fn start_download(magnet_uri: &str, seed: bool, dest: PathBuf) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::cli(1), seed, dest).await
+/// `torrent`: the `.torrent` bytes the magnet was built from, when there is a
+/// copy (`torrent_file`); the engine then starts from them with no metadata
+/// wait. `None` fetches the metadata from the swarm as for any magnet.
+pub async fn start_download(
+    magnet_uri: &str,
+    torrent: Option<Vec<u8>>,
+    seed: bool,
+    dest: PathBuf,
+) -> Result<()> {
+    start_download_with(magnet_uri, torrent, ProgressHandle::cli(1), seed, dest).await
 }
 
 pub async fn start_download_reported(
     magnet_uri: &str,
+    torrent: Option<Vec<u8>>,
     snapshot: Arc<JobSnapshot>,
     seed: bool,
     dest: PathBuf,
 ) -> Result<()> {
-    start_download_with(magnet_uri, ProgressHandle::gui(1, snapshot), seed, dest).await
+    start_download_with(
+        magnet_uri,
+        torrent,
+        ProgressHandle::gui(1, snapshot),
+        seed,
+        dest,
+    )
+    .await
 }
 
 pub async fn start_download_with(
     magnet_uri: &str,
+    torrent: Option<Vec<u8>>,
     progress: ProgressHandle,
     seed: bool,
     dest: PathBuf,
@@ -290,8 +307,8 @@ pub async fn start_download_with(
     let folder_lock = magnet_folder_lock(&info_hash);
     let _folder = folder_lock.lock().await;
     // First the swarm sends the torrent's info (name, files, sizes): nothing
-    // to verify or download until it arrives.
-    if !progress.is_paused() {
+    // to verify or download until it arrives. A .torrent already has it.
+    if torrent.is_none() && !progress.is_paused() {
         progress.set_status(FETCHING_METADATA);
         progress.set_message("Fetching torrent metadata from peers...");
     }
@@ -316,7 +333,7 @@ pub async fn start_download_with(
     .await
     .context("failed to start torrent session")?;
 
-    let result = run_torrent(&session, magnet_uri, progress, seed, sub_folder).await;
+    let result = run_torrent(&session, magnet_uri, torrent, progress, seed, sub_folder).await;
     session.stop().await;
     result
 }
@@ -373,13 +390,18 @@ fn apply_live_stats(progress: &ProgressHandle, stats: &librqbit::TorrentStats, s
 async fn run_torrent(
     session: &std::sync::Arc<Session>,
     magnet_uri: &str,
+    torrent: Option<Vec<u8>>,
     progress: ProgressHandle,
     seed: bool,
     sub_folder: String,
 ) -> Result<()> {
+    let add = match torrent {
+        Some(bytes) => AddTorrent::from_bytes(bytes),
+        None => AddTorrent::from_url(magnet_uri),
+    };
     let handle = session
         .add_torrent(
-            AddTorrent::from_url(magnet_uri),
+            add,
             Some(AddTorrentOptions {
                 overwrite: true,
                 sub_folder: Some(sub_folder),
@@ -438,6 +460,8 @@ async fn run_torrent(
     tokio::pin!(controls);
 
     let mut download_done = false;
+    // "2" ends the controls future; never poll it again after that.
+    let mut controls_done = false;
     loop {
         tokio::select! {
             result = &mut completed, if !download_done => {
@@ -469,7 +493,8 @@ async fn run_torrent(
                     println!("\nTorrent download finished — seeding until you press 2.");
                 }
             }
-            _ = &mut controls => {
+            _ = &mut controls, if !controls_done => {
+                controls_done = true;
                 if let Some(snapshot) = progress.snapshot() {
                     snapshot.request_stop();
                 }
@@ -591,6 +616,7 @@ mod tests {
     async fn rejects_invalid_magnet() {
         let err = start_download(
             "https://example.com/not-a-magnet",
+            None,
             false,
             PathBuf::from("."),
         )

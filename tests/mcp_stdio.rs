@@ -137,6 +137,7 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
         "banner",
         "dest",
         "queue_magnet",
+        "queue_torrent_file",
         "queue_http",
         "jobs",
         "pause",
@@ -164,6 +165,20 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
     assert!(
         tool_text(&bad_magnet).contains("Invalid magnet URL!"),
         "{bad_magnet}"
+    );
+
+    let missing_file = call_tool(
+        &mut stdin,
+        &mut stdout,
+        40,
+        "queue_torrent_file",
+        json!({"path": "/nonexistent/torrenter-test.torrent"}),
+    )
+    .await;
+    assert_eq!(missing_file["result"]["isError"], true);
+    assert!(
+        tool_text(&missing_file).contains("could not open"),
+        "{missing_file}"
     );
 
     let bad_http = call_tool(

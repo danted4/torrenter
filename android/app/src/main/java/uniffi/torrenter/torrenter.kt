@@ -766,6 +766,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -784,6 +788,8 @@ internal interface IntegrityCheckingUniffiLib : Library {
     fun uniffi_torrenter_checksum_func_banner(
 ): Short
 fun uniffi_torrenter_checksum_func_debrid_services(
+): Short
+fun uniffi_torrenter_checksum_func_inspect_torrent_file(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_any_active(
 ): Short
@@ -806,6 +812,8 @@ fun uniffi_torrenter_checksum_method_engine_persist(
 fun uniffi_torrenter_checksum_method_engine_queue(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_queue_debrid(
+): Short
+fun uniffi_torrenter_checksum_method_engine_queue_torrent_file(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_remove(
 ): Short
@@ -910,6 +918,8 @@ fun uniffi_torrenter_fn_method_engine_queue(`ptr`: Pointer,`kind`: RustBuffer.By
 ): Long
 fun uniffi_torrenter_fn_method_engine_queue_debrid(`ptr`: Pointer,`source`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+fun uniffi_torrenter_fn_method_engine_queue_torrent_file(`ptr`: Pointer,`bytes`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
 fun uniffi_torrenter_fn_method_engine_remove(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_remove_with_remote(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -937,6 +947,8 @@ fun uniffi_torrenter_fn_method_engine_toggle_pause(`ptr`: Pointer,`id`: Long,uni
 fun uniffi_torrenter_fn_func_banner(uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_func_debrid_services(uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+fun uniffi_torrenter_fn_func_inspect_torrent_file(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun ffi_torrenter_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1070,6 +1082,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_func_debrid_services() != 34755.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_func_inspect_torrent_file() != 47923.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_any_active() != 33237.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1101,6 +1116,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_method_engine_queue_torrent_file() != 60120.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_remove() != 13505.toShort()) {
@@ -1480,6 +1498,25 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     }
 }
 
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
+    override fun read(buf: ByteBuffer): ByteArray {
+        val len = buf.getInt()
+        val byteArr = ByteArray(len)
+        buf.get(byteArr)
+        return byteArr
+    }
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
+    override fun write(value: ByteArray, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        buf.put(value)
+    }
+}
+
 
 // This template implements a class for working with a Rust struct via a Pointer/Arc<T>
 // to the live Rust struct on the other side of the FFI.
@@ -1611,6 +1648,12 @@ public interface EngineInterface {
      * Queue a magnet through a debrid account (its id).
      */
     fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong
+    
+    /**
+     * Queue a `.torrent` file's bytes (from the system picker or "Open
+     * with"): from peers, or through a debrid account (its id).
+     */
+    fun `queueTorrentFile`(`bytes`: kotlin.ByteArray, `account`: kotlin.String?): kotlin.ULong
     
     fun `remove`(`id`: kotlin.ULong)
     
@@ -1878,6 +1921,23 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     uniffiRustCallWithError(EngineException) { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_queue_debrid(
         it, FfiConverterString.lower(`source`),FfiConverterString.lower(`account`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Queue a `.torrent` file's bytes (from the system picker or "Open
+     * with"): from peers, or through a debrid account (its id).
+     */
+    @Throws(EngineException::class)override fun `queueTorrentFile`(`bytes`: kotlin.ByteArray, `account`: kotlin.String?): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithPointer {
+    uniffiRustCallWithError(EngineException) { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_queue_torrent_file(
+        it, FfiConverterByteArray.lower(`bytes`),FfiConverterOptionalString.lower(`account`),_status)
 }
     }
     )
@@ -2301,6 +2361,42 @@ public object FfiConverterTypeServiceView: FfiConverterRustBuffer<ServiceView> {
 
 
 
+/**
+ * What a `.torrent` is, read before asking whether to start it ("Open with"
+ * files are confirmed first). Nothing is queued or saved.
+ */
+data class TorrentFileView (
+    var `name`: kotlin.String, 
+    var `private`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTorrentFileView: FfiConverterRustBuffer<TorrentFileView> {
+    override fun read(buf: ByteBuffer): TorrentFileView {
+        return TorrentFileView(
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TorrentFileView) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`private`)
+    )
+
+    override fun write(value: TorrentFileView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`private`, buf)
+    }
+}
+
+
+
 
 
 sealed class EngineException: kotlin.Exception() {
@@ -2552,6 +2648,16 @@ public object FfiConverterSequenceTypeServiceView: FfiConverterRustBuffer<List<S
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_torrenter_fn_func_debrid_services(
         _status)
+}
+    )
+    }
+    
+
+    @Throws(EngineException::class) fun `inspectTorrentFile`(`bytes`: kotlin.ByteArray): TorrentFileView {
+            return FfiConverterTypeTorrentFileView.lift(
+    uniffiRustCallWithError(EngineException) { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_func_inspect_torrent_file(
+        FfiConverterByteArray.lower(`bytes`),_status)
 }
     )
     }

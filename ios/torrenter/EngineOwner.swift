@@ -57,6 +57,14 @@ final class EngineOwner: ObservableObject {
     private var graceId: UIBackgroundTaskIdentifier = .invalid
     private var keepAliveRetryAt = Date.distantPast
     private var keepAliveFailing = false
+    /// Largest .torrent read (the engine refuses anything larger too).
+    nonisolated static let maxTorrentFile = 32 * 1024 * 1024
+    /// A .torrent from "Open with" (another app can send one), started only
+    /// after a tap.
+    @Published var torrentAsk: TorrentAsk?
+    /// .torrent files opened before the engine was up ("Open with" at launch).
+    private var pendingTorrents: [(data: Data, peersOnly: Bool)] = []
+
     static let keepAliveNotice = "keep alive could not start audio; jobs park when you leave"
     static let keepAliveRetry: TimeInterval = 10
 
@@ -103,6 +111,109 @@ final class EngineOwner: ObservableObject {
         resumeParked()
         refresh()
         startTicker()
+        let pending = pendingTorrents
+        pendingTorrents = []
+        pending.forEach { queueTorrentData($0.data, peersOnly: $0.peersOnly) }
+    }
+
+    /// A .torrent from the picker or "Open with": read (security-scoped,
+    /// capped) off the main actor, so an iCloud file still downloading never
+    /// blocks the UI, then queued through the current route, like START.
+    /// The picker: the user chose it, so it starts at once.
+    func queueTorrentFile(at url: URL) {
+        takeTorrent(at: url, ask: false)
+    }
+
+    /// "Open with": shown with its name and route first (`torrentAsk`).
+    func askTorrentFile(at url: URL) {
+        takeTorrent(at: url, ask: true)
+    }
+
+    func confirmTorrent(_ ask: TorrentAsk) {
+        torrentAsk = nil
+        // A private torrent never goes through debrid: from its peers.
+        queueTorrentData(ask.data, peersOnly: ask.isPrivate)
+    }
+
+    /// The confirm's second line: the route, or why a private torrent ignores it.
+    func routeLine(_ ask: TorrentAsk) -> String {
+        ask.isPrivate ? "private torrent: from its tracker's peers only" : "via \(routeName)"
+    }
+
+    /// Where a new magnet goes: the chosen debrid account's name, or peers.
+    var routeName: String {
+        accounts.first { $0.id == debridRoute }?.name ?? "peers"
+    }
+
+    private func takeTorrent(at url: URL, ask: Bool) {
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.readTorrent(at: url)
+            }.value
+            guard let self else { return }
+            switch result {
+            case .success(let data) where ask:
+                do {
+                    let view = try inspectTorrentFile(bytes: data)
+                    self.torrentAsk = TorrentAsk(data: data, name: view.name, isPrivate: view.private)
+                } catch {
+                    self.notice = engineMessage(error)
+                }
+            case .success(let data): self.queueTorrentData(data)
+            case .failure(let error): self.notice = error.message
+            }
+        }
+    }
+
+    private struct ReadFailure: Error, Sendable { let message: String }
+
+    private nonisolated static func readTorrent(at url: URL) -> Result<Data, ReadFailure> {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            // Only a copy iOS put in THIS app's Documents/Inbox (it would show
+            // up in Files); never a user's file elsewhere.
+            if isInOwnInbox(url) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > maxTorrentFile {
+            return .failure(ReadFailure(message: "the .torrent file is larger than 32 MB"))
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            return .failure(ReadFailure(message: "could not read that file"))
+        }
+        if data.count > maxTorrentFile {
+            return .failure(ReadFailure(message: "the .torrent file is larger than 32 MB"))
+        }
+        return .success(data)
+    }
+
+    /// Whether `url` lies inside this app's own Documents/Inbox (paths
+    /// standardised and symlinks resolved before comparing).
+    nonisolated static func isInOwnInbox(_ url: URL) -> Bool {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return false
+        }
+        let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
+            .standardizedFileURL.resolvingSymlinksInPath().path
+        let file = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return file.hasPrefix(inbox + "/")
+    }
+
+    private func queueTorrentData(_ data: Data, peersOnly: Bool = false) {
+        guard let engine else {
+            pendingTorrents.append((data, peersOnly))
+            return
+        }
+        do {
+            _ = try engine.queueTorrentFile(bytes: data, account: peersOnly ? nil : debridRoute)
+            notice = nil
+            refresh()
+        } catch {
+            notice = engineMessage(error)
+        }
     }
 
     @discardableResult
@@ -522,4 +633,12 @@ func engineMessage(_ error: Error) -> String {
         return msg
     }
     return error.localizedDescription
+}
+
+/// A .torrent waiting for "start" (opened from another app).
+struct TorrentAsk: Identifiable {
+    let id = UUID()
+    let data: Data
+    let name: String
+    let isPrivate: Bool
 }

@@ -293,3 +293,32 @@ fun Chip(
                 .padding(horizontal = 10.dp, vertical = 5.dp),
     )
 }
+
+/** Next to the magnet box: open a .torrent file (a page with a folded corner). */
+@Composable
+fun UploadGlyph(
+    color: Color,
+    onClick: () -> Unit,
+) {
+    Canvas(
+        Modifier
+            .size(36.dp)
+            .clickable(onClick = onClick)
+            .padding(9.dp),
+    ) {
+        val u = size.minDimension / 16f
+        val stroke = 1.2f * u * 1.4f
+        val page =
+            Path().apply {
+                moveTo(3f * u, 1.5f * u)
+                lineTo(10f * u, 1.5f * u)
+                lineTo(13f * u, 4.5f * u)
+                lineTo(13f * u, 14.5f * u)
+                lineTo(3f * u, 14.5f * u)
+                close()
+            }
+        drawPath(page, color, style = Stroke(width = stroke, cap = StrokeCap.Round))
+        drawLine(color, Offset(10f * u, 1.5f * u), Offset(10f * u, 4.5f * u), stroke, StrokeCap.Round)
+        drawLine(color, Offset(10f * u, 4.5f * u), Offset(13f * u, 4.5f * u), stroke, StrokeCap.Round)
+    }
+}

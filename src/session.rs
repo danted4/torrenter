@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +20,7 @@ use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
 };
+use crate::torrent_file;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
 pub const MAX_ACTIVE_DOWNLOADS: usize = 4;
@@ -49,6 +50,9 @@ pub struct Job {
     pub part_count: usize,
     /// Debrid route: provider plus shared provider-side progress.
     pub debrid: Option<JobDebrid>,
+    /// From a private `.torrent`: only ever started from its stored copy, never
+    /// the magnet (the DHT must not see it) and never through debrid.
+    pub private_torrent: bool,
 }
 
 #[derive(Clone)]
@@ -99,6 +103,7 @@ pub fn persist_record(job: &Job) -> PersistedJob {
         remote_id: debrid.as_ref().and_then(|d| d.remote_id.clone()),
         added_by_us: debrid.as_ref().is_some_and(|d| d.added_by_us),
         files: debrid.map(|d| d.files).unwrap_or_default(),
+        private_torrent: job.private_torrent,
         ..Default::default()
     }
 }
@@ -140,6 +145,10 @@ enum EngineCmd {
         dest: PathBuf,
         part_count: usize,
         debrid: Option<DebridLaunch>,
+        /// Where a `.torrent` copy for this magnet may be kept.
+        torrent_store: PathBuf,
+        /// Run only from that copy (a private torrent).
+        private_torrent: bool,
     },
     Probe(Vec<ProbeSpec>),
     DeleteRemote {
@@ -385,6 +394,7 @@ impl Session {
                         // Jobs saved before the setting existed used 4 parts.
                         part_count: record.part_count.map(usize::from).unwrap_or(PART_COUNT),
                         debrid,
+                        private_torrent: record.private_torrent,
                     });
                 }
                 // Rewrite now when a folder was cleaned, so jobs.json holds the
@@ -395,6 +405,7 @@ impl Session {
                 } else {
                     inner.saved_fingerprint = persist_fingerprint(&inner.jobs);
                 }
+                prune_torrents(&inner);
                 drop(inner);
                 if !probes.is_empty() {
                     let _ = self.engine.send(EngineCmd::Probe(probes));
@@ -486,6 +497,26 @@ impl Session {
         self.queue_with(kind, source, None)
     }
 
+    /// Queue a `.torrent` file: keep a copy beside `jobs.json` and queue the
+    /// magnet built from it (through `via` like any magnet). The engine starts
+    /// from the copy, so there is no metadata wait.
+    ///
+    /// A private torrent (its tracker forbids DHT and peer exchange) gets a
+    /// magnet without trackers (their URLs carry the user's passkey), runs only
+    /// from the copy, and cannot go through debrid.
+    pub fn queue_torrent(&self, bytes: &[u8], via: Option<&str>) -> Result<u64, String> {
+        let imported = torrent_file::parse(bytes).map_err(|error| format!("{error:#}"))?;
+        if imported.private && via.is_some() {
+            return Err(PRIVATE_NO_DEBRID.into());
+        }
+        self.queue_inner(
+            JobKind::Magnet,
+            &imported.magnet,
+            via,
+            Some((&imported, bytes)),
+        )
+    }
+
     /// Queue a job; a magnet with `via` (an account id) goes through that
     /// debrid account.
     pub fn queue_with(
@@ -493,6 +524,19 @@ impl Session {
         kind: JobKind,
         source: &str,
         via: Option<&str>,
+    ) -> Result<u64, String> {
+        self.queue_inner(kind, source, via, None)
+    }
+
+    /// `torrent`: a `.torrent` the magnet was built from. Its copy is saved
+    /// under the session lock after the duplicate check, so a refused file
+    /// never overwrites a running job's copy and no prune can race the save.
+    fn queue_inner(
+        &self,
+        kind: JobKind,
+        source: &str,
+        via: Option<&str>,
+        torrent: Option<(&torrent_file::Imported, &[u8])>,
     ) -> Result<u64, String> {
         let source = source.trim();
         if source.is_empty() {
@@ -528,6 +572,10 @@ impl Session {
         if let Some(note) = duplicate_note(&inner.jobs, kind, source) {
             return Err(note);
         }
+        if let Some((imported, bytes)) = torrent {
+            torrent_file::save(&torrent_file::store_dir(&inner.jobs_path), imported, bytes)
+                .map_err(|error| format!("{error:#}"))?;
+        }
         let snapshot = Arc::new(JobSnapshot::default());
         snapshot.set_status("queued");
         match kind {
@@ -555,8 +603,15 @@ impl Session {
             dest: inner.dest.clone(),
             part_count: inner.part_count,
             debrid,
+            private_torrent: torrent.is_some_and(|(imported, _)| imported.private),
         };
-        let cmd = launch(&inner, &job)?;
+        let cmd = match launch(&inner, &job) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                prune_torrents(&inner);
+                return Err(error);
+            }
+        };
         inner.next_id += 1;
         let _ = self.engine.send(cmd);
         inner.jobs.push(job);
@@ -601,6 +656,9 @@ impl Session {
         };
         let old = inner.jobs[index].clone();
         let source = old.source.clone();
+        if old.private_torrent && matches!(route, Route::Via(_)) {
+            return Err(PRIVATE_NO_DEBRID.into());
+        }
         let debrid = match (old.kind, &route) {
             (JobKind::Http, Route::Via(_)) => return Err("debrid applies to magnet links".into()),
             (_, Route::Peers) => None,
@@ -676,6 +734,7 @@ impl Session {
             dest,
             part_count,
             debrid,
+            private_torrent: old.private_torrent,
         };
         let cmd = match launch(&inner, &job) {
             Ok(cmd) => cmd,
@@ -716,6 +775,7 @@ impl Session {
             inner.jobs[index].snapshot.mark_stopped();
             inner.jobs.remove(index);
             persist_inner(&mut inner, true);
+            prune_torrents(&inner);
         }
     }
 
@@ -970,6 +1030,27 @@ fn offered(service: Service) -> Result<(), String> {
     }
 }
 
+const PRIVATE_COPY_MISSING: &str =
+    "this private torrent's .torrent copy is missing; add the file again";
+
+/// The `.torrent` bytes a magnet job starts from: its stored copy when there
+/// is one. A public torrent falls back to the magnet (`None`); a private one
+/// never does, since resolving it from the magnet would ask the DHT.
+fn torrent_for_launch(
+    store: &std::path::Path,
+    source: &str,
+    private_torrent: bool,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    let torrent = magnet_info_hash_hex(source).and_then(|hash| torrent_file::load(store, &hash));
+    if private_torrent && torrent.is_none() {
+        return Err(PRIVATE_COPY_MISSING);
+    }
+    Ok(torrent)
+}
+
+const PRIVATE_NO_DEBRID: &str =
+    "a private torrent downloads only from its own tracker's peers, not through a debrid service";
+
 fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
     let debrid = match &job.debrid {
         Some(debrid) => {
@@ -1003,7 +1084,34 @@ fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
         dest: job.dest.clone(),
         part_count: job.part_count,
         debrid,
+        torrent_store: torrent_file::store_dir(&inner.jobs_path),
+        private_torrent: job.private_torrent,
     })
+}
+
+/// Info hashes (hex) of every magnet job, saved or foreign: the `.torrent`
+/// copies to keep.
+fn torrent_keep(inner: &Inner) -> HashSet<String> {
+    let foreign = inner
+        .foreign
+        .iter()
+        .filter_map(|record| record.get("source")?.as_str());
+    inner
+        .jobs
+        .iter()
+        .filter(|job| job.kind.takes_magnet())
+        .map(|job| job.source.as_str())
+        .chain(foreign)
+        .filter_map(magnet_info_hash_hex)
+        .collect()
+}
+
+/// Drop `.torrent` copies no job refers to any more.
+fn prune_torrents(inner: &Inner) {
+    torrent_file::prune(
+        &torrent_file::store_dir(&inner.jobs_path),
+        &torrent_keep(inner),
+    );
 }
 
 fn persist_inner(inner: &mut Inner, force: bool) {
@@ -1042,6 +1150,8 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     dest,
                     part_count,
                     debrid,
+                    torrent_store,
+                    private_torrent,
                 } => {
                     if snapshot.should_stop() {
                         snapshot.mark_stopped();
@@ -1086,7 +1196,16 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                             Err(anyhow::anyhow!("debrid job without a provider"))
                         }
                         (JobKind::Magnet, _) => {
-                            start_download_reported(&source, snapshot, seed, dest).await
+                            match torrent_for_launch(&torrent_store, &source, private_torrent) {
+                                Ok(torrent) => {
+                                    start_download_reported(&source, torrent, snapshot, seed, dest)
+                                        .await
+                                }
+                                Err(error) => {
+                                    snapshot.set_error(error);
+                                    Err(anyhow::anyhow!(error))
+                                }
+                            }
                         }
                         (JobKind::Http, _) => {
                             start_url_download_reported(&source, snapshot, dest, part_count).await
@@ -1171,6 +1290,7 @@ mod tests {
             dest: PathBuf::from(dest),
             part_count: 4,
             debrid: None,
+            private_torrent: false,
         }
     }
 
@@ -1447,6 +1567,110 @@ mod tests {
             "no key or link persisted"
         );
         assert!(dir.path().join("dl/Album/CD1/01.bin").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn torrent_files_queue_as_their_magnet_and_keep_a_copy() {
+        use crate::torrent_file::tests::torrent_bytes;
+        let dir = tempdir().unwrap();
+        // Through the fake TorBox so nothing reaches the real swarm; it keeps
+        // the job fetching, so the duplicate check sees it active.
+        let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
+        let bytes = torrent_bytes("Sintel 4K.mkv", &["udp://tracker.example:1337/announce"]);
+        let imported = torrent_file::parse(&bytes).unwrap();
+        let store = dir.path().join("torrents");
+        let copy = store.join(format!("{}.torrent", imported.hash_hex));
+
+        assert_eq!(
+            session.queue_torrent(b"not a torrent", None).unwrap_err(),
+            "not a valid .torrent file"
+        );
+        let id = session.queue_torrent(&bytes, Some("torbox")).unwrap();
+        let job = session.job(id).unwrap();
+        assert_eq!(job.source, imported.magnet);
+        assert_eq!(job.snapshot.title(), "Sintel 4K.mkv");
+        assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+        // The engine is told where the copy lives.
+        match launch(&mutex_lock(&session.inner), &job) {
+            Ok(EngineCmd::Download { torrent_store, .. }) => assert_eq!(torrent_store, store),
+            _ => panic!("expected a download command"),
+        }
+        // The same file again, or its magnet pasted: one job per torrent, and
+        // the copy stays for the job already running.
+        assert_eq!(
+            session.queue_torrent(&bytes, None).unwrap_err(),
+            "that magnet is already downloading"
+        );
+        assert_eq!(
+            session
+                .queue(JobKind::Magnet, &imported.magnet)
+                .unwrap_err(),
+            "that magnet is already downloading"
+        );
+        assert!(copy.exists());
+        // jobs.json keeps the built magnet, not the file.
+        session.persist(true);
+        let saved = std::fs::read_to_string(dir.path().join("jobs.json")).unwrap();
+        assert!(saved.contains(&imported.hash_hex), "{saved}");
+        // Clearing the job drops the copy.
+        session.stop(id);
+        session.remove(id);
+        assert!(!copy.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn private_torrents_never_leave_their_tracker() {
+        use crate::torrent_file::tests::{private_torrent_bytes, torrent_bytes};
+        let dir = tempdir().unwrap();
+        let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
+        let store = dir.path().join("torrents");
+        let bytes = private_torrent_bytes("Private.mkv", &["https://t.example/a?passkey=S"]);
+        let imported = torrent_file::parse(&bytes).unwrap();
+        // Not through debrid, and nothing kept for a refused file.
+        assert_eq!(
+            session.queue_torrent(&bytes, Some("torbox")).unwrap_err(),
+            PRIVATE_NO_DEBRID
+        );
+        assert!(!store
+            .join(format!("{}.torrent", imported.hash_hex))
+            .exists());
+
+        // The engine starts from the copy; without it a public torrent falls
+        // back to its magnet, a private one refuses (no DHT lookup).
+        let public = torrent_file::parse(&torrent_bytes("Public.mkv", &[])).unwrap();
+        assert_eq!(torrent_for_launch(&store, &public.magnet, false), Ok(None));
+        assert_eq!(
+            torrent_for_launch(&store, &imported.magnet, true),
+            Err(PRIVATE_COPY_MISSING)
+        );
+        torrent_file::save(&store, &imported, &bytes).unwrap();
+        assert_eq!(
+            torrent_for_launch(&store, &imported.magnet, true),
+            Ok(Some(bytes.clone()))
+        );
+
+        // A private job keeps its flag in jobs.json and cannot be re-routed
+        // to a debrid account.
+        let mut job = sample_job("Private.mkv", &imported.magnet, "/tmp/films");
+        job.id = 77;
+        job.kind = JobKind::Magnet;
+        job.private_torrent = true;
+        assert!(persist_record(&job).private_torrent);
+        let json = serde_json::to_string(&persist_record(&job)).unwrap();
+        assert!(json.contains("\"privateTorrent\":true"), "{json}");
+        mutex_lock(&session.inner).jobs.push(job);
+        assert_eq!(
+            session
+                .restart_with(
+                    77,
+                    Route::Via("torbox".into()),
+                    false,
+                    PathBuf::from("/tmp/films"),
+                    false
+                )
+                .unwrap_err(),
+            PRIVATE_NO_DEBRID
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
