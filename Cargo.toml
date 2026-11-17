@@ -2,11 +2,11 @@
 name = "torrenter"
 version = "3.8.3"
 edition = "2021"
-description = "CLI, native GUI, and stdio MCP: magnet/torrent and parallel multipart HTTP(S) with byte-range resume."
+description = "Torrent client and magnet downloader (CLI, native GUI, Android, iOS, stdio MCP) with optional debrid support and resumable multi-connection HTTP(S)."
 license = "MIT"
 repository = "https://github.com/danted4/torrenter"
 readme = "README.md"
-keywords = ["torrent", "magnet", "download", "http", "cli"]
+keywords = ["torrent", "magnet", "debrid", "downloader", "mcp"]
 rust-version = "1.85"
 
 [features]

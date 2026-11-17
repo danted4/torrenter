@@ -1,5 +1,17 @@
 # torrenter &nbsp;  &nbsp; <a href="#windows"><img src="docs/os-windows.svg" alt="Windows" width="28" height="28" align="absmiddle"></a> <a href="#macos"><img src="docs/os-macos.svg" alt="macOS" width="28" height="28" align="absmiddle"></a> <a href="#linux"><img src="docs/os-linux.svg" alt="Linux" width="28" height="28" align="absmiddle"></a> <a href="#android"><img src="docs/os-android.svg" alt="Android" width="28" height="28" align="absmiddle"></a> <a href="#ios"><img src="docs/os-ios.svg" alt="iOS" width="28" height="28" align="absmiddle"></a> <a href="#mcp"><img src="docs/os-mcp.svg" alt="MCP" width="28" height="28" align="absmiddle"></a> <a href="#debrid-optional"><img src="docs/os-debrid.svg" alt="Debrid" width="28" height="28" align="absmiddle"></a> &nbsp;  &nbsp;
 
+Open-source torrent client and magnet downloader for Windows, macOS, Linux, Android (APK) and iOS, with optional debrid support (TorBox; Real-Debrid, AllDebrid, Premiumize and Debrid-Link experimental), resumable multi-connection HTTP downloads, and an MCP server so AI agents can queue downloads.
+
+| | Where | How to get it | Type |
+|:-:|---|---|---|
+| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22"> | **[Windows](#windows)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-pc-windows-msvc.exe` (CLI), `torrenter-gui-x86_64-pc-windows-msvc.exe` (GUI) | Platform support |
+| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22"> | **[macOS](#macos)** | [Release](https://github.com/danted4/torrenter/releases/latest): CLI and GUI for Apple Silicon (`aarch64`) and Intel (`x86_64`); the GUI also as `torrenter.app` (`.app.zip`) | Platform support |
+| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22"> | **[Linux](#linux)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-unknown-linux-gnu` (CLI), `torrenter-gui-x86_64-unknown-linux-gnu` (GUI) | Platform support |
+| <img src="docs/os-android.svg" alt="Android" width="22" height="22"> | **[Android](#android)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-android.apk`, sideload (Android 11+) | Platform support |
+| <img src="docs/os-ios.svg" alt="iOS" width="22" height="22"> | **[iOS](#ios)** | Build on a Mac with Xcode and sideload (iOS 16+); no App Store or IPA | Platform support |
+| <img src="docs/os-mcp.svg" alt="MCP" width="22" height="22"> | **[MCP](#mcp)** | `torrenter mcp`, part of the CLI binary | Feature – AI assistants queue and manage downloads over stdio |
+| <img src="docs/os-debrid.svg" alt="Debrid" width="22" height="22"> | **[Debrid](#debrid-optional)** | Add your own account's API key in any app. TorBox (verified); Real-Debrid, AllDebrid, Premiumize, Debrid-Link (experimental) | Feature – magnets download through your debrid service instead of peers |
+
 **torrenter gui**
 
 ![torrenter gui](docs/gui-3.5.4.jpg)
