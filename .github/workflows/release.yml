@@ -114,28 +114,31 @@ jobs:
     name: build (torrenter-android.apk)
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
+    # This job holds the release signing key: its actions are pinned to
+    # commit SHAs (the comment names the version) so a moved tag cannot run
+    # code next to the key. Bump them by hand.
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-android-apk
-      - uses: nttld/setup-ndk@v1
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         id: ndk
         with:
           ndk-version: r27c
       - name: cargo-ndk
-        run: cargo install cargo-ndk --locked
-      - uses: actions/setup-java@v5
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v4
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
         with:
           packages: "platforms;android-35 build-tools;35.0.0"
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
         with:
           gradle-version: "8.11.1"
       - name: Native libraries
@@ -144,14 +147,64 @@ jobs:
         run: |
           cargo ndk -P 30 -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
             build --locked --features ffi --release --lib
-      - name: Assemble debug APK
-        run: gradle assembleDebug
+      # Signed with the project's release key (GitHub secrets), never a debug
+      # key: a stable signer lets updates install over earlier versions and
+      # lets Play Protect recognise the publisher across releases.
+      - name: Release keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 is not set; refusing to ship an APK without the release key"
+            exit 1
+          fi
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+      - name: Assemble release APK
+        env:
+          TORRENTER_KEYSTORE: ${{ runner.temp }}/release.jks
+          TORRENTER_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TORRENTER_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          TORRENTER_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle assembleRelease
         working-directory: android
+      # The APK must be signed with exactly the project key (its certificate
+      # SHA-256, a public value kept in the ANDROID_CERT_SHA256 repo
+      # variable) and must not be debuggable: a swapped key would silently
+      # break in-place updates for everyone.
+      - name: Check the signature
+        shell: bash
+        env:
+          EXPECTED_CERT: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          expected=$(printf '%s' "$EXPECTED_CERT" | tr -d ': ' | tr 'A-F' 'a-f')
+          if [ -z "$expected" ]; then
+            echo "::error::ANDROID_CERT_SHA256 repo variable is not set"
+            exit 1
+          fi
+          "$tools/apksigner" verify --print-certs "$apk" > "$RUNNER_TEMP/certs.txt"
+          cat "$RUNNER_TEMP/certs.txt"
+          signers=$(grep -c '^Signer #[0-9]* certificate SHA-256 digest:' "$RUNNER_TEMP/certs.txt" || true)
+          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/certs.txt")
+          if [ "$signers" != "1" ] || [ "$actual" != "$expected" ]; then
+            echo "::error::the APK is not signed with the project key (got '$actual', expected '$expected')"
+            exit 1
+          fi
+          "$tools/aapt2" dump badging "$apk" > "$RUNNER_TEMP/badging.txt"
+          if grep -q "application-debuggable" "$RUNNER_TEMP/badging.txt"; then
+            echo "::error::the APK is debuggable"
+            exit 1
+          fi
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
       - name: Package
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/torrenter-android.apk
-      - uses: actions/upload-artifact@v6
+          cp android/app/build/outputs/apk/release/app-release.apk dist/torrenter-android.apk
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: torrenter-android.apk
           path: dist/torrenter-android.apk

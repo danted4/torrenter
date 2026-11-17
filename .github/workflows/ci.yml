@@ -92,8 +92,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: "8.11.1"
-      - name: Kotlin unit tests and debug APK
-        run: gradle testDebugUnitTest assembleDebug
+      # The release APK too (unsigned here; release.yml signs it), so a
+      # release-only failure such as lintVital shows up in the PR, not at tag.
+      - name: Kotlin unit tests, debug and release APK
+        run: gradle testDebugUnitTest assembleDebug assembleRelease
         working-directory: android
 
   ios-xcframework:

@@ -3,6 +3,8 @@
 android/.gradle/
 android/**/build/
 android/local.properties
+*.jks
+*.keystore
 android/**/jniLibs/
 ios/**/*.xcframework/
 ios/**/DerivedData/

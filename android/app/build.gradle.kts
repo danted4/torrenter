@@ -12,16 +12,38 @@ android {
         applicationId = "com.danted4.torrenter"
         minSdk = 30
         targetSdk = 35
-        versionCode = 11
-        versionName = "3.9.0"
+        versionCode = 12
+        versionName = "3.9.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
+    // Release APKs are signed with the project's own key, read from the
+    // environment (release.yml decodes it from GitHub secrets). The key never
+    // lives in the repo; without it a release build is left unsigned and the
+    // release workflow refuses to ship it.
+    val keystore = System.getenv("TORRENTER_KEYSTORE")?.takeIf { it.isNotBlank() }
+    signingConfigs {
+        if (keystore != null) {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("TORRENTER_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("TORRENTER_KEY_ALIAS")
+                // PKCS12 keystores use one password for the store and the key.
+                keyPassword =
+                    System.getenv("TORRENTER_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+                        ?: System.getenv("TORRENTER_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (keystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
