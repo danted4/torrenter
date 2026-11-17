@@ -63,7 +63,7 @@ final class EngineOwner: ObservableObject {
     /// after a tap.
     @Published var torrentAsk: TorrentAsk?
     /// .torrent files opened before the engine was up ("Open with" at launch).
-    private var pendingTorrents: [Data] = []
+    private var pendingTorrents: [(data: Data, peersOnly: Bool)] = []
 
     static let keepAliveNotice = "keep alive could not start audio; jobs park when you leave"
     static let keepAliveRetry: TimeInterval = 10
@@ -113,7 +113,7 @@ final class EngineOwner: ObservableObject {
         startTicker()
         let pending = pendingTorrents
         pendingTorrents = []
-        pending.forEach { queueTorrentData($0) }
+        pending.forEach { queueTorrentData($0.data, peersOnly: $0.peersOnly) }
     }
 
     /// A .torrent from the picker or "Open with": read (security-scoped,
@@ -204,7 +204,7 @@ final class EngineOwner: ObservableObject {
 
     private func queueTorrentData(_ data: Data, peersOnly: Bool = false) {
         guard let engine else {
-            pendingTorrents.append(data)
+            pendingTorrents.append((data, peersOnly))
             return
         }
         do {
