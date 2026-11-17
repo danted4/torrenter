@@ -52,6 +52,14 @@ fun jobIsFetching(job: JobView): Boolean = job.service != null && job.status in 
 fun serviceLabel(id: String?): String =
     id?.let { wanted -> runCatching { debridServices().firstOrNull { it.id == wanted }?.label }.getOrNull() ?: wanted } ?: ""
 
+/** Not yet confirmed with a real account (labelled in pickers and tiles). */
+fun serviceExperimental(id: String?): Boolean =
+    id != null && runCatching { debridServices().firstOrNull { it.id == id }?.experimental }.getOrNull() == true
+
+/** The provider as pickers show it: "Real-Debrid (experimental)". */
+fun serviceMenuLabel(id: String?): String =
+    serviceLabel(id).let { if (serviceExperimental(id)) "$it (experimental)" else it }
+
 /** The job's debrid account name, or its provider's when unknown. */
 fun jobRouteName(
     job: JobView,

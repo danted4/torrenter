@@ -77,6 +77,7 @@ pub struct DebridRun {
 /// links, no key) because they end up in `jobs.json`, the UI and MCP output.
 pub async fn start_debrid_reported(run: DebridRun, snapshot: Arc<JobSnapshot>) -> Result<()> {
     let key = run.key.clone();
+    let hint = run.service.report_hint();
     match drive(run, Arc::clone(&snapshot)).await {
         Ok(()) => Ok(()),
         Err(error) if is_stopped(&error) => {
@@ -84,7 +85,10 @@ pub async fn start_debrid_reported(run: DebridRun, snapshot: Arc<JobSnapshot>) -
             Ok(())
         }
         Err(error) => {
-            let text = redact(&format!("{error:#}"), Some(&key));
+            let mut text = redact(&format!("{error:#}"), Some(&key));
+            if let Some(hint) = hint {
+                text = format!("{text} ({hint})");
+            }
             // Recorded here too, so the job is saved as failed (and not
             // restarted on the next launch) even before the session drains it.
             snapshot.set_error(text.clone());
@@ -561,6 +565,32 @@ mod tests {
             .chain([last])
             .collect();
         format!("magnet:?xt=urn:btih:{hash}&dn=Album")
+    }
+
+    #[tokio::test]
+    async fn experimental_provider_failure_asks_for_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = Arc::new(JobSnapshot::default());
+        // Nothing listens on port 1: the provider call fails at once.
+        let mut run = run_for(
+            dir.path(),
+            Url::parse("http://127.0.0.1:1/").unwrap(),
+            SharedDebridState::default(),
+        );
+        run.service = Service::RealDebrid;
+        run.magnet = own_magnet('2');
+        let error = start_debrid_reported(run, Arc::clone(&snapshot))
+            .await
+            .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.ends_with(
+                "(Real-Debrid support is experimental; if this looks wrong, please report it at github.com/danted4/torrenter/issues)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains(KEY), "{text}");
+        assert_eq!(snapshot.error().as_deref(), Some(text.as_str()));
     }
 
     #[tokio::test]

@@ -539,14 +539,14 @@ impl GuiApp {
         }
     }
 
-    /// Debrid accounts for shipped providers (saved and env), read once and
+    /// Debrid accounts for offered providers (saved and env), read once and
     /// cached; cleared on save / remove and when settings opens.
     fn accounts(&mut self) -> Vec<AccountInfo> {
         self.accounts_cache
             .get_or_insert_with(|| {
                 credentials::accounts()
                     .into_iter()
-                    .filter(|account| Service::shipped().contains(&account.service))
+                    .filter(|account| Service::offered().contains(&account.service))
                     .collect()
             })
             .clone()
@@ -575,7 +575,7 @@ impl GuiApp {
         self.accounts_cache = None;
     }
 
-    /// The route menu under the select: default (none), each shipped
+    /// The route menu under the select: default (none), each offered
     /// provider (a provider without a key opens settings), manage keys.
     fn route_menu(&mut self, ui: &mut egui::Ui, select: &egui::Response, palette: Theme) {
         let popup_id = ui.make_persistent_id("debrid-route-menu");
@@ -1840,7 +1840,7 @@ impl GuiApp {
     }
 
     fn account_row(&mut self, ui: &mut egui::Ui, account: &AccountInfo, palette: Theme) {
-        let provider = account.service.label();
+        let provider = account.service.menu_label();
         let detail = match (self.account_notes.get(&account.id), account.source) {
             (Some(note), _) => format!("{provider} · {note}"),
             (None, KeySource::Env) => format!("{provider} · from {}", account.service.env_var()),
@@ -1903,8 +1903,12 @@ impl GuiApp {
         let mut keep = true;
         let mut save = false;
         // One width for the select and both fields, flush right: just wide
-        // enough for the select's placeholder.
-        let field_w = route_select_width(ui, "choose a provider") + 8.0;
+        // enough for the placeholder and the longest provider name.
+        let field_w = Service::offered()
+            .iter()
+            .map(|service| route_select_width(ui, &service.menu_label()))
+            .fold(route_select_width(ui, "choose a provider"), f32::max)
+            + 8.0;
         // A typed name must be free (any provider, any case); checked as
         // you type, shown on the field, and save stays off meanwhile.
         let name_error = {
@@ -1931,16 +1935,22 @@ impl GuiApp {
             .inner_margin(egui::Margin::symmetric(FORM_INSET, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                let provider_note = match form.service {
+                    Some(service) if !service.verified() => {
+                        "experimental: not yet tested with a real account; please report problems"
+                    }
+                    _ => "the debrid service the key belongs to",
+                };
                 setting_row(
                     ui,
                     palette,
-                    ("provider", "the debrid service the key belongs to"),
+                    ("provider", provider_note),
                     field_w,
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
                         let text = form
                             .service
-                            .map(|service| service.label().to_string())
+                            .map(Service::menu_label)
                             .unwrap_or_else(|| "choose a provider".to_string());
                         let select = route_select(
                             ui,
@@ -1960,10 +1970,10 @@ impl GuiApp {
                             let margin = ui.style().spacing.menu_margin;
                             let inner = field_w - f32::from(margin.left) - f32::from(margin.right);
                             ui.set_width(inner);
-                            for service in Service::shipped() {
+                            for service in Service::offered() {
                                 if menu_row_centered(
                                     ui,
-                                    service.label(),
+                                    &service.menu_label(),
                                     None,
                                     form.service == Some(*service),
                                     palette,

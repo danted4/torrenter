@@ -169,7 +169,7 @@ fun SettingsScreen(
                         }
                     }
                     accounts.forEach { account ->
-                        val provider = serviceLabel(account.service)
+                        val provider = serviceMenuLabel(account.service)
                         val detail = notes[account.id]?.let { "$provider · $it" } ?: "$provider · key saved"
                         Row(
                             modifier = Modifier.fillMaxWidth().background(palette.row, RoundedCornerShape(4.dp)).padding(12.dp),
@@ -229,7 +229,13 @@ private fun AddAccountCard(
             modifier = Modifier.fillMaxWidth().background(palette.bg.copy(alpha = 0.7f), RoundedCornerShape(6.dp)).padding(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            FormRow("provider", "the debrid service the key belongs to", palette) {
+            val providerNote =
+                if (serviceExperimental(form.service)) {
+                    "experimental: not yet tested with a real account; please report problems"
+                } else {
+                    "the debrid service the key belongs to"
+                }
+            FormRow("provider", providerNote, palette) {
                 ProviderSelect(form.service, palette) { onChange(form.copy(service = it)) }
             }
             form.service?.let { service ->
@@ -304,7 +310,7 @@ private fun ProviderSelect(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                service?.let { serviceLabel(it) } ?: "choose a provider",
+                service?.let { serviceMenuLabel(it) } ?: "choose a provider",
                 color = if (service == null) palette.dim else palette.fg,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 13.sp,
@@ -327,7 +333,7 @@ private fun ProviderSelect(
                 DropdownMenuItem(
                     text = {
                         Text(
-                            each.label,
+                            if (each.experimental) "${each.label} (experimental)" else each.label,
                             color = if (service == each.id) palette.fg else palette.dim,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 13.sp,

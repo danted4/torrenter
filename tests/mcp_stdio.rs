@@ -184,6 +184,12 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
     let payload: Value = serde_json::from_str(&tool_text(&services)).unwrap();
     assert_eq!(payload["services"][0]["id"], "torbox");
     assert_eq!(payload["services"][0]["configured"], false);
+    assert_eq!(payload["services"][0]["experimental"], false);
+    let listed = payload["services"].as_array().unwrap();
+    assert_eq!(listed.len(), 5, "{payload}");
+    assert!(listed[1..]
+        .iter()
+        .all(|service| service["experimental"] == true));
 
     let magnet = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
     let no_key = call_tool(

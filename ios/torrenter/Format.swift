@@ -47,6 +47,18 @@ func serviceLabel(_ id: String?) -> String {
     return debridServices().first { $0.id == id }?.label ?? id
 }
 
+/// Not yet confirmed with a real account (labelled in pickers and tiles).
+func serviceExperimental(_ id: String?) -> Bool {
+    guard let id else { return false }
+    return debridServices().first { $0.id == id }?.experimental ?? false
+}
+
+/// The provider as pickers show it: "Real-Debrid (experimental)".
+func serviceMenuLabel(_ id: String?) -> String {
+    let label = serviceLabel(id)
+    return serviceExperimental(id) ? "\(label) (experimental)" : label
+}
+
 /// The job's debrid account name, or its provider's when unknown.
 func jobRouteName(_ job: JobView, names: [String: String]) -> String {
     job.account.flatMap { names[$0] } ?? serviceLabel(job.service)

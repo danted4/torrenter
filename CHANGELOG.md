@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Real-Debrid, AllDebrid, Premiumize and Debrid-Link are available as **experimental** debrid providers (desktop GUI, CLI, MCP, Android, iOS). They are built from each provider's API docs and tested against fakes, but not yet confirmed with a real account, so pickers show "(experimental)", MCP `debrid_services` reports `experimental`, and a failed job asks for a report on GitHub issues. TorBox stays the verified provider.
+
 ## [3.8.2] - 2026-11-15
 
 ### Fixed

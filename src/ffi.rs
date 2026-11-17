@@ -99,6 +99,9 @@ pub struct JobView {
 pub struct ServiceView {
     pub id: String,
     pub label: String,
+    /// Not yet confirmed with a real account: pickers say "(experimental)".
+    #[uniffi(default = false)]
+    pub experimental: bool,
 }
 
 /// Result of a settings "Test": never contains the key.
@@ -110,7 +113,7 @@ pub struct AccountView {
 
 fn service_from(id: &str) -> Result<Service, EngineError> {
     Service::parse(id)
-        .filter(|service| Service::shipped().contains(service))
+        .filter(|service| Service::offered().contains(service))
         .ok_or_else(|| EngineError::Failed {
             msg: format!("unknown debrid service {id}"),
         })
@@ -118,11 +121,12 @@ fn service_from(id: &str) -> Result<Service, EngineError> {
 
 #[uniffi::export]
 pub fn debrid_services() -> Vec<ServiceView> {
-    Service::shipped()
+    Service::offered()
         .iter()
         .map(|service| ServiceView {
             id: service.id().into(),
             label: service.label().into(),
+            experimental: !service.verified(),
         })
         .collect()
 }
