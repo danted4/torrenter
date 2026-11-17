@@ -500,8 +500,9 @@ fn separate_clashes(planned: &mut [PlannedFile]) {
 
 /// Case-insensitive identity of a relative path, "/"-joined. An
 /// approximation: `to_lowercase` is not exactly what filesystems do, so names
-/// that differ only by Unicode normalisation (composed vs decomposed accents,
-/// one name on APFS) or by rare special case foldings still share a key.
+/// that differ only by Unicode normalisation (composed vs decomposed accents)
+/// or by rare special case foldings are not seen as a clash here although the
+/// filesystem (e.g. APFS) treats them as one name.
 fn path_key(path: &Path) -> String {
     path.components()
         .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
