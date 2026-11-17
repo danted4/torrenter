@@ -2,15 +2,15 @@
 
 Open-source torrent client and magnet downloader for Windows, macOS, Linux, Android (APK) and iOS (build from source): an ad-free alternative to uTorrent for magnet links, with IDM-style multi-connection downloads for direct links (up to 16 parallel connections, resumable), optional debrid support (TorBox; Real-Debrid, AllDebrid, Premiumize and Debrid-Link experimental), and an MCP server so AI agents can queue downloads. Not affiliated with uTorrent or Internet Download Manager.
 
-| | Where | How to get it | Type |
-|:-:|---|---|---|
-| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22"> | **[Windows](#windows)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-pc-windows-msvc.exe` (CLI), `torrenter-gui-x86_64-pc-windows-msvc.exe` (GUI) | Platform support |
-| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22"> | **[macOS](#macos)** | [Release](https://github.com/danted4/torrenter/releases/latest): CLI and GUI for Apple Silicon (`aarch64`) and Intel (`x86_64`); the GUI also as `torrenter.app` (`.app.zip`) | Platform support |
-| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22"> | **[Linux](#linux)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-unknown-linux-gnu` (CLI), `torrenter-gui-x86_64-unknown-linux-gnu` (GUI) | Platform support |
-| <img src="docs/os-android.svg" alt="Android" width="22" height="22"> | **[Android](#android)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-android.apk`, sideload (Android 11+) | Platform support |
-| <img src="docs/os-ios.svg" alt="iOS" width="22" height="22"> | **[iOS](#ios)** | Build on a Mac with Xcode and sideload (iOS 16+); no App Store or IPA | Platform support |
-| <img src="docs/os-mcp.svg" alt="MCP" width="22" height="22"> | **[MCP](#mcp)** | `torrenter mcp`, part of the CLI binary | Feature – AI assistants queue and manage downloads over stdio |
-| <img src="docs/os-debrid.svg" alt="Debrid" width="22" height="22"> | **[Debrid](#debrid-optional)** | Add your own account's API key in the GUI, CLI or phone apps. TorBox (verified); Real-Debrid, AllDebrid, Premiumize, Debrid-Link (experimental) | Feature – magnets download through your debrid service instead of peers |
+| Where | How to get it | Type |
+|---|---|---|
+| <img src="docs/os-windows.svg" alt="Windows" width="22" height="22" align="absmiddle">&nbsp;**[Windows](#windows)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-pc-windows-msvc.exe` (CLI), `torrenter-gui-x86_64-pc-windows-msvc.exe` (GUI) | Platform support |
+| <img src="docs/os-macos.svg" alt="macOS" width="22" height="22" align="absmiddle">&nbsp;**[macOS](#macos)** | [Release](https://github.com/danted4/torrenter/releases/latest): CLI and GUI for Apple Silicon (`aarch64`) and Intel (`x86_64`); the GUI also as `torrenter.app` (`.app.zip`) | Platform support |
+| <img src="docs/os-linux.svg" alt="Linux" width="22" height="22" align="absmiddle">&nbsp;**[Linux](#linux)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-x86_64-unknown-linux-gnu` (CLI), `torrenter-gui-x86_64-unknown-linux-gnu` (GUI) | Platform support |
+| <img src="docs/os-android.svg" alt="Android" width="22" height="22" align="absmiddle">&nbsp;**[Android](#android)** | [Release](https://github.com/danted4/torrenter/releases/latest): `torrenter-android.apk`, sideload (Android 11+) | Platform support |
+| <img src="docs/os-ios.svg" alt="iOS" width="22" height="22" align="absmiddle">&nbsp;**[iOS](#ios)** | Build on a Mac with Xcode and sideload (iOS 16+); no App Store or IPA | Platform support |
+| <img src="docs/os-mcp.svg" alt="MCP" width="22" height="22" align="absmiddle">&nbsp;**[MCP](#mcp)** | `torrenter mcp`, part of the CLI binary | Feature – AI assistants queue and manage downloads over stdio |
+| <img src="docs/os-debrid.svg" alt="Debrid" width="22" height="22" align="absmiddle">&nbsp;**[Debrid](#debrid-optional)** | Add your own account's API key in the GUI, CLI or phone apps. TorBox (verified); Real-Debrid, AllDebrid, Premiumize, Debrid-Link (experimental) | Feature – magnets download through your debrid service instead of peers |
 
 **torrenter gui**
 
