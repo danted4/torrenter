@@ -78,6 +78,7 @@ enum Command {
 enum DebridAction {
     /// Add an account: a provider's API key (typed hidden, or piped on stdin)
     Add {
+        /// torbox, or (experimental) realdebrid, alldebrid, premiumize, debridlink
         service: String,
         /// Name shown in menus (default: the provider's name, then "TorBox 2", …)
         #[arg(long)]
@@ -175,9 +176,9 @@ async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -
     }
 }
 
-/// Services this build offers (verified with a real account).
+/// Services this build offers (experimental ones included).
 fn service_arg(value: &str) -> Result<Service> {
-    let offered = Service::shipped();
+    let offered = Service::offered();
     match Service::parse(value) {
         Some(service) if offered.contains(&service) => Ok(service),
         _ => bail!(
@@ -195,7 +196,7 @@ fn service_arg(value: &str) -> Result<Service> {
 fn offered_accounts() -> Vec<AccountInfo> {
     credentials::accounts()
         .into_iter()
-        .filter(|account| Service::shipped().contains(&account.service))
+        .filter(|account| Service::offered().contains(&account.service))
         .collect()
 }
 
@@ -317,7 +318,16 @@ async fn run_debrid_command(action: &DebridAction) -> Result<()> {
                     KeySource::Env => format!("from {}", account.service.env_var()),
                     KeySource::File => "saved".to_string(),
                 };
-                println!("{:<20} {:<12} {source}", account.name, account.service.id());
+                let experimental = if account.service.verified() {
+                    ""
+                } else {
+                    " (experimental)"
+                };
+                println!(
+                    "{:<20} {:<12} {source}{experimental}",
+                    account.name,
+                    account.service.id()
+                );
             }
             Ok(())
         }
@@ -325,7 +335,13 @@ async fn run_debrid_command(action: &DebridAction) -> Result<()> {
             let service = service_arg(service)?;
             let key = read_secret(&format!("{} API key: ", service.label()))?;
             let account = credentials::add_account(service, name.as_deref().unwrap_or(""), &key)?;
-            println!("saved {} ({})", account.name, service.label());
+            println!("saved {} ({})", account.name, service.menu_label());
+            if !service.verified() {
+                println!(
+                    "{} support is experimental: not yet tested with a real account. Please report problems at github.com/danted4/torrenter/issues",
+                    service.label()
+                );
+            }
             report_account(&account.name, service, &key).await;
             Ok(())
         }
@@ -505,9 +521,13 @@ async fn prompt_user() -> Result<()> {
                     "a" => {
                         ask(format!(
                             "Provider ({}):",
-                            Service::shipped()
+                            Service::offered()
                                 .iter()
-                                .map(|s| s.id())
+                                .map(|s| if s.verified() {
+                                    s.id().to_string()
+                                } else {
+                                    format!("{} (experimental)", s.id())
+                                })
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         ));

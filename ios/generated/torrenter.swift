@@ -1299,12 +1299,20 @@ public func FfiConverterTypeJobView_lower(_ value: JobView) -> RustBuffer {
 public struct ServiceView {
     public var id: String
     public var label: String
+    /**
+     * Not yet confirmed with a real account: pickers say "(experimental)".
+     */
+    public var experimental: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, label: String) {
+    public init(id: String, label: String, 
+        /**
+         * Not yet confirmed with a real account: pickers say "(experimental)".
+         */experimental: Bool = false) {
         self.id = id
         self.label = label
+        self.experimental = experimental
     }
 }
 
@@ -1321,12 +1329,16 @@ extension ServiceView: Equatable, Hashable {
         if lhs.label != rhs.label {
             return false
         }
+        if lhs.experimental != rhs.experimental {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(id)
         hasher.combine(label)
+        hasher.combine(experimental)
     }
 }
 
@@ -1340,13 +1352,15 @@ public struct FfiConverterTypeServiceView: FfiConverterRustBuffer {
         return
             try ServiceView(
                 id: FfiConverterString.read(from: &buf), 
-                label: FfiConverterString.read(from: &buf)
+                label: FfiConverterString.read(from: &buf), 
+                experimental: FfiConverterBool.read(from: &buf)
         )
     }
 
     public static func write(_ value: ServiceView, into buf: inout [UInt8]) {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.label, into: &buf)
+        FfiConverterBool.write(value.experimental, into: &buf)
     }
 }
 

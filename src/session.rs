@@ -960,7 +960,7 @@ fn account_service(inner: &Inner, id: &str) -> Result<Service, String> {
 /// Only providers this build ships run, whatever a saved job, env key or
 /// hand-edited account names.
 fn offered(service: Service) -> Result<(), String> {
-    if Service::shipped().contains(&service) {
+    if Service::offered().contains(&service) {
         Ok(())
     } else {
         Err(format!(
@@ -1600,20 +1600,6 @@ mod tests {
         // Loading rewrote jobs.json with the plain folder.
         let saved = std::fs::read_to_string(&jobs_path).unwrap();
         assert!(!saved.contains(r"\\\\?"), "{saved}");
-    }
-
-    #[test]
-    fn providers_this_build_hides_never_run() {
-        let dir = tempdir().unwrap();
-        let session = Session::open(dir.path().join("dl"), dir.path().join("jobs.json"), true);
-        session.use_memory_keys();
-        session.set_debrid_account("rd", Service::RealDebrid, Secret::new("k"));
-        let magnet = "magnet:?xt=urn:btih:3333333333333333333333333333333333333333";
-        let error = session
-            .queue_with(JobKind::Magnet, magnet, Some("rd"))
-            .unwrap_err();
-        assert_eq!(error, "Real-Debrid is not available in this build");
-        assert!(session.jobs().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -18,8 +18,9 @@ mod realdebrid;
 pub mod run;
 pub(crate) mod torbox;
 
-/// Debrid providers torrenter can talk to. `shipped()` lists the ones verified
-/// against a real account; only those are offered in the apps.
+/// Debrid providers torrenter can talk to. `offered()` lists the ones the apps
+/// show; `verified()` says which were confirmed with a real account (the rest
+/// are labelled experimental).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Service {
     TorBox,
@@ -83,12 +84,37 @@ impl Service {
             .find(|service| service.id() == wanted)
     }
 
-    /// Providers verified end to end with a real account. The other adapters
-    /// are compiled and tested against fakes but hidden: the fronts list only
-    /// these, and the session refuses to run any other. One joins here once
+    /// Providers the fronts list and the session runs. All of them today; a
+    /// provider whose API breaks can be withheld here until it is fixed.
+    pub fn offered() -> &'static [Service] {
+        &Service::ALL
+    }
+
+    /// Confirmed end to end with a real account. The others are built from
+    /// the provider's docs and tested against fakes only, so the apps label
+    /// them experimental and ask for bug reports. One becomes verified once
     /// someone confirms it with a real account.
-    pub fn shipped() -> &'static [Service] {
-        &[Service::TorBox]
+    pub fn verified(self) -> bool {
+        matches!(self, Service::TorBox)
+    }
+
+    /// The provider as pickers show it: "Real-Debrid (experimental)".
+    pub fn menu_label(self) -> String {
+        if self.verified() {
+            self.label().to_string()
+        } else {
+            format!("{} (experimental)", self.label())
+        }
+    }
+
+    /// Appended to a failed job's error on an experimental provider.
+    pub fn report_hint(self) -> Option<String> {
+        (!self.verified()).then(|| {
+            format!(
+                "{} support is experimental; if this looks wrong, please report it at github.com/danted4/torrenter/issues",
+                self.label()
+            )
+        })
     }
 }
 
@@ -96,6 +122,41 @@ impl fmt::Display for Service {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
+}
+
+/// A provider's download link, only over HTTPS: an answer must not move the
+/// payload to plain HTTP. Plain HTTP is allowed to loopback only (the tests'
+/// fake servers).
+fn secure_link(link: String) -> Result<String, DebridError> {
+    let ok = url::Url::parse(&link).is_ok_and(|url| match url.scheme() {
+        "https" => true,
+        "http" => {
+            matches!(url.host(), Some(url::Host::Domain("localhost")))
+                || matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback())
+                || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback())
+        }
+        _ => false,
+    });
+    if ok {
+        Ok(link)
+    } else {
+        Err(DebridError::Service(
+            "the provider returned a download link that is not HTTPS".into(),
+        ))
+    }
+}
+
+/// Whether a failed job's error could be an adapter fault worth a report: an
+/// answer the adapter did not understand, a torrent that vanished again, or a
+/// file list with nothing safe to save. Not a bad key, a plan, blocked
+/// content, the network, rate limits or the stall timeout.
+pub(crate) fn worth_reporting(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<DebridError>(),
+            Some(DebridError::Service(_) | DebridError::Gone)
+        )
+    })
 }
 
 /// An API key. `Debug`/`Display` never print it.
@@ -386,13 +447,14 @@ impl Provider {
         remote_id: &str,
         file: &RemoteFile,
     ) -> Result<String, DebridError> {
-        match self {
+        let link = match self {
             Provider::TorBox(api) => api.link(remote_id, file).await,
             Provider::RealDebrid(api) => api.link(remote_id, file).await,
             Provider::AllDebrid(api) => api.link(remote_id, file).await,
             Provider::Premiumize(api) => api.link(remote_id, file).await,
             Provider::DebridLink(api) => api.link(remote_id, file).await,
-        }
+        }?;
+        secure_link(link)
     }
 
     pub(crate) async fn delete(&self, remote_id: &str) -> Result<(), DebridError> {
@@ -434,6 +496,66 @@ pub async fn check_account(service: Service, key: &Secret) -> Result<Account, De
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_provider_is_offered_and_only_torbox_is_verified() {
+        assert_eq!(Service::offered(), &Service::ALL);
+        let verified: Vec<_> = Service::ALL
+            .into_iter()
+            .filter(|service| service.verified())
+            .collect();
+        assert_eq!(verified, [Service::TorBox]);
+        assert_eq!(Service::TorBox.menu_label(), "TorBox");
+        assert_eq!(
+            Service::RealDebrid.menu_label(),
+            "Real-Debrid (experimental)"
+        );
+        assert_eq!(Service::TorBox.report_hint(), None);
+        let hint = Service::DebridLink.report_hint().unwrap();
+        assert!(
+            hint.starts_with("Debrid-Link support is experimental")
+                && hint.contains("github.com/danted4/torrenter/issues")
+                // Error texts never carry a link (leak checks look for it).
+                && !hint.contains("http"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn only_adapter_faults_ask_for_a_report() {
+        let worth = |error: DebridError| worth_reporting(&anyhow::Error::from(error));
+        assert!(worth(DebridError::Service("unexpected answer".into())));
+        assert!(worth(DebridError::Gone));
+        assert!(!worth(DebridError::BadKey("bad_token".into())));
+        assert!(!worth(DebridError::NotPremium("free".into())));
+        assert!(!worth(DebridError::Blocked("infringing_file".into())));
+        assert!(!worth(DebridError::RateLimited(None)));
+        assert!(!worth(DebridError::Network("timed out".into())));
+        // The stall timeout and rate-limit exhaustion are plain messages.
+        assert!(!worth_reporting(&anyhow::anyhow!(
+            "Real-Debrid made no progress on this torrent for 30 minutes"
+        )));
+    }
+
+    #[test]
+    fn download_links_must_be_https() {
+        for good in [
+            "https://cdn.example/f/1",
+            "http://127.0.0.1:8080/f/1",
+            "http://localhost/f",
+            "http://[::1]/f",
+        ] {
+            assert_eq!(secure_link(good.into()).as_deref(), Ok(good));
+        }
+        for bad in [
+            "http://cdn.example/f/1",
+            "http://10.0.0.5/f",
+            "ftp://cdn.example/f",
+            "not a url",
+        ] {
+            assert!(secure_link(bad.into()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn redacted_errors_drop_links_and_the_key() {

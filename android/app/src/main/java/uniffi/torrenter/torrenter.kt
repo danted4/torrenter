@@ -2264,7 +2264,11 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
  */
 data class ServiceView (
     var `id`: kotlin.String, 
-    var `label`: kotlin.String
+    var `label`: kotlin.String, 
+    /**
+     * Not yet confirmed with a real account: pickers say "(experimental)".
+     */
+    var `experimental`: kotlin.Boolean = false
 ) {
     
     companion object
@@ -2278,17 +2282,20 @@ public object FfiConverterTypeServiceView: FfiConverterRustBuffer<ServiceView> {
         return ServiceView(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
     override fun allocationSize(value: ServiceView) = (
             FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`label`)
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterBoolean.allocationSize(value.`experimental`)
     )
 
     override fun write(value: ServiceView, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`label`, buf)
+            FfiConverterBoolean.write(value.`experimental`, buf)
     }
 }
 

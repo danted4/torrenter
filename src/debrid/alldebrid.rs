@@ -1,4 +1,4 @@
-//! AllDebrid (api.alldebrid.com). Research: .cursor/plans/debrid-research/alldebrid.md
+//! AllDebrid (api.alldebrid.com). API docs: https://docs.alldebrid.com/
 //!
 //! Quirks encoded here: application errors (bad key, unknown id, …) arrive as
 //! HTTP 200 with `{"status":"error","error":{code,message}}` (only unknown

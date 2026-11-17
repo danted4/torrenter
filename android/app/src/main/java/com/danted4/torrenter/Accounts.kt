@@ -26,7 +26,7 @@ object Accounts {
      * existed becomes an account with that id. An entry is dropped from the
      * stored list only when its key is provably gone ([SecureKeys.has]); a
      * transient Keystore failure or an unknown provider never removes it, and
-     * the shipped-provider filter applies in memory only.
+     * the offered-provider filter applies in memory only.
      */
     fun load(context: Context): List<DebridAccount> {
         val stored = stored(context)
@@ -39,8 +39,8 @@ object Accounts {
         }
         val kept = list.filter { SecureKeys.has(context, it.id) }
         if (kept != stored) save(context, kept)
-        val shipped = services?.map { it.id }?.toSet() ?: return kept
-        return kept.filter { it.service in shipped }
+        val offered = services?.map { it.id }?.toSet() ?: return kept
+        return kept.filter { it.service in offered }
     }
 
     /** Add one account to the stored list (others, even hidden ones, kept). */

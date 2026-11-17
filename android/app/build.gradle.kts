@@ -12,8 +12,8 @@ android {
         applicationId = "com.danted4.torrenter"
         minSdk = 30
         targetSdk = 35
-        versionCode = 9
-        versionName = "3.8.2"
+        versionCode = 10
+        versionName = "3.8.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

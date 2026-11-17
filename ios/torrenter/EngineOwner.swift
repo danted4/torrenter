@@ -205,7 +205,7 @@ final class EngineOwner: ObservableObject {
     /// existed becomes an account with that id. An entry leaves the stored list
     /// only when its Keychain item is provably gone; a read that fails for
     /// another reason (before first unlock) or an unknown provider never
-    /// removes it, and the shipped-provider filter applies in memory only.
+    /// removes it, and the offered-provider filter applies in memory only.
     private func loadAccounts() -> [DebridAccount] {
         let stored = Self.storedAccounts()
         var list = stored
@@ -218,8 +218,8 @@ final class EngineOwner: ObservableObject {
         if list != stored {
             Prefs.saveAccounts(list)
         }
-        let shipped = Set(debridServices().map(\.id))
-        return list.filter { shipped.contains($0.service) }
+        let offered = Set(debridServices().map(\.id))
+        return list.filter { offered.contains($0.service) }
     }
 
     /// The saved list, one entry per id (a hand-edited list may repeat one).

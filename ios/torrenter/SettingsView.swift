@@ -159,7 +159,7 @@ struct SettingsView: View {
     }
 
     private func accountCard(_ account: DebridAccount) -> some View {
-        let provider = serviceLabel(account.service)
+        let provider = serviceMenuLabel(account.service)
         let detail = owner.accountNotes[account.id].map { "\(provider) · \($0)" } ?? "\(provider) · key saved"
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
@@ -204,7 +204,12 @@ struct SettingsView: View {
             }
             // The fields sit in an inset panel the header owns.
             VStack(alignment: .leading, spacing: 10) {
-                formRow("provider", "the debrid service the key belongs to") {
+                formRow(
+                    "provider",
+                    serviceExperimental(draft.service)
+                        ? "experimental: not yet tested with a real account; please report problems"
+                        : "the debrid service the key belongs to"
+                ) {
                     ProviderMenu(service: draft.service, colors: colors) { form?.service = $0 }
                         .equatable()
                 }
@@ -388,16 +393,17 @@ private struct ProviderMenu: View, Equatable {
                 Button {
                     onPick(each.id)
                 } label: {
+                    let title = each.experimental ? "\(each.label) (experimental)" : each.label
                     if service == each.id {
-                        Label(each.label, systemImage: "checkmark")
+                        Label(title, systemImage: "checkmark")
                     } else {
-                        Text(each.label)
+                        Text(title)
                     }
                 }
             }
         } label: {
             ZStack {
-                Text(service.map(serviceLabel) ?? "choose a provider")
+                Text(service.map(serviceMenuLabel) ?? "choose a provider")
                     .lineLimit(1)
                     .padding(.horizontal, 22)
                 HStack {

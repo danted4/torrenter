@@ -90,6 +90,8 @@ struct DebridServiceView {
     label: String,
     /// A key is configured (env or settings). The key itself is never exposed.
     configured: bool,
+    /// Not yet confirmed with a real account; failures are worth reporting.
+    experimental: bool,
     /// Names of the user's accounts for this provider (pass one as `debrid`).
     accounts: Vec<String>,
 }
@@ -260,7 +262,7 @@ impl Mcp {
             None => None,
             Some(query) => Some(
                 torrenter::credentials::resolve(query)
-                    .filter(|account| Service::shipped().contains(&account.service))
+                    .filter(|account| Service::offered().contains(&account.service))
                     .map(|account| account.id)
                     .ok_or_else(|| match Service::parse(query) {
                         // A provider with no account: the user adds one.
@@ -283,12 +285,12 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Debrid providers this build supports, with the names of the user's accounts for each (keys are never shown)"
+        description = "Debrid providers this build supports, with the names of the user's accounts for each (keys are never shown). Experimental providers are not yet confirmed with a real account."
     )]
     fn debrid_services(&self) -> Json<DebridServicesOut> {
         let all = torrenter::credentials::accounts();
         Json(DebridServicesOut {
-            services: Service::shipped()
+            services: Service::offered()
                 .iter()
                 .map(|service| {
                     let accounts: Vec<String> = all
@@ -300,6 +302,7 @@ impl Mcp {
                         id: service.id().into(),
                         label: service.label().into(),
                         configured: !accounts.is_empty(),
+                        experimental: !service.verified(),
                         accounts,
                     }
                 })
