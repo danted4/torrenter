@@ -356,8 +356,9 @@ pub async fn watch_cli_controls(snapshot: Arc<JobSnapshot>) {
     loop {
         let mut line = String::new();
         match stdin.read_line(&mut line).await {
-            Ok(0) => return,
-            Err(_) => return,
+            // No terminal (a script, cron, `</dev/null`): there will be no
+            // keys, so keep the download going; only "2" stops it.
+            Ok(0) | Err(_) => std::future::pending::<()>().await,
             Ok(_) => match line.trim() {
                 "1" => {
                     snapshot.toggle_pause();

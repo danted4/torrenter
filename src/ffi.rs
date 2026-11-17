@@ -227,6 +227,18 @@ impl Engine {
             })
     }
 
+    /// Queue a `.torrent` file's bytes (from the system picker or "Open
+    /// with"): from peers, or through a debrid account (its id).
+    pub fn queue_torrent_file(
+        &self,
+        bytes: Vec<u8>,
+        account: Option<String>,
+    ) -> Result<u64, EngineError> {
+        self.session
+            .queue_torrent(&bytes, account.as_deref())
+            .map_err(Into::into)
+    }
+
     /// Queue a magnet through a debrid account (its id).
     pub fn queue_debrid(&self, source: String, account: String) -> Result<u64, EngineError> {
         self.session

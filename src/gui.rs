@@ -15,6 +15,7 @@ use crate::paths;
 use crate::progress::{format_eta, format_size, format_speed, JobSnapshot};
 use crate::session::{self, Job, Route, Session, SessionEvent};
 use crate::torrent::{magnet_info_hash, magnet_sub_folder};
+use crate::torrent_file;
 use crate::update::{self, AvailableUpdate};
 
 const WINDOW_INNER: [f32; 2] = [960.0, 580.0];
@@ -374,7 +375,9 @@ pub fn run() -> eframe::Result<()> {
         .with_title(identity::banner())
         .with_inner_size(WINDOW_INNER)
         .with_min_inner_size(WINDOW_MIN)
-        .with_icon(crate::icon::app_icon());
+        .with_icon(crate::icon::app_icon())
+        // .torrent files dropped on the window start like the upload glyph.
+        .with_drag_and_drop(true);
     #[cfg(target_os = "macos")]
     let viewport = viewport.with_transparent(true);
     let options = eframe::NativeOptions {
@@ -526,6 +529,59 @@ impl GuiApp {
         ctx.style_mut(|style| {
             style.spacing.item_spacing = Vec2::new(10.0, 8.0);
         });
+    }
+
+    /// Queue a `.torrent` file's bytes: the magnet built from it, through the
+    /// current route (peers or a debrid account), started at once.
+    fn queue_torrent_bytes(&mut self, bytes: &[u8]) {
+        let via = self.route_account().map(|account| account.id);
+        if let Err(error) = self.session.queue_torrent(bytes, via.as_deref()) {
+            self.toast_fail(error);
+        }
+    }
+
+    /// The upload glyph: pick a `.torrent` and start it.
+    fn pick_torrent(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("open a .torrent file")
+            .add_filter("torrent", &["torrent"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        match torrent_file::read_capped(&path) {
+            Ok(bytes) => self.queue_torrent_bytes(&bytes),
+            Err(error) => self.toast_fail(format!("{error:#}")),
+        }
+    }
+
+    /// Files dropped on the window: each `.torrent` starts; anything else is
+    /// refused with a note.
+    fn take_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        for file in dropped {
+            let name = file
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.name.clone());
+            if !name.to_ascii_lowercase().ends_with(".torrent") {
+                self.toast_fail("only .torrent files can be dropped here");
+                continue;
+            }
+            let bytes = match (&file.bytes, &file.path) {
+                (Some(bytes), _) if bytes.len() <= torrent_file::MAX_TORRENT_FILE => {
+                    Ok(bytes.to_vec())
+                }
+                (_, Some(path)) => torrent_file::read_capped(path),
+                _ => Err(anyhow::anyhow!("could not read {name}")),
+            };
+            match bytes {
+                Ok(bytes) => self.queue_torrent_bytes(&bytes),
+                Err(error) => self.toast_fail(format!("{error:#}")),
+            }
+        }
     }
 
     fn queue_job(&mut self) {
@@ -889,6 +945,7 @@ impl eframe::App for GuiApp {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.drain_events();
+        self.take_dropped_files(ctx);
         self.expire_toasts();
         self.persist_jobs(false);
         if !self.glass_applied {
@@ -903,6 +960,7 @@ impl eframe::App for GuiApp {
             self.applied_glass_tint = paint_tint;
         }
         let palette = theme(self.theme);
+        paint_drop_hint(ctx, palette);
         // Redraw often only while something moves (downloads, toasts and the
         // update install they show, account checks); idle, once a second.
         // Input still repaints at once; worker replies wait at most that long.
@@ -1019,7 +1077,8 @@ impl eframe::App for GuiApp {
                         // Fixed width (that of "default (none)"); longer
                         // account names are shortened with "…".
                         let route_w = route_select_width(ui, &route_label(None));
-                        let glyphs_w = 42.0_f32 + route_w + gap;
+                        // Upload glyph + gap, seed toggle, route select.
+                        let glyphs_w = 16.0_f32 + gap + 42.0 + route_w + gap;
                         let edit_margin = 16.0_f32;
                         ui.add_space(gap);
                         // The field takes whatever the controls leave.
@@ -1055,6 +1114,10 @@ impl eframe::App for GuiApp {
                                 ui.add(edit)
                             },
                         );
+                        ui.add_space(gap);
+                        if upload_glyph(ui, palette, magnet).clicked() {
+                            self.pick_torrent();
+                        }
                         ui.add_space(gap);
                         let select = route_select(
                             ui,
@@ -3472,6 +3535,80 @@ fn truncate_middle(value: &str, max: usize) -> String {
         chars[..left].iter().collect::<String>(),
         chars[chars.len() - right..].iter().collect::<String>()
     )
+}
+
+/// Next to the magnet box: open a `.torrent` file. Faded and inert in HTTP
+/// mode, like the seed toggle.
+fn upload_glyph(ui: &mut egui::Ui, palette: Theme, enabled: bool) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), sense);
+    let color = if !enabled {
+        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
+    } else if response.hovered() {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    paint_upload(ui.painter(), rect, color);
+    if enabled {
+        click_cursor(response).on_hover_text("open a .torrent file (or drop one on the window)")
+    } else {
+        response
+            .on_hover_cursor(egui::CursorIcon::Default)
+            .on_hover_text(".torrent files are magnet downloads; switch to MAGNET")
+    }
+}
+
+/// A tray with an arrow up out of it.
+fn paint_upload(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = Stroke::new(1.2_f32, color);
+    let (left, right, bottom) = (rect.left() + 2.0, rect.right() - 2.0, rect.bottom() - 2.0);
+    let lip = bottom - 4.0;
+    painter.line_segment([egui::pos2(left, lip), egui::pos2(left, bottom)], stroke);
+    painter.line_segment(
+        [egui::pos2(left, bottom), egui::pos2(right, bottom)],
+        stroke,
+    );
+    painter.line_segment([egui::pos2(right, bottom), egui::pos2(right, lip)], stroke);
+    let x = rect.center().x;
+    let tip = rect.top() + 2.0;
+    painter.line_segment([egui::pos2(x, bottom - 3.0), egui::pos2(x, tip)], stroke);
+    painter.line_segment([egui::pos2(x - 3.5, tip + 3.5), egui::pos2(x, tip)], stroke);
+    painter.line_segment([egui::pos2(x + 3.5, tip + 3.5), egui::pos2(x, tip)], stroke);
+}
+
+/// While files are dragged over the window: say what a drop does.
+fn paint_drop_hint(ctx: &egui::Context, palette: Theme) {
+    if ctx.input(|input| input.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("torrent-drop"),
+    ));
+    let screen = ctx.screen_rect();
+    painter.rect_filled(
+        screen,
+        0.0,
+        Color32::from_rgba_unmultiplied(palette.bg.r(), palette.bg.g(), palette.bg.b(), 210),
+    );
+    painter.rect_stroke(
+        screen.shrink(12.0),
+        6.0,
+        Stroke::new(1.5_f32, palette.fg),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        screen.center(),
+        egui::Align2::CENTER_CENTER,
+        "drop .torrent to start",
+        FontId::new(18.0, FontFamily::Monospace),
+        palette.fg,
+    );
 }
 
 fn dest_glyph(ui: &mut egui::Ui, palette: Theme, clickable: bool) -> egui::Response {

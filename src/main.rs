@@ -16,6 +16,7 @@ use torrenter::identity::{banner, AppKind, VERSION_TAG};
 use torrenter::paths;
 use torrenter::progress::{watch_cli_controls, JobSnapshot};
 use torrenter::torrent::start_download;
+use torrenter::torrent_file;
 use torrenter::update::{self, effective_connections, load_config};
 use torrenter::validate::{is_valid_download_url, is_valid_magnet_url};
 
@@ -52,8 +53,9 @@ enum Command {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// Download a magnet / torrent link
+    /// Download a magnet link or a .torrent file
     Magnet {
+        /// A magnet link, or the path of a .torrent file
         uri: String,
         /// One-shot download folder (does not persist)
         #[arg(long)]
@@ -168,12 +170,33 @@ async fn run_http(url: &str, dir: Option<PathBuf>) -> Result<()> {
 }
 
 async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -> Result<()> {
+    // A .torrent file runs as the magnet built from it, starting from its
+    // bytes (no metadata wait); a debrid route uses that magnet.
+    let cleaned = clean_path_arg(uri);
+    let (magnet, torrent) = if !is_valid_magnet_url(uri) && torrent_file::looks_like_file(&cleaned)
+    {
+        let path = PathBuf::from(cleaned);
+        let bytes = torrent_file::read_capped(&path)?;
+        let imported = torrent_file::parse(&bytes)?;
+        println!("torrent: {}", imported.name);
+        (imported.magnet, Some(bytes))
+    } else {
+        (uri.to_string(), None)
+    };
     let dest = dest_for_run(dir)?;
     println!("download: {}", dest.display());
     match via {
-        Some(account) => run_debrid_download(uri, dest, &account).await,
-        None => start_download(uri, load_config().seed, dest).await,
+        Some(account) => run_debrid_download(&magnet, dest, &account).await,
+        None => start_download(&magnet, torrent, load_config().seed, dest).await,
     }
+}
+
+/// A pasted or dragged-in path: surrounding quotes and the `\ ` terminals add
+/// for spaces are removed.
+fn clean_path_arg(arg: &str) -> String {
+    arg.trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .replace("\\ ", " ")
 }
 
 /// Services this build offers (experimental ones included).
@@ -601,12 +624,14 @@ async fn prompt_user() -> Result<()> {
                 return run_http(&url, None).await;
             }
             _ => {
-                print!("\nPlease paste your magnetURI:\n\n");
+                print!("\nPlease paste your magnetURI (or the path of a .torrent file):\n\n");
                 std::io::stdout().flush()?;
                 let mut magnet = String::new();
                 stdin.read_line(&mut magnet).await?;
                 let magnet = magnet.trim().to_string();
-                if !is_valid_magnet_url(&magnet) {
+                if !is_valid_magnet_url(&magnet)
+                    && !torrent_file::looks_like_file(&clean_path_arg(&magnet))
+                {
                     eprintln!("\nInvalid magnet URL! Try again ...");
                     continue;
                 }
@@ -620,6 +645,16 @@ async fn prompt_user() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_and_dragged_paths_are_cleaned() {
+        assert_eq!(clean_path_arg("  '/tmp/a b.torrent' "), "/tmp/a b.torrent");
+        assert_eq!(clean_path_arg("\"/tmp/x.torrent\""), "/tmp/x.torrent");
+        assert_eq!(
+            clean_path_arg("/tmp/My\\ File.torrent"),
+            "/tmp/My File.torrent"
+        );
+    }
 
     #[test]
     fn parses_http_subcommand() {

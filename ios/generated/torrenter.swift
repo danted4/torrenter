@@ -542,6 +542,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -577,6 +595,12 @@ public protocol EngineProtocol: AnyObject, Sendable {
      * Queue a magnet through a debrid account (its id).
      */
     func queueDebrid(source: String, account: String) throws  -> UInt64
+    
+    /**
+     * Queue a `.torrent` file's bytes (from the system picker or "Open
+     * with"): from peers, or through a debrid account (its id).
+     */
+    func queueTorrentFile(bytes: Data, account: String?) throws  -> UInt64
     
     func remove(id: UInt64) 
     
@@ -774,6 +798,19 @@ open func queueDebrid(source: String, account: String)throws  -> UInt64  {
     uniffi_torrenter_fn_method_engine_queue_debrid(self.uniffiClonePointer(),
         FfiConverterString.lower(source),
         FfiConverterString.lower(account),$0
+    )
+})
+}
+    
+    /**
+     * Queue a `.torrent` file's bytes (from the system picker or "Open
+     * with"): from peers, or through a debrid account (its id).
+     */
+open func queueTorrentFile(bytes: Data, account: String?)throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_queue_torrent_file(self.uniffiClonePointer(),
+        FfiConverterData.lower(bytes),
+        FfiConverterOptionString.lower(account),$0
     )
 })
 }
@@ -1722,6 +1759,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_queue_torrent_file() != 60120) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_remove() != 13505) {

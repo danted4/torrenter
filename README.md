@@ -1,6 +1,6 @@
 # torrenter &nbsp;  &nbsp; <a href="#windows"><img src="docs/os-windows.svg" alt="Windows" width="28" height="28" align="absmiddle"></a> <a href="#macos"><img src="docs/os-macos.svg" alt="macOS" width="28" height="28" align="absmiddle"></a> <a href="#linux"><img src="docs/os-linux.svg" alt="Linux" width="28" height="28" align="absmiddle"></a> <a href="#android"><img src="docs/os-android.svg" alt="Android" width="28" height="28" align="absmiddle"></a> <a href="#ios"><img src="docs/os-ios.svg" alt="iOS" width="28" height="28" align="absmiddle"></a> <a href="#mcp"><img src="docs/os-mcp.svg" alt="MCP" width="28" height="28" align="absmiddle"></a> <a href="#debrid-optional"><img src="docs/os-debrid.svg" alt="Debrid" width="28" height="28" align="absmiddle"></a> &nbsp;  &nbsp;
 
-Open-source torrent client and magnet downloader for Windows, macOS, Linux, Android (APK) and iOS (build from source): an ad-free alternative to uTorrent for magnet links, with IDM-style multi-connection downloads for direct links (up to 16 parallel connections, resumable), optional debrid support (TorBox; Real-Debrid, AllDebrid, Premiumize and Debrid-Link experimental), and an MCP server so AI agents can queue downloads. Not affiliated with uTorrent or Internet Download Manager.
+Open-source torrent client and magnet downloader for Windows, macOS, Linux, Android (APK) and iOS (build from source): an ad-free alternative to uTorrent for magnet links and `.torrent` files, with IDM-style multi-connection downloads for direct links (up to 16 parallel connections, resumable), optional debrid support (TorBox; Real-Debrid, AllDebrid, Premiumize and Debrid-Link experimental), and an MCP server so AI agents can queue downloads. Not affiliated with uTorrent or Internet Download Manager.
 
 | Platform&nbsp;/&nbsp;feature | How to get it | Type |
 |---|---|---|
@@ -47,6 +47,7 @@ No arguments opens the interactive menu (magnet, HTTP, auto-update, seed, downlo
 torrenter magnet "magnet:?xt=urn:btih:…"
 torrenter http "https://example.com/large-file.iso"
 torrenter magnet "magnet:?xt=urn:btih:…" --dir /tmp/out   # one-shot, not saved
+torrenter magnet ~/Downloads/linux.torrent   # a .torrent file works the same way
 torrenter magnet "magnet:?xt=urn:btih:…" --debrid work  # through your debrid account "work"
 torrenter debrid add torbox --name work  # save a key as an account (typed hidden or piped); also test / remove / list
 torrenter --auto-update          # persist: check GitHub Releases on startup (TTY only)
@@ -236,25 +237,25 @@ Put `torrenter` on `PATH`, then:
 
 Stdout is the protocol; logs go to stderr. There is no install token and no extra binary.
 
-Debrid: `queue_magnet` takes an optional `debrid` account name (or a provider id when that provider has one account), and `debrid_services` lists the providers this build offers with the names of the user's accounts and whether each is experimental. Keys are never shown and cannot be set over MCP; configure them with `torrenter debrid add`, the GUI settings, or `TORRENTER_<SERVICE>_KEY` in the host's `env` block. Without `debrid`, a magnet downloads from peers.
+`.torrent` files: `queue_torrent_file` takes a local `path` (and the same optional `debrid`). Debrid: `queue_magnet` takes an optional `debrid` account name (or a provider id when that provider has one account), and `debrid_services` lists the providers this build offers with the names of the user's accounts and whether each is experimental. Keys are never shown and cannot be set over MCP; configure them with `torrenter debrid add`, the GUI settings, or `TORRENTER_<SERVICE>_KEY` in the host's `env` block. Without `debrid`, a magnet downloads from peers.
 
 ## Two download modes
 
 | | **Magnet / torrent** | **Direct HTTP(S)** |
 |---|----------------------|---------------------|
 | **Use when** | magnet P2P | CDN, mirror, or any direct file URL |
-| **Input** | `magnet:?xt=urn:btih:…` | `https://example.com/file.iso` |
+| **Input** | `magnet:?xt=urn:btih:…`, or a `.torrent` file (upload icon next to the box; drop it on the desktop window; "Open with torrenter" on Android and iOS; `torrenter magnet file.torrent`) | `https://example.com/file.iso` |
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
 | **Parallelism** | piece picker | byte-range parts: **connections** setting, Auto = 4 (1–16) |
 | **Resume** | librqbit on disk under `<dest>/<torrent-name>/` | `<dest>/.resume/` part files |
-| **Phases** | **fetching metadata** (the swarm sends the file list) → **verifying** (data already on disk, e.g. after a resume) → **connecting to peers** (until the first bytes) → **downloading** → **seeding** or **done**; the bar is indeterminate until data flows | **downloading** → **done** |
+| **Phases** | **fetching metadata** (the swarm sends the file list; skipped for a `.torrent` file, which already has it) → **verifying** (data already on disk, e.g. after a resume) → **connecting to peers** (until the first bytes) → **downloading** → **seeding** or **done**; the bar is indeterminate until data flows | **downloading** → **done** |
 | **Peers** | live count in the bar | `Peers: 0` |
 | **Upload** | **Share** (default): upload while downloading and keep seeding until Stop. **Leech**: never upload; stop at 100% | — |
 | **Fallback** | — | single stream if the server ignores ranges |
 
 A magnet can instead go **via debrid**: your debrid service fetches it and torrenter downloads the files over HTTP (see [Debrid](#debrid-optional)). It is still a magnet job, not a third mode.
 
-Magnet links need a 32-character base32 or 40-character hex info hash. `.torrent` files are not accepted. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
+Magnet links need a 32-character base32 or 40-character hex info hash. A `.torrent` file (up to 32 MB) is checked by librqbit and becomes the magnet built from it (info hash, name, trackers): the job is a normal magnet job (its copy-link button gives that magnet, and debrid accounts receive it), and a copy of the file is kept as `torrents/<info-hash>.torrent` beside `jobs.json` so restarts start from it with no metadata wait. The copy is deleted when the job is cleared. Picking or dropping a file starts it at once with the current route and share/leech. HTTP names come from `Content-Disposition` or the URL path (one path component only; `.` / `..` become `download.bin`).
 
 Single-stream HTTP **does not resume**. It truncates the destination and starts over.
 
@@ -375,7 +376,7 @@ HTTP resume keeps `{sha256(url)[0..16]}.part-N` plus a small JSON manifest under
 - HTTP and updater timeouts: 20s connect, 60s between reads
 - Auto-update, magnet seed, GUI `theme`, GUI `glass_tint` (macOS only), and optional `download_dir`: `~/.config/torrenter/config.json` (macOS: `~/Library/Application Support/torrenter/config.json`, Windows: `%APPDATA%\torrenter\config.json`). `seed` defaults to on. `theme` is `phosphor`, `amber`, `ice`, `scarlet`, or `violet` (default phosphor). On macOS, `glass_tint` is 40–210 (default 60% of that range) and tints the frosted window; native fullscreen locks the wash at 100% without writing that override. Labels and the settings cog keep a light brush-stroke wash behind the glyphs so 0% tint stays readable on a light wallpaper. Windows and Linux stay opaque (no tint slider). On Windows, an existing `glass_tint` in config is rewritten to 100%. Missing `download_dir` keeps following the live OS Downloads path. Auto-update stays on the GUI header (mirrored in settings); theme and tint sit on the settings page behind the cog. `debrid_route` remembers the debrid control, `debrid_remove_after` the remove-after setting. Saves are atomic, keys from newer builds are kept, and a file that no longer parses moves to `config.json.bak`.
 - Debrid accounts: `credentials.json` next to `config.json` (owner-only, atomic; `{"accounts":[{"id","name","service","key"}]}`), plus a read-only account per `TORRENTER_<SERVICE>_KEY`. `debrid_route` in `config.json` holds the chosen account's id.
-- GUI job list: `jobs.json` in that same folder. Each row keeps its own dest and share/leech. Corrupt files are moved to `jobs.json.bak`. `torrenter mcp` uses that same file — see [MCP](#mcp).
+- GUI job list: `jobs.json` in that same folder, with copies of opened `.torrent` files in `torrents/` next to it (removed when their job is cleared). Each row keeps its own dest and share/leech. Corrupt files are moved to `jobs.json.bak`. `torrenter mcp` uses that same file — see [MCP](#mcp).
 - Android: dest is always public `Download/torrenter`. Job list is `jobs.json` under the app files dir. Theme, seed, the chosen debrid account, the account list (names and providers only), connections and remove-after are SharedPreferences (`theme`, `seed`, `debridRoute` = account id, `debridAccounts`, `connections`, `debridRemoveAfter`); each account's key is Keystore-encrypted in `torrenter_keys` under the account id (excluded from backup). No `config.json`, no glass tint, no updater.
 - iOS: dest is always `Documents/torrenter` (Files: On My iPhone / torrenter). Job list is `jobs.json` under Application Support. Theme, **keep alive**, the parked job list, the chosen debrid account, the account list (names and providers only), connections and remove-after are UserDefaults (`theme`, `keepAlive`, `parkedJobs`, `debridRoute` = account id, `debridAccounts`, `connections`, `debridRemoveAfter`); each account's key is a Keychain item under the account id. Leech only, no seed preference, no `config.json`, no glass tint, no updater.
 

@@ -57,6 +57,11 @@ final class EngineOwner: ObservableObject {
     private var graceId: UIBackgroundTaskIdentifier = .invalid
     private var keepAliveRetryAt = Date.distantPast
     private var keepAliveFailing = false
+    /// Largest .torrent read (the engine refuses anything larger too).
+    static let maxTorrentFile = 32 * 1024 * 1024
+    /// .torrent files opened before the engine was up ("Open with" at launch).
+    private var pendingTorrents: [Data] = []
+
     static let keepAliveNotice = "keep alive could not start audio; jobs park when you leave"
     static let keepAliveRetry: TimeInterval = 10
 
@@ -103,6 +108,50 @@ final class EngineOwner: ObservableObject {
         resumeParked()
         refresh()
         startTicker()
+        let pending = pendingTorrents
+        pendingTorrents = []
+        pending.forEach { queueTorrentData($0) }
+    }
+
+    /// A .torrent from the picker or "Open with": read (security-scoped,
+    /// capped) and queued at once through the current route, like START.
+    func queueTorrentFile(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            // A copy iOS dropped in Documents/Inbox would show up in Files.
+            if url.path.contains("/Documents/Inbox/") {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > Self.maxTorrentFile {
+            notice = "the .torrent file is larger than 32 MB"
+            return
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            notice = "could not read that file"
+            return
+        }
+        if data.count > Self.maxTorrentFile {
+            notice = "the .torrent file is larger than 32 MB"
+            return
+        }
+        queueTorrentData(data)
+    }
+
+    private func queueTorrentData(_ data: Data) {
+        guard let engine else {
+            pendingTorrents.append(data)
+            return
+        }
+        do {
+            _ = try engine.queueTorrentFile(bytes: data, account: debridRoute)
+            notice = nil
+            refresh()
+        } catch {
+            notice = engineMessage(error)
+        }
     }
 
     @discardableResult

@@ -293,3 +293,32 @@ fun Chip(
                 .padding(horizontal = 10.dp, vertical = 5.dp),
     )
 }
+
+/** Next to the magnet box: open a .torrent file (a tray with an arrow up). */
+@Composable
+fun UploadGlyph(
+    color: Color,
+    onClick: () -> Unit,
+) {
+    Canvas(
+        Modifier
+            .size(36.dp)
+            .clickable(onClick = onClick)
+            .padding(9.dp),
+    ) {
+        val unit = size.minDimension / 16f
+        val stroke = 1.2f * unit * 1.4f
+        val left = 2f * unit
+        val right = size.width - 2f * unit
+        val bottom = size.height - 2f * unit
+        val lip = bottom - 4f * unit
+        drawLine(color, Offset(left, lip), Offset(left, bottom), stroke, StrokeCap.Round)
+        drawLine(color, Offset(left, bottom), Offset(right, bottom), stroke, StrokeCap.Round)
+        drawLine(color, Offset(right, bottom), Offset(right, lip), stroke, StrokeCap.Round)
+        val x = size.width / 2f
+        val tip = 2f * unit
+        drawLine(color, Offset(x, bottom - 3f * unit), Offset(x, tip), stroke, StrokeCap.Round)
+        drawLine(color, Offset(x - 3.5f * unit, tip + 3.5f * unit), Offset(x, tip), stroke, StrokeCap.Round)
+        drawLine(color, Offset(x + 3.5f * unit, tip + 3.5f * unit), Offset(x, tip), stroke, StrokeCap.Round)
+    }
+}

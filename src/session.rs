@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,6 +20,7 @@ use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
 };
+use crate::torrent_file;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
 pub const MAX_ACTIVE_DOWNLOADS: usize = 4;
@@ -140,6 +141,8 @@ enum EngineCmd {
         dest: PathBuf,
         part_count: usize,
         debrid: Option<DebridLaunch>,
+        /// Where a `.torrent` copy for this magnet may be kept.
+        torrent_store: PathBuf,
     },
     Probe(Vec<ProbeSpec>),
     DeleteRemote {
@@ -395,6 +398,7 @@ impl Session {
                 } else {
                     inner.saved_fingerprint = persist_fingerprint(&inner.jobs);
                 }
+                prune_torrents(&inner);
                 drop(inner);
                 if !probes.is_empty() {
                     let _ = self.engine.send(EngineCmd::Probe(probes));
@@ -484,6 +488,21 @@ impl Session {
 
     pub fn queue(&self, kind: JobKind, source: &str) -> Result<u64, String> {
         self.queue_with(kind, source, None)
+    }
+
+    /// Queue a `.torrent` file: keep a copy beside `jobs.json` and queue the
+    /// magnet built from it (through `via` like any magnet). The engine starts
+    /// from the copy, so there is no metadata wait.
+    pub fn queue_torrent(&self, bytes: &[u8], via: Option<&str>) -> Result<u64, String> {
+        let imported = torrent_file::parse(bytes).map_err(|error| format!("{error:#}"))?;
+        let store = torrent_file::store_dir(&mutex_lock(&self.inner).jobs_path);
+        torrent_file::save(&store, &imported, bytes).map_err(|error| format!("{error:#}"))?;
+        let queued = self.queue_with(JobKind::Magnet, &imported.magnet, via);
+        if queued.is_err() {
+            // A refused duplicate keeps the copy for the job already running.
+            prune_torrents(&mutex_lock(&self.inner));
+        }
+        queued
     }
 
     /// Queue a job; a magnet with `via` (an account id) goes through that
@@ -716,6 +735,7 @@ impl Session {
             inner.jobs[index].snapshot.mark_stopped();
             inner.jobs.remove(index);
             persist_inner(&mut inner, true);
+            prune_torrents(&inner);
         }
     }
 
@@ -1003,7 +1023,33 @@ fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
         dest: job.dest.clone(),
         part_count: job.part_count,
         debrid,
+        torrent_store: torrent_file::store_dir(&inner.jobs_path),
     })
+}
+
+/// Info hashes (hex) of every magnet job, saved or foreign: the `.torrent`
+/// copies to keep.
+fn torrent_keep(inner: &Inner) -> HashSet<String> {
+    let foreign = inner
+        .foreign
+        .iter()
+        .filter_map(|record| record.get("source")?.as_str());
+    inner
+        .jobs
+        .iter()
+        .filter(|job| job.kind.takes_magnet())
+        .map(|job| job.source.as_str())
+        .chain(foreign)
+        .filter_map(magnet_info_hash_hex)
+        .collect()
+}
+
+/// Drop `.torrent` copies no job refers to any more.
+fn prune_torrents(inner: &Inner) {
+    torrent_file::prune(
+        &torrent_file::store_dir(&inner.jobs_path),
+        &torrent_keep(inner),
+    );
 }
 
 fn persist_inner(inner: &mut Inner, force: bool) {
@@ -1042,6 +1088,7 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     dest,
                     part_count,
                     debrid,
+                    torrent_store,
                 } => {
                     if snapshot.should_stop() {
                         snapshot.mark_stopped();
@@ -1086,7 +1133,9 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                             Err(anyhow::anyhow!("debrid job without a provider"))
                         }
                         (JobKind::Magnet, _) => {
-                            start_download_reported(&source, snapshot, seed, dest).await
+                            let torrent = magnet_info_hash_hex(&source)
+                                .and_then(|hash| torrent_file::load(&torrent_store, &hash));
+                            start_download_reported(&source, torrent, snapshot, seed, dest).await
                         }
                         (JobKind::Http, _) => {
                             start_url_download_reported(&source, snapshot, dest, part_count).await
@@ -1447,6 +1496,55 @@ mod tests {
             "no key or link persisted"
         );
         assert!(dir.path().join("dl/Album/CD1/01.bin").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn torrent_files_queue_as_their_magnet_and_keep_a_copy() {
+        use crate::torrent_file::tests::torrent_bytes;
+        let dir = tempdir().unwrap();
+        // Through the fake TorBox so nothing reaches the real swarm; it keeps
+        // the job fetching, so the duplicate check sees it active.
+        let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
+        let bytes = torrent_bytes("Sintel 4K.mkv", &["udp://tracker.example:1337/announce"]);
+        let imported = torrent_file::parse(&bytes).unwrap();
+        let store = dir.path().join("torrents");
+        let copy = store.join(format!("{}.torrent", imported.hash_hex));
+
+        assert_eq!(
+            session.queue_torrent(b"not a torrent", None).unwrap_err(),
+            "not a valid .torrent file"
+        );
+        let id = session.queue_torrent(&bytes, Some("torbox")).unwrap();
+        let job = session.job(id).unwrap();
+        assert_eq!(job.source, imported.magnet);
+        assert_eq!(job.snapshot.title(), "Sintel 4K.mkv");
+        assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+        // The engine is told where the copy lives.
+        match launch(&mutex_lock(&session.inner), &job) {
+            Ok(EngineCmd::Download { torrent_store, .. }) => assert_eq!(torrent_store, store),
+            _ => panic!("expected a download command"),
+        }
+        // The same file again, or its magnet pasted: one job per torrent, and
+        // the copy stays for the job already running.
+        assert_eq!(
+            session.queue_torrent(&bytes, None).unwrap_err(),
+            "that magnet is already downloading"
+        );
+        assert_eq!(
+            session
+                .queue(JobKind::Magnet, &imported.magnet)
+                .unwrap_err(),
+            "that magnet is already downloading"
+        );
+        assert!(copy.exists());
+        // jobs.json keeps the built magnet, not the file.
+        session.persist(true);
+        let saved = std::fs::read_to_string(dir.path().join("jobs.json")).unwrap();
+        assert!(saved.contains(&imported.hash_hex), "{saved}");
+        // Clearing the job drops the copy.
+        session.stop(id);
+        session.remove(id);
+        assert!(!copy.exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

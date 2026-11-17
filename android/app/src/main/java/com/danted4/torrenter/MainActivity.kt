@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -76,8 +77,21 @@ class MainActivity : ComponentActivity() {
     private val notify =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    /** A .torrent handed over by "Open with" (or a browser download), queued
+     *  once the engine is open. */
+    val openedTorrent = mutableStateOf<Uri?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        torrentUri(intent)?.let { openedTorrent.value = it }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) {
+            torrentUri(intent)?.let { openedTorrent.value = it }
+        }
         if (Build.VERSION.SDK_INT >= 33) {
             notify.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -157,6 +171,26 @@ private fun AppScreen(
             DownloadService.startFromUi(activity)
         }
     }
+
+    // A .torrent from the picker or "Open with": read (capped) off the main
+    // thread, then queued at once through the current route, like START.
+    fun queueTorrent(uri: Uri) {
+        val live = engine ?: return
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { readTorrent(activity, uri) }
+                live.queueTorrentFile(bytes, debridRoute)
+                notice = null
+                refresh()
+            } catch (error: Exception) {
+                notice = error.message
+            }
+        }
+    }
+    val pickTorrent =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            uri?.let { queueTorrent(it) }
+        }
 
     // Stop waiting for the service and download the same torrent from peers.
     fun asTorrent(
@@ -273,6 +307,14 @@ private fun AppScreen(
         }
     }
 
+    val opened = activity.openedTorrent.value
+    LaunchedEffect(engine, opened) {
+        if (engine != null && opened != null) {
+            activity.openedTorrent.value = null
+            queueTorrent(opened)
+        }
+    }
+
     LaunchedEffect(engine) {
         if (engine == null) {
             return@LaunchedEffect
@@ -370,6 +412,16 @@ private fun AppScreen(
                 )
             },
             singleLine = true,
+            trailingIcon =
+                if (magnet) {
+                    {
+                        UploadGlyph(color = palette.dim) {
+                            pickTorrent.launch(arrayOf("application/x-bittorrent", "application/octet-stream"))
+                        }
+                    }
+                } else {
+                    null
+                },
             textStyle =
                 androidx.compose.ui.text.TextStyle(
                     color = palette.fg,
@@ -765,3 +817,27 @@ private fun requestBatteryExemption(activity: ComponentActivity) {
     runCatching { activity.startActivity(intent) }
 }
 
+
+/** The .torrent a VIEW intent carries ("Open with", a browser download). */
+private fun torrentUri(intent: Intent?): Uri? =
+    intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data
+
+/** Largest .torrent read (the engine refuses anything larger too). */
+private const val MAX_TORRENT_FILE = 32 * 1024 * 1024
+
+/** Read a .torrent from the picker or "Open with", refusing an oversize one
+ *  before reading it all. */
+private fun readTorrent(context: Context, uri: Uri): ByteArray {
+    val input = context.contentResolver.openInputStream(uri) ?: error("could not open that file")
+    input.use { stream ->
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = stream.read(buffer)
+            if (read < 0) break
+            out.write(buffer, 0, read)
+            if (out.size() > MAX_TORRENT_FILE) error("the .torrent file is larger than 32 MB")
+        }
+        return out.toByteArray()
+    }
+}

@@ -8,6 +8,7 @@ pub mod paths;
 pub mod progress;
 pub mod session;
 pub mod torrent;
+pub mod torrent_file;
 pub mod update;
 pub mod validate;
 

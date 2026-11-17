@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `.torrent` files ([#42](https://github.com/danted4/torrenter/issues/42)): an upload icon next to the magnet box (desktop GUI, Android, iOS), drag-and-drop onto the desktop window, "Open with torrenter" on Android and iOS, `torrenter magnet file.torrent`, and the MCP tool `queue_torrent_file`. The file becomes the magnet built from it, starts at once with the current route and share/leech, and skips the metadata wait; a copy is kept in `torrents/` beside `jobs.json` until the job is cleared. Files up to 32 MB.
+
+### Fixed
+
+- CLI: a download run without a terminal (a script, cron, `</dev/null`) no longer stops at once when stdin closes; only `2` stops it. Pressing `2` can no longer panic the torrent loop ("`async fn` resumed after completion").
+
 ## [3.8.3] - 2026-11-17
 
 ### Added
