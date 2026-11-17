@@ -114,28 +114,31 @@ jobs:
     name: build (torrenter-android.apk)
     needs: verify-tag-on-main
     runs-on: ubuntu-latest
+    # This job holds the release signing key: its actions are pinned to
+    # commit SHAs (the comment names the version) so a moved tag cannot run
+    # code next to the key. Bump them by hand.
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-android-apk
-      - uses: nttld/setup-ndk@v1
+      - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         id: ndk
         with:
           ndk-version: r27c
       - name: cargo-ndk
         run: cargo install cargo-ndk --locked
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v4
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
         with:
           packages: "platforms;android-35 build-tools;35.0.0"
-      - uses: gradle/actions/setup-gradle@v5
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
         with:
           gradle-version: "8.11.1"
       - name: Native libraries
@@ -201,7 +204,7 @@ jobs:
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk dist/torrenter-android.apk
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: torrenter-android.apk
           path: dist/torrenter-android.apk
