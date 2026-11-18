@@ -1,6 +1,6 @@
 [package]
 name = "torrenter"
-version = "3.9.2"
+version = "3.9.3"
 edition = "2021"
 description = "Torrent client and magnet downloader (CLI, native GUI, Android, iOS from source, stdio MCP) with optional debrid support and resumable multi-connection HTTP(S)."
 license = "MIT"

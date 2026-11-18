@@ -180,7 +180,7 @@ Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`
 
    A local build lands at `android/app/build/outputs/apk/debug/`. Copy the APK to the phone (USB, Nearby Share, or a file you trust).
 
-2. On the phone: allow **Install unknown apps** for that source, then open the APK. Android always asks before installing an app from outside the Play Store, and Play Protect may warn about an app it has seen little of. Play Protect blocked 3.9.0 and 3.9.1 as "harmful"; both registered "Open with torrenter" for `.torrent` files, and a test build without it passed, so 3.9.2 drops it on Android. Use the upload icon next to the box instead. **3.9.0 and older** were signed with a new throwaway debug key every release, so moving from one of those to 3.9.1 needs one uninstall first (which clears the job list and saved accounts); from 3.9.1 on, updates install in place.
+2. On the phone: allow **Install unknown apps** for that source, then open the APK. Android always asks before installing an app from outside the Play Store, and Play Protect may warn about an app it has seen little of. Play Protect blocked 3.9.0 and 3.9.1 as "harmful"; both registered "Open with torrenter" for `.torrent` files, and a test build without it passed, so 3.9.2 drops it on Android. Use the file icon inside the box instead. **3.9.0 and older** were signed with a new throwaway debug key every release, so moving from one of those to 3.9.1 needs one uninstall first (which clears the job list and saved accounts); from 3.9.1 on, updates install in place.
 3. Grant **All files access** (required). Output is public `Download/torrenter`, same layout as desktop (`<name>/` for magnets, `.resume/` for HTTP).
 4. Allow **notifications** so the foreground service can keep jobs alive when you leave the app.
 5. If Android asks to ignore battery optimizations, allow it. Denying that does not block jobs; OEMs may still freeze seeding.
@@ -244,7 +244,7 @@ Stdout is the protocol; logs go to stderr. There is no install token and no extr
 | | **Magnet / torrent** | **Direct HTTP(S)** |
 |---|----------------------|---------------------|
 | **Use when** | magnet P2P | CDN, mirror, or any direct file URL |
-| **Input** | `magnet:?xt=urn:btih:…`, or a `.torrent` file (upload icon next to the box; drop it on the desktop window; "Open with torrenter" on iOS; `torrenter magnet file.torrent`) | `https://example.com/file.iso` |
+| **Input** | `magnet:?xt=urn:btih:…`, or a `.torrent` file (file icon inside the box, MAGNET only; drop it on the desktop window; "Open with torrenter" on iOS; `torrenter magnet file.torrent`) | `https://example.com/file.iso` |
 | **Engine** | librqbit | `reqwest` + `Range: bytes=` |
 | **Parallelism** | piece picker | byte-range parts: **connections** setting, Auto = 4 (1–16) |
 | **Resume** | librqbit on disk under `<dest>/<torrent-name>/` | `<dest>/.resume/` part files |
