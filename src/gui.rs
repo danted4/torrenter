@@ -3556,7 +3556,13 @@ fn upload_glyph(ui: &mut egui::Ui, palette: Theme, field: egui::Rect) -> egui::R
     // The page's right edge sits 8 px inside the border.
     let center = egui::pos2(field.right() - 8.0 - FILE_PAGE.x / 2.0, field.center().y);
     let hit = egui::Rect::from_center_size(center, egui::vec2(18.0, 18.0));
-    let response = ui.interact(hit, ui.id().with("torrent-file-glyph"), Sense::click());
+    // click_and_drag, like the TextEdit under it: otherwise egui gives the
+    // press's drag to the TextEdit, which takes focus and moves the caret.
+    let response = ui.interact(
+        hit,
+        ui.id().with("torrent-file-glyph"),
+        Sense::click_and_drag(),
+    );
     let color = if response.hovered() {
         palette.fg
     } else {
