@@ -1071,11 +1071,6 @@ impl eframe::App for GuiApp {
                         let button_w = 80.0_f32;
                         let gap = 10.0_f32;
                         let magnet = self.mode == Mode::Magnet;
-                        // Open a .torrent: beside the mode it belongs to.
-                        ui.add_space(gap);
-                        if upload_glyph(ui, palette, magnet).clicked() {
-                            self.pick_torrent();
-                        }
                         let picked = self.route_account();
                         let via = picked.as_ref().filter(|_| magnet);
                         let route_text = route_label(picked.as_ref());
@@ -1083,7 +1078,10 @@ impl eframe::App for GuiApp {
                         // account names are shortened with "…".
                         let route_w = route_select_width(ui, &route_label(None));
                         let glyphs_w = 42.0_f32 + route_w + gap;
-                        let edit_margin = 16.0_f32;
+                        // MAGNET: room at the right end of the box for the
+                        // .torrent file glyph, so text never runs under it.
+                        let glyph_room = if magnet { FILE_GLYPH_ROOM } else { 0.0 };
+                        let edit_margin = 16.0_f32 + glyph_room;
                         ui.add_space(gap);
                         // The field takes whatever the controls leave.
                         let field_w =
@@ -1095,7 +1093,12 @@ impl eframe::App for GuiApp {
                             .id(input_id)
                             .font(FontId::new(14.0, FontFamily::Monospace))
                             .desired_width(edit_w)
-                            .margin(egui::Margin::symmetric(8, 5));
+                            .margin(egui::Margin {
+                                left: 8,
+                                right: 8 + glyph_room as i8,
+                                top: 5,
+                                bottom: 5,
+                            });
                         if !focused {
                             edit = edit.hint_text(match self.mode {
                                 Mode::Magnet => "magnet:?xt=urn:btih:…",
@@ -1118,6 +1121,11 @@ impl eframe::App for GuiApp {
                                 ui.add(edit)
                             },
                         );
+                        // Open a .torrent: inside the box, MAGNET only (gone
+                        // in HTTP), as on Android and iOS.
+                        if magnet && upload_glyph(ui, palette, response.response.rect).clicked() {
+                            self.pick_torrent();
+                        }
                         ui.add_space(gap);
                         let select = route_select(
                             ui,
@@ -3537,49 +3545,51 @@ fn truncate_middle(value: &str, max: usize) -> String {
     )
 }
 
-/// Beside the MAGNET / HTTP switch: open a `.torrent` file. Faded and inert in
-/// HTTP mode, like the seed toggle.
-fn upload_glyph(ui: &mut egui::Ui, palette: Theme, enabled: bool) -> egui::Response {
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), sense);
-    let color = if !enabled {
-        Color32::from_rgba_unmultiplied(palette.dim.r(), palette.dim.g(), palette.dim.b(), 70)
-    } else if response.hovered() {
+/// Room the file glyph takes at the right end of the URL box (beyond the
+/// usual 8 px text margin), so typed text stops short of it.
+const FILE_GLYPH_ROOM: f32 = 16.0;
+/// The page the file glyph draws: about the height of the URL text.
+const FILE_PAGE: egui::Vec2 = egui::vec2(8.5, 12.0);
+
+/// Inside the URL box, at its right end (MAGNET only): open a `.torrent` file.
+fn upload_glyph(ui: &mut egui::Ui, palette: Theme, field: egui::Rect) -> egui::Response {
+    // The page's right edge sits 8 px inside the border.
+    let center = egui::pos2(field.right() - 8.0 - FILE_PAGE.x / 2.0, field.center().y);
+    let hit = egui::Rect::from_center_size(center, egui::vec2(18.0, 18.0));
+    let response = ui.interact(hit, ui.id().with("torrent-file-glyph"), Sense::click());
+    let color = if response.hovered() {
         palette.fg
     } else {
         palette.dim
     };
-    paint_file(ui.painter(), rect, color);
-    if enabled {
-        click_cursor(response).on_hover_text("open a .torrent file (or drop one on the window)")
-    } else {
-        response
-            .on_hover_cursor(egui::CursorIcon::Default)
-            .on_hover_text(".torrent files are magnet downloads; switch to MAGNET")
-    }
+    paint_file(ui.painter(), center, color);
+    click_cursor(response).on_hover_text("open a .torrent file (or drop one on the window)")
 }
 
-/// A page with a folded corner: open a file (unlike the download-folder
-/// glyph on the row below).
-fn paint_file(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+/// A page with a folded corner, centred on `center`: open a file (unlike the
+/// download-folder glyph on the row below).
+fn paint_file(painter: &egui::Painter, center: egui::Pos2, color: Color32) {
     let stroke = Stroke::new(1.2_f32, color);
-    let p = |x: f32, y: f32| egui::pos2(rect.left() + x, rect.top() + y);
+    let page = egui::Rect::from_center_size(center, FILE_PAGE);
+    let fold = 3.0_f32;
+    let (left, right, top, bottom) = (page.left(), page.right(), page.top(), page.bottom());
+    let p = egui::pos2;
     painter.add(egui::Shape::closed_line(
         vec![
-            p(4.0, 1.5),
-            p(11.0, 1.5),
-            p(14.5, 5.0),
-            p(14.5, 16.5),
-            p(4.0, 16.5),
+            p(left, top),
+            p(right - fold, top),
+            p(right, top + fold),
+            p(right, bottom),
+            p(left, bottom),
         ],
         stroke,
     ));
     painter.add(egui::Shape::line(
-        vec![p(11.0, 1.5), p(11.0, 5.0), p(14.5, 5.0)],
+        vec![
+            p(right - fold, top),
+            p(right - fold, top + fold),
+            p(right, top + fold),
+        ],
         stroke,
     ));
 }

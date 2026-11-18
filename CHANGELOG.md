@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Desktop GUI: the `.torrent` file icon sits inside the URL box at its right end and shows only in MAGNET mode, as on Android and iOS (it was beside the MAGNET / HTTP switch and faded in HTTP).
+
 ## [3.9.2] - 2026-11-18
 
 ### Fixed
