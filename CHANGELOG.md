@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.9.2] - 2026-11-18
+
+### Fixed
+
+- Android: Play Protect no longer blocks the APK as "harmful". 3.9.0 and 3.9.1 registered "Open with torrenter" for `.torrent` files, and a build without that entry passed Play Protect, so Android drops it: open a `.torrent` with the upload icon next to the magnet box. iOS keeps "Open with"; the desktop GUI, CLI and MCP are unchanged. Updates from 3.9.1 install in place (same key).
+
 ## [3.9.1] - 2026-11-18
 
 ### Changed
