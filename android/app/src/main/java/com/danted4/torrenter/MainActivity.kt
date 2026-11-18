@@ -72,27 +72,13 @@ import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
 import uniffi.torrenter.banner
 import uniffi.torrenter.debridServices
-import uniffi.torrenter.inspectTorrentFile
 
 class MainActivity : ComponentActivity() {
     private val notify =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
-    /** A .torrent handed over by "Open with" (or a browser download), queued
-     *  once the engine is open. */
-    val openedTorrent = mutableStateOf<Uri?>(null)
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        torrentUri(intent)?.let { openedTorrent.value = it }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (savedInstanceState == null) {
-            torrentUri(intent)?.let { openedTorrent.value = it }
-        }
         if (Build.VERSION.SDK_INT >= 33) {
             notify.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -155,9 +141,6 @@ private fun AppScreen(
     var clearAsk by remember { mutableStateOf<JobView?>(null) }
     // "as torrent" on a debrid job torrenter added: ask before it leaves the service.
     var rerouteAsk by remember { mutableStateOf<JobView?>(null) }
-    // A .torrent from "Open with" (another app can send one): its bytes and
-    // name, started only after a tap.
-    var torrentAsk by remember { mutableStateOf<Triple<ByteArray, String, Boolean>?>(null) }
     val scope = rememberCoroutineScope()
     val buttons =
         ButtonDefaults.buttonColors(
@@ -177,10 +160,10 @@ private fun AppScreen(
     }
 
     // Queue .torrent bytes through the current route, like START.
-    fun queueTorrentBytes(bytes: ByteArray, peersOnly: Boolean = false) {
+    fun queueTorrentBytes(bytes: ByteArray) {
         val live = engine ?: return
         try {
-            live.queueTorrentFile(bytes, if (peersOnly) null else debridRoute)
+            live.queueTorrentFile(bytes, debridRoute)
             notice = null
             refresh()
         } catch (error: Exception) {
@@ -188,18 +171,14 @@ private fun AppScreen(
         }
     }
 
-    // A .torrent read (capped) off the main thread: the picker starts it at
-    // once (the user chose it); "Open with" asks first.
-    fun takeTorrent(uri: Uri, ask: Boolean) {
+    // A picked .torrent, read (capped) off the main thread and started at
+    // once: the user chose it. No "Open with": a VIEW filter for
+    // application/x-bittorrent got the APK flagged by Play Protect (3.9.0/3.9.1).
+    fun takeTorrent(uri: Uri) {
         scope.launch {
             try {
                 val bytes = withContext(Dispatchers.IO) { readTorrent(activity, uri) }
-                if (ask) {
-                    val view = inspectTorrentFile(bytes)
-                    torrentAsk = Triple(bytes, view.name, view.`private`)
-                } else {
-                    queueTorrentBytes(bytes)
-                }
+                queueTorrentBytes(bytes)
             } catch (error: Exception) {
                 notice = error.message
             }
@@ -207,7 +186,7 @@ private fun AppScreen(
     }
     val pickTorrent =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            uri?.let { takeTorrent(it, ask = false) }
+            uri?.let { takeTorrent(it) }
         }
 
     // Stop waiting for the service and download the same torrent from peers.
@@ -322,14 +301,6 @@ private fun AppScreen(
             refresh()
         } catch (error: Exception) {
             notice = error.message
-        }
-    }
-
-    val opened = activity.openedTorrent.value
-    LaunchedEffect(engine, opened) {
-        if (engine != null && opened != null) {
-            activity.openedTorrent.value = null
-            takeTorrent(opened, ask = true)
         }
     }
 
@@ -575,30 +546,6 @@ private fun AppScreen(
                 dismissButton = {
                     TextButton(onClick = { answer(false) }) {
                         Text("keep it on $label", color = palette.fg, fontFamily = FontFamily.Monospace)
-                    }
-                },
-                containerColor = palette.row,
-            )
-        }
-        torrentAsk?.let { (bytes, name, isPrivate) ->
-            // A private torrent never goes through debrid: say so, and start
-            // it from its tracker's peers.
-            val route =
-                if (isPrivate) "private torrent: from its tracker's peers only"
-                else "via ${account(debridRoute)?.name ?: "peers"}"
-            AlertDialog(
-                onDismissRequest = { torrentAsk = null },
-                title = { Text("Start this torrent?", fontFamily = FontFamily.Monospace) },
-                text = { Text("$name\n$route", fontFamily = FontFamily.Monospace) },
-                confirmButton = {
-                    TextButton(onClick = {
-                        torrentAsk = null
-                        queueTorrentBytes(bytes, peersOnly = isPrivate)
-                    }) { Text("start", color = palette.fg, fontFamily = FontFamily.Monospace) }
-                },
-                dismissButton = {
-                    TextButton(onClick = { torrentAsk = null }) {
-                        Text("cancel", color = palette.dim, fontFamily = FontFamily.Monospace)
                     }
                 },
                 containerColor = palette.row,
@@ -860,14 +807,10 @@ private fun requestBatteryExemption(activity: ComponentActivity) {
 }
 
 
-/** The .torrent a VIEW intent carries ("Open with", a browser download). */
-private fun torrentUri(intent: Intent?): Uri? =
-    intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data
-
 /** Largest .torrent read (the engine refuses anything larger too). */
 private const val MAX_TORRENT_FILE = 32 * 1024 * 1024
 
-/** Read a .torrent from the picker or "Open with", refusing an oversize one
+/** Read a .torrent from the picker, refusing an oversize one
  *  before reading it all. */
 private fun readTorrent(context: Context, uri: Uri): ByteArray {
     val input = context.contentResolver.openInputStream(uri) ?: error("could not open that file")
