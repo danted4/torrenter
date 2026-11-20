@@ -2197,9 +2197,6 @@ impl GuiApp {
         }
     }
 
-    /// Clearing an unfinished debrid job torrenter added, or moving it off
-    /// its service ("as torrent", another service): ask whether the torrent
-    /// should also go from the service.
     /// "private torrent": download it from its tracker's peers, or cancel.
     fn show_private_ask(&mut self, ctx: &egui::Context, palette: Theme) {
         if self.remote_confirm.is_some() {
@@ -2264,6 +2261,9 @@ impl GuiApp {
         }
     }
 
+    /// Clearing an unfinished debrid job torrenter added, or moving it off
+    /// its service ("as torrent", another service): ask whether the torrent
+    /// should also go from the service.
     fn show_remote_confirm(&mut self, ctx: &egui::Context, palette: Theme) {
         let Some(ask) = self.remote_confirm.clone() else {
             return;

@@ -65,10 +65,7 @@ pub struct HttpsDowngrade;
 
 impl std::fmt::Display for HttpsDowngrade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "the server redirected an HTTPS link to plain HTTP; refused \
-             (paste the http:// link directly if you trust it)",
-        )
+        f.write_str("the server redirected an HTTPS link to plain HTTP; refused")
     }
 }
 
@@ -367,6 +364,30 @@ pub(crate) async fn start_url_download_reported_in(
 }
 
 async fn run_url_download(
+    download_url: &str,
+    layout: DownloadLayout,
+    snapshot: Option<Arc<JobSnapshot>>,
+) -> Result<()> {
+    download_url_job(download_url, layout, snapshot)
+        .await
+        .map_err(|error| downgrade_hint(error, download_url))
+}
+
+/// A link the user gave as `https://` that a server moved to plain HTTP: say
+/// what they can do. (Debrid and updater downloads have no link to paste, and
+/// a pasted `http://` link that went through HTTPS first has nothing to add.)
+fn downgrade_hint(error: anyhow::Error, download_url: &str) -> anyhow::Error {
+    let downgraded = error.chain().any(|cause| cause.is::<HttpsDowngrade>());
+    if downgraded && download_url.starts_with("https://") {
+        anyhow::anyhow!(
+            "{HttpsDowngrade} (paste the http:// link yourself if you trust that server)"
+        )
+    } else {
+        error
+    }
+}
+
+async fn download_url_job(
     download_url: &str,
     layout: DownloadLayout,
     snapshot: Option<Arc<JobSnapshot>>,
@@ -1919,6 +1940,18 @@ mod tests {
         assert!(!downgrades(std::slice::from_ref(&secure), &secure));
         assert!(!downgrades(&[], &plain));
         assert!(HttpsDowngrade.to_string().contains("plain HTTP"));
+        assert!(!HttpsDowngrade.to_string().contains("http://"));
+    }
+
+    #[test]
+    fn only_a_pasted_https_link_gets_the_paste_hint() {
+        let refused = || anyhow::Error::new(HttpsDowngrade).context("request failed");
+        let hinted = downgrade_hint(refused(), "https://example.com/a.iso");
+        assert!(format!("{hinted:#}").contains("paste the http:// link"));
+        let plain = downgrade_hint(refused(), "http://example.com/a.iso");
+        assert!(!format!("{plain:#}").contains("paste"));
+        let other = downgrade_hint(anyhow::anyhow!("timed out"), "https://example.com/a.iso");
+        assert_eq!(format!("{other:#}"), "timed out");
     }
 
     #[tokio::test]
