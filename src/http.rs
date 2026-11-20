@@ -29,7 +29,7 @@ const MERGE_CHUNK: usize = 1024 * 1024;
 pub(crate) fn range_client(user_agent: &str) -> Result<Client> {
     Client::builder()
         .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(redirect_policy(10))
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(60))
         .gzip(false)
@@ -37,6 +37,42 @@ pub(crate) fn range_client(user_agent: &str) -> Result<Client> {
         .build()
         .context("failed to build HTTP client")
 }
+
+/// Redirect policy for every client torrenter builds: at most `max` hops (as
+/// `Policy::limited`), and never from HTTPS down to plain HTTP. A link the
+/// user gave as `http://` still works; an `https://` one (or a debrid link,
+/// which can carry the account key) is never silently moved off TLS.
+pub(crate) fn redirect_policy(max: usize) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > max {
+            attempt.error("too many redirects")
+        } else if downgrades(attempt.previous(), attempt.url()) {
+            attempt.error(HttpsDowngrade)
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Whether following to `next` would leave TLS after an earlier HTTPS hop.
+fn downgrades(previous: &[Url], next: &Url) -> bool {
+    next.scheme() != "https" && previous.iter().any(|url| url.scheme() == "https")
+}
+
+/// A redirect from HTTPS to plain HTTP, refused by `redirect_policy`.
+#[derive(Debug)]
+pub struct HttpsDowngrade;
+
+impl std::fmt::Display for HttpsDowngrade {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the server redirected an HTTPS link to plain HTTP; refused \
+             (paste the http:// link directly if you trust it)",
+        )
+    }
+}
+
+impl std::error::Error for HttpsDowngrade {}
 
 #[derive(Clone, Debug)]
 enum PartPlacement {
@@ -1866,6 +1902,55 @@ mod tests {
                 .exists(),
             "parts and manifest are cleaned after the merge"
         );
+    }
+
+    #[test]
+    fn redirects_never_leave_https() {
+        let url = |text: &str| Url::parse(text).unwrap();
+        let secure = url("https://example.com/a");
+        let plain = url("http://example.com/b");
+        assert!(downgrades(std::slice::from_ref(&secure), &plain));
+        assert!(downgrades(
+            &[secure.clone(), url("https://cdn.example.com/c")],
+            &plain
+        ));
+        assert!(!downgrades(std::slice::from_ref(&plain), &plain));
+        assert!(!downgrades(std::slice::from_ref(&plain), &secure));
+        assert!(!downgrades(std::slice::from_ref(&secure), &secure));
+        assert!(!downgrades(&[], &plain));
+        assert!(HttpsDowngrade.to_string().contains("plain HTTP"));
+    }
+
+    #[tokio::test]
+    async fn plain_http_redirects_are_still_followed() {
+        let target = spawn_status_server("HTTP/1.1 200 OK").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let location = target.url.clone();
+        let accept = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let location = location.clone();
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut stream).await;
+                    let _ = write_http(
+                        &mut stream,
+                        "HTTP/1.1 302 Found",
+                        vec![("Location", location), ("Content-Length", "0".into())],
+                        &[],
+                    )
+                    .await;
+                });
+            }
+        });
+        let client = range_client("torrenter/test").unwrap();
+        let response = client
+            .get(format!("http://{addr}/moved.bin"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.url().as_str(), target.url);
+        accept.abort();
     }
 
     async fn spawn_status_server(status: &'static str) -> TestServer {

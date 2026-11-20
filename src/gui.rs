@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -300,6 +300,16 @@ struct GuiApp {
     /// Clearing or re-routing a debrid job whose torrent torrenter added on
     /// the service: ask "also remove it from …?" first.
     remote_confirm: Option<RemoteAsk>,
+    /// Private `.torrent` files picked or dropped while a debrid account is
+    /// the route: each asks "download from its tracker's peers?" in turn.
+    private_asks: VecDeque<PrivateAsk>,
+}
+
+/// A private torrent that cannot go through the chosen debrid account.
+struct PrivateAsk {
+    bytes: Vec<u8>,
+    name: String,
+    account: String,
 }
 
 /// Settings categories, listed in the sidebar.
@@ -462,6 +472,7 @@ impl GuiApp {
             account_tx,
             account_rx,
             remote_confirm: None,
+            private_asks: VecDeque::new(),
         };
         if let Some(error) = launch_error {
             app.toast_fatal(error);
@@ -533,8 +544,24 @@ impl GuiApp {
 
     /// Queue a `.torrent` file's bytes: the magnet built from it, through the
     /// current route (peers or a debrid account), started at once.
+    /// A private torrent with a debrid account as the route asks first: it
+    /// can only come from its tracker's peers.
     fn queue_torrent_bytes(&mut self, bytes: &[u8]) {
-        let via = self.route_account().map(|account| account.id);
+        let route = self.route_account();
+        if let Some(account) = &route {
+            if let Ok(imported) = torrent_file::parse(bytes) {
+                if imported.private {
+                    self.private_asks.push_back(PrivateAsk {
+                        bytes: bytes.to_vec(),
+                        name: imported.name,
+                        // As the route menu shows it.
+                        account: account.name.clone(),
+                    });
+                    return;
+                }
+            }
+        }
+        let via = route.map(|account| account.id);
         if let Err(error) = self.session.queue_torrent(bytes, via.as_deref()) {
             self.toast_fail(error);
         }
@@ -1636,6 +1663,7 @@ impl eframe::App for GuiApp {
             });
 
         self.show_remote_confirm(ctx, palette);
+        self.show_private_ask(ctx, palette);
         self.show_restart_popup(ctx, palette);
         self.show_toasts(ctx, palette);
     }
@@ -2172,6 +2200,70 @@ impl GuiApp {
     /// Clearing an unfinished debrid job torrenter added, or moving it off
     /// its service ("as torrent", another service): ask whether the torrent
     /// should also go from the service.
+    /// "private torrent": download it from its tracker's peers, or cancel.
+    fn show_private_ask(&mut self, ctx: &egui::Context, palette: Theme) {
+        if self.remote_confirm.is_some() {
+            return;
+        }
+        let Some(ask) = self.private_asks.front() else {
+            return;
+        };
+        let (name, account) = (ask.name.clone(), ask.account.clone());
+        let title = "private torrent";
+        let mut choice = None;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::NONE
+                    .fill(self.card_fill(palette.row))
+                    .stroke(Stroke::new(1.0_f32, palette.dim))
+                    .inner_margin(12.0)
+                    .corner_radius(8),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.set_max_width(460.0);
+                if popup_header(ui, title, palette) {
+                    choice = Some(false);
+                }
+                glass_label(
+                    ui,
+                    format!(
+                        "{name} is a private torrent and can't go through {account}. \
+                         Download it from its tracker's peers?"
+                    ),
+                    13.0,
+                    palette.fg,
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(ink("download from peers", 12.0, palette.fg))
+                        .clicked()
+                    {
+                        choice = Some(true);
+                    }
+                    if ui.button(ink("cancel", 12.0, palette.dim)).clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        let Some(start) = choice else {
+            return;
+        };
+        let Some(ask) = self.private_asks.pop_front() else {
+            return;
+        };
+        if start {
+            if let Err(error) = self.session.queue_torrent(&ask.bytes, None) {
+                self.toast_fail(error);
+            }
+        }
+    }
+
     fn show_remote_confirm(&mut self, ctx: &egui::Context, palette: Theme) {
         let Some(ask) = self.remote_confirm.clone() else {
             return;

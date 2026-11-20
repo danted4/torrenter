@@ -72,6 +72,7 @@ import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
 import uniffi.torrenter.banner
 import uniffi.torrenter.debridServices
+import uniffi.torrenter.inspectTorrentFile
 
 class MainActivity : ComponentActivity() {
     private val notify =
@@ -141,6 +142,9 @@ private fun AppScreen(
     var clearAsk by remember { mutableStateOf<JobView?>(null) }
     // "as torrent" on a debrid job torrenter added: ask before it leaves the service.
     var rerouteAsk by remember { mutableStateOf<JobView?>(null) }
+    // A private .torrent picked while a debrid account is the route: its
+    // bytes, name and account title, until "download from peers" or cancel.
+    var privateAsk by remember { mutableStateOf<Triple<ByteArray, String, String>?>(null) }
     val scope = rememberCoroutineScope()
     val buttons =
         ButtonDefaults.buttonColors(
@@ -159,11 +163,12 @@ private fun AppScreen(
         }
     }
 
-    // Queue .torrent bytes through the current route, like START.
-    fun queueTorrentBytes(bytes: ByteArray) {
+    // Queue .torrent bytes through the current route, like START (`peersOnly`:
+    // the answer to the private-torrent question).
+    fun queueTorrentBytes(bytes: ByteArray, peersOnly: Boolean = false) {
         val live = engine ?: return
         try {
-            live.queueTorrentFile(bytes, debridRoute)
+            live.queueTorrentFile(bytes, if (peersOnly) null else debridRoute)
             notice = null
             refresh()
         } catch (error: Exception) {
@@ -178,7 +183,15 @@ private fun AppScreen(
         scope.launch {
             try {
                 val bytes = withContext(Dispatchers.IO) { readTorrent(activity, uri) }
-                queueTorrentBytes(bytes)
+                // A private torrent cannot go through debrid: ask before it
+                // goes to its tracker's peers instead.
+                val routed = accounts.firstOrNull { it.id == debridRoute }
+                val view = if (routed != null) inspectTorrentFile(bytes) else null
+                if (routed != null && view != null && view.`private`) {
+                    privateAsk = Triple(bytes, view.name, routed.name)
+                } else {
+                    queueTorrentBytes(bytes)
+                }
             } catch (error: Exception) {
                 notice = error.message
             }
@@ -546,6 +559,31 @@ private fun AppScreen(
                 dismissButton = {
                     TextButton(onClick = { answer(false) }) {
                         Text("keep it on $label", color = palette.fg, fontFamily = FontFamily.Monospace)
+                    }
+                },
+                containerColor = palette.row,
+            )
+        }
+        privateAsk?.let { (bytes, name, label) ->
+            AlertDialog(
+                onDismissRequest = { privateAsk = null },
+                title = { Text("Private torrent", fontFamily = FontFamily.Monospace) },
+                text = {
+                    Text(
+                        "$name is a private torrent and can't go through $label. " +
+                            "Download it from its tracker's peers?",
+                        fontFamily = FontFamily.Monospace,
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        privateAsk = null
+                        queueTorrentBytes(bytes, peersOnly = true)
+                    }) { Text("download from peers", color = palette.fg, fontFamily = FontFamily.Monospace) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { privateAsk = null }) {
+                        Text("cancel", color = palette.dim, fontFamily = FontFamily.Monospace)
                     }
                 },
                 containerColor = palette.row,

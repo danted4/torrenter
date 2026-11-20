@@ -28,7 +28,7 @@ impl Api {
     pub fn new(base: Url) -> Result<Api, DebridError> {
         let client = Client::builder()
             .user_agent(USER_AGENT)
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(crate::http::redirect_policy(5))
             .connect_timeout(Duration::from_secs(20))
             .read_timeout(Duration::from_secs(60))
             .build()
@@ -82,6 +82,13 @@ pub(crate) const MAX_REPLY: usize = 32 * 1024 * 1024;
 
 /// A short, URL-free description of a transport error.
 pub(crate) fn network_text(error: &reqwest::Error) -> String {
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if cause.is::<crate::http::HttpsDowngrade>() {
+            return cause.to_string();
+        }
+        source = cause.source();
+    }
     if error.is_timeout() {
         "timed out".into()
     } else if error.is_connect() {

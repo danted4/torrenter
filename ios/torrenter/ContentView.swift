@@ -44,17 +44,17 @@ struct ContentView: View {
             }
         }
         .alert(
-            "Start this torrent?",
+            owner.torrentTitle(owner.torrentAsk),
             isPresented: Binding(
                 get: { owner.torrentAsk != nil },
                 set: { if !$0 { owner.torrentAsk = nil } }
             ),
             presenting: owner.torrentAsk
         ) { ask in
-            Button("start") { owner.confirmTorrent(ask) }
+            Button(owner.asksForPeers(ask) ? "download from peers" : "start") { owner.confirmTorrent(ask) }
             Button("cancel", role: .cancel) { owner.torrentAsk = nil }
         } message: { ask in
-            Text("\(ask.name)\n\(owner.routeLine(ask))")
+            Text(owner.torrentMessage(ask))
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [torrentType]) { result in
             if case .success(let url) = result {
