@@ -188,9 +188,7 @@ Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`
 - **Checksum:** `shasum -a 256 torrenter-android.apk` (Windows: `certutil -hashfile torrenter-android.apk SHA256`) must match the `torrenter-android.apk` line in that release's `SHA256SUMS`. As with the desktop updater, this proves the file is the one the release lists (same publisher). It is not a signature.
 
 > [!IMPORTANT]
-> 🚨 Google Play Protect may show **Harmful app blocked** (*This app may be harmful*) for torrenter. Play Protect does not say why, and this project does not know. On our test phone, a new release was flagged while an earlier build with the same Android code was not. Tapping **Got it** installs nothing.
->
-> Pass the warning **only** for `torrenter-android.apk` from this repo's [Releases](https://github.com/danted4/torrenter/releases) page, and only once the checks above match. A tampered or look-alike APK from anywhere else shows the same screen.
+> 🚨 Google Play Protect may show **Harmful app blocked** (*This app may be harmful*). Tapping **Got it** installs nothing.
 >
 > | ⚠️ | Only for the checked APK from this repo's Releases |
 > |---:|:---|
@@ -453,7 +451,7 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | macOS: cannot be opened / unidentified developer | `xattr -dr com.apple.quarantine` on `torrenter.app` or the Mach-O, then right-click **Open** or **Privacy & Security → Open Anyway** (see [macOS](#macos)) |
 | macOS: local network / incoming connections | Click **Allow** (see [macOS](#macos)); repeats after updates |
 | Linux: no permission popup | Normal — Linux usually allows outbound with no prompt (see [Linux](#linux)) |
-| Android: "Harmful app blocked" / Play Protect | Only for `torrenter-android.apk` from this repo's Releases: check its signing certificate and `SHA256SUMS` first, then tap **Install anyway** and **Install** (see [Android](#android)). Play Protect does not say why it flags the app. Allow **Install unknown apps** for the browser or file manager first. "App not installed" over 3.9.0 or older: uninstall that version once (different signing key) |
+| Android: "Harmful app blocked" / Play Protect | Only for `torrenter-android.apk` from this repo's Releases: check its signing certificate and `SHA256SUMS` first, then tap **Install anyway** and **Install** (see [Android](#android)). Allow **Install unknown apps** for the browser or file manager first. "App not installed" over 3.9.0 or older: uninstall that version once (different signing key) |
 | Android: cannot write downloads | Grant **All files access**; dest is `Download/torrenter` |
 | Android: jobs die in the background | Allow notifications and ignore battery optimizations; a reboot does not autostart the app |
 | Android: share magnet, `U 0.00` | Keep the app open; allow UPnP on the LAN; CGNAT still blocks inbound peers |
