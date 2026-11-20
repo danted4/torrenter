@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.9.4] - 2026-11-20
+
+### Fixed
+
+- Downloads never follow a redirect from HTTPS to plain HTTP (plain HTTP downloads, debrid file links and API calls, the updater). Such a link now fails with a note; a link pasted as `http://` still works. Debrid links can carry the account key, so they must not leave TLS.
+
+### Changed
+
+- A private `.torrent` picked or dropped while a debrid account is the route no longer just fails: it asks whether to download it from its tracker's peers instead (desktop GUI, Android, iOS). The CLI `--debrid` flag and MCP `debrid` still refuse, since they ask for debrid explicitly.
+
 ## [3.9.3] - 2026-11-18
 
 ### Changed

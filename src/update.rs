@@ -333,7 +333,7 @@ fn update_client() -> Result<reqwest::Client> {
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(crate::http::redirect_policy(10))
         .build()
         .context("failed to build update client")
 }

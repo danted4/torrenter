@@ -119,7 +119,9 @@ final class EngineOwner: ObservableObject {
     /// A .torrent from the picker or "Open with": read (security-scoped,
     /// capped) off the main actor, so an iCloud file still downloading never
     /// blocks the UI, then queued through the current route, like START.
-    /// The picker: the user chose it, so it starts at once.
+    /// The picker: the user chose it, so it starts at once, unless it is a
+    /// private torrent and a debrid account is the route (`torrentAsk` asks
+    /// whether to download it from its tracker's peers instead).
     func queueTorrentFile(at url: URL) {
         takeTorrent(at: url, ask: false)
     }
@@ -133,6 +135,22 @@ final class EngineOwner: ObservableObject {
         torrentAsk = nil
         // A private torrent never goes through debrid: from its peers.
         queueTorrentData(ask.data, peersOnly: ask.isPrivate)
+    }
+
+    /// A private torrent while a debrid account is the route: the question is
+    /// "download it from its tracker's peers?", not "start?".
+    func asksForPeers(_ ask: TorrentAsk) -> Bool {
+        ask.isPrivate && accounts.contains { $0.id == debridRoute }
+    }
+
+    func torrentTitle(_ ask: TorrentAsk?) -> String {
+        ask.map(asksForPeers) == true ? "Private torrent" : "Start this torrent?"
+    }
+
+    func torrentMessage(_ ask: TorrentAsk) -> String {
+        asksForPeers(ask)
+            ? "\(ask.name) is a private torrent and can't go through \(routeName). Download it from its tracker's peers?"
+            : "\(ask.name)\n\(routeLine(ask))"
     }
 
     /// The confirm's second line: the route, or why a private torrent ignores it.
@@ -159,7 +177,15 @@ final class EngineOwner: ObservableObject {
                 } catch {
                     self.notice = engineMessage(error)
                 }
-            case .success(let data): self.queueTorrentData(data)
+            case .success(let data):
+                // The picker: ask only for a private torrent that cannot take
+                // the chosen debrid route.
+                if self.accounts.contains(where: { $0.id == self.debridRoute }),
+                   let view = try? inspectTorrentFile(bytes: data), view.private {
+                    self.torrentAsk = TorrentAsk(data: data, name: view.name, isPrivate: true)
+                } else {
+                    self.queueTorrentData(data)
+                }
             case .failure(let error): self.notice = error.message
             }
         }

@@ -94,6 +94,7 @@ This tool downloads untrusted content the user asked for. Do not weaken path, UR
 - Auto-update defaults **off**. Do not enable it by default in config or CI.
 - Never ship or commit credentials, tokens, or tracking. Do not expand the updater to arbitrary hosts.
 - User-provided debrid keys: desktop `credentials.json` accounts (0600, atomic) or `TORRENTER_<SERVICE>_KEY` (a read-only `env:<service>` account); Android AES-GCM with an Android Keystore key in its own prefs file excluded from backup; iOS Keychain (`AfterFirstUnlockThisDeviceOnly`). Mobile engines keep keys in memory only (`use_memory_keys`). Keys never go in `jobs.json`, logs, MCP output, `Debug` (`debrid::Secret`) or resume manifests.
+- Redirects: every `reqwest` client uses `http::redirect_policy(max)` (never `Policy::limited`), which refuses a hop from HTTPS to plain HTTP (`HttpsDowngrade`; `debrid::api::network_text` keeps its text). A link given as `http://` still works. The "paste the http:// link" hint is added only to a plain HTTP job whose link was `https://` (`http::downgrade_hint`), never on debrid or updater errors.
 - Debrid links can carry the key (TorBox `requestdl?token=`): never log or persist them; debrid error text goes through `debrid::redact` before it reaches `jobs.json`, the UI or MCP. Blocked content (e.g. RD `infringing_file`) is shown, never worked around.
 
 ## PR and commit notes
