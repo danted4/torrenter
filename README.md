@@ -180,7 +180,18 @@ Sideload only — not on Google Play. minSdk **30**, ABIs `arm64-v8a` + `x86_64`
 
    A local build lands at `android/app/build/outputs/apk/debug/`. Copy the APK to the phone (USB, Nearby Share, or a file you trust).
 
-2. On the phone: allow **Install unknown apps** for that source, then open the APK. Android always asks before installing an app from outside the Play Store, and Play Protect may warn about an app it has seen little of. Play Protect blocked 3.9.0 and 3.9.1 as "harmful"; both registered "Open with torrenter" for `.torrent` files, and a test build without it passed, so 3.9.2 drops it on Android. Use the file icon inside the box instead. **3.9.0 and older** were signed with a new throwaway debug key every release, so moving from one of those to 3.9.1 needs one uninstall first (which clears the job list and saved accounts); from 3.9.1 on, updates install in place.
+2. On the phone: allow **Install unknown apps** for that source, then open the APK. Android always asks before installing an app from outside the Play Store. **3.9.0 and older** were signed with a new throwaway debug key every release, so moving from one of those to 3.9.1 or later needs one uninstall first (which clears the job list and saved accounts); from 3.9.1 on, updates install in place.
+
+> [!IMPORTANT]
+> 🚨 Google Play Protect will often show **Harmful app blocked** (*This app may be harmful*). torrenter is a sideloaded torrent client that is not on Google Play, and Play Protect rates each new APK on its own. 3.9.2 and 3.9.3 are the same app inside, yet only the newer one was flagged. If you tap **Got it**, nothing is installed. The APK did not fail; Play Protect stopped it.
+>
+> | ⚠️ | Do this or the app **never installs** |
+> |---:|:---|
+> | 1️⃣ | Tap **Install anyway** (the small link above **Got it**) |
+> | 2️⃣ | Confirm **Install** / **Update** |
+
+To check that the APK is the one this project published, compare its SHA-256 with the `torrenter-android.apk` line in that release's `SHA256SUMS` (on a computer: `shasum -a 256 torrenter-android.apk`, or `certutil -hashfile torrenter-android.apk SHA256` on Windows). From 3.9.1 on, every release is signed with the same key, and Android refuses an update signed with any other.
+
 3. Grant **All files access** (required). Output is public `Download/torrenter`, same layout as desktop (`<name>/` for magnets, `.resume/` for HTTP).
 4. Allow **notifications** so the foreground service can keep jobs alive when you leave the app.
 5. If Android asks to ignore battery optimizations, allow it. Denying that does not block jobs; OEMs may still freeze seeding.
@@ -436,7 +447,7 @@ Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (commit must already be on `
 | macOS: cannot be opened / unidentified developer | `xattr -dr com.apple.quarantine` on `torrenter.app` or the Mach-O, then right-click **Open** or **Privacy & Security → Open Anyway** (see [macOS](#macos)) |
 | macOS: local network / incoming connections | Click **Allow** (see [macOS](#macos)); repeats after updates |
 | Linux: no permission popup | Normal — Linux usually allows outbound with no prompt (see [Linux](#linux)) |
-| Android: blocked install / Play Protect | Allow install from that source, then open the APK (see [Android](#android)); a Play Protect warning on a sideloaded app can be passed with **Install anyway**. "App not installed" over 3.9.0 or older: uninstall that version once (different signing key) |
+| Android: "Harmful app blocked" / Play Protect | Tap **Install anyway**, then **Install** (see [Android](#android)). Play Protect flags new sideloaded builds of this app; it is expected, like SmartScreen on Windows. Allow **Install unknown apps** for the browser or file manager first. "App not installed" over 3.9.0 or older: uninstall that version once (different signing key) |
 | Android: cannot write downloads | Grant **All files access**; dest is `Download/torrenter` |
 | Android: jobs die in the background | Allow notifications and ignore battery optimizations; a reboot does not autostart the app |
 | Android: share magnet, `U 0.00` | Keep the app open; allow UPnP on the LAN; CGNAT still blocks inbound peers |
