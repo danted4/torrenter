@@ -99,6 +99,14 @@ pub struct PersistedJob {
     /// the magnet, which would ask the DHT) and never through debrid.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private_torrent: bool,
+    /// Torrent jobs: the files to download (librqbit indices). Missing = all,
+    /// so older builds download everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_files: Option<Vec<usize>>,
+    /// Torrent jobs: bytes on disk per file at the last save, so a finished
+    /// job's files screen still shows its bars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_have: Vec<u64>,
     /// Fields written by newer builds, kept so a rewrite does not drop them.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -309,6 +317,11 @@ impl PersistedJob {
             .store(self.total, std::sync::atomic::Ordering::Relaxed);
         if !self.title.is_empty() {
             snapshot.set_title(&self.title);
+        }
+        {
+            let mut files = snapshot.files();
+            files.set_only(self.only_files.clone());
+            files.have = self.file_have.clone();
         }
         if self.status == "failed" {
             snapshot.set_error(self.error.clone().unwrap_or_else(|| "failed".into()));
@@ -531,6 +544,35 @@ mod tests {
             LoadJobs::Empty => {}
             other => panic!("expected empty, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_selection_round_trips_and_defaults_to_all() {
+        let record = PersistedJob {
+            id: 1,
+            kind: "magnet".into(),
+            source: "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056".into(),
+            only_files: Some(vec![0, 3]),
+            file_have: vec![5, 0, 0, 7],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["onlyFiles"], serde_json::json!([0, 3]));
+        assert_eq!(json["fileHave"], serde_json::json!([5, 0, 0, 7]));
+        let back: PersistedJob = serde_json::from_value(json).unwrap();
+        assert_eq!(back, record);
+        // Older records (and "all files") carry neither key.
+        let plain = PersistedJob {
+            only_files: None,
+            file_have: Vec::new(),
+            ..record
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("onlyFiles").is_none() && json.get("fileHave").is_none());
+        let snapshot = JobSnapshot::default();
+        back.apply_to(&snapshot);
+        assert_eq!(snapshot.files().only(), Some(&vec![0, 3]));
+        assert_eq!(snapshot.files().have, vec![5, 0, 0, 7]);
     }
 
     #[test]

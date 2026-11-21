@@ -301,6 +301,11 @@ int8_t uniffi_torrenter_fn_method_engine_has_account(void*_Nonnull ptr, RustBuff
 void uniffi_torrenter_fn_method_engine_hydrate(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_JOB_FILES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_JOB_FILES
+RustBuffer uniffi_torrenter_fn_method_engine_job_files(void*_Nonnull ptr, uint64_t id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_JOBS
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_JOBS
 RustBuffer uniffi_torrenter_fn_method_engine_jobs(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -369,6 +374,11 @@ void uniffi_torrenter_fn_method_engine_set_debrid_account(void*_Nonnull ptr, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
 void uniffi_torrenter_fn_method_engine_set_debrid_remove_after(void*_Nonnull ptr, int8_t enabled, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_JOB_FILES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_JOB_FILES
+uint64_t uniffi_torrenter_fn_method_engine_set_job_files(void*_Nonnull ptr, uint64_t id, RustBuffer ids, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_SEED
@@ -743,6 +753,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_hydrate(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_JOB_FILES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_JOB_FILES
+uint16_t uniffi_torrenter_checksum_method_engine_job_files(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_JOBS
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_JOBS
 uint16_t uniffi_torrenter_checksum_method_engine_jobs(void
@@ -824,6 +840,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_account(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_DEBRID_REMOVE_AFTER
 uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_JOB_FILES
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_JOB_FILES
+uint16_t uniffi_torrenter_checksum_method_engine_set_job_files(void
     
 );
 #endif

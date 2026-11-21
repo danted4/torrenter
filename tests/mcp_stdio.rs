@@ -145,6 +145,8 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
         "remove",
         "restart",
         "debrid_services",
+        "list_files",
+        "set_files",
     ] {
         assert!(names.contains(&name), "missing {name} in {names:?}");
     }
@@ -229,6 +231,15 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
     )
     .await;
     assert_eq!(unknown["result"]["isError"], true);
+
+    for (id, name, args) in [
+        (9, "list_files", json!({"id": 4242})),
+        (10, "set_files", json!({"id": 4242, "ids": [0]})),
+    ] {
+        let gone = call_tool(&mut stdin, &mut stdout, id, name, args).await;
+        assert_eq!(gone["result"]["isError"], true, "{gone}");
+        assert!(tool_text(&gone).contains("job gone"), "{gone}");
+    }
 
     drop(stdin);
     let _ = timeout(Duration::from_secs(5), child.wait()).await;

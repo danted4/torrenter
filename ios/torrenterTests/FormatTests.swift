@@ -70,6 +70,35 @@ final class FormatTests: XCTestCase {
         XCTAssertEqual(jobBadge(orphan, names: names), "HTTP · via TorBox")
     }
 
+    func testAPartialSelectionIsCountedOnTheRow() {
+        XCTAssertEqual(filesHint(total: 0, selected: 0), "")
+        XCTAssertEqual(filesHint(total: 1, selected: 1), "")
+        XCTAssertEqual(filesHint(total: 20, selected: 20), "")
+        XCTAssertEqual(filesHint(total: 20, selected: 4), "  4 of 20 files")
+        XCTAssertEqual(filesHint(total: 20, selected: 0), "  no files selected")
+        var magnet = job(kind: .magnet, status: "downloading")
+        magnet.filesTotal = 20
+        magnet.filesSelected = 4
+        XCTAssertTrue(jobStatsLine(magnet).hasSuffix("  4 of 20 files"))
+        XCTAssertFalse(jobStatsLine(job(kind: .http, status: "downloading")).contains("files"))
+    }
+
+    func testFileSearchChecksAndToggles() {
+        XCTAssertTrue(fileMatches(folder: "Season 1", name: "E05.mkv", query: "e05"))
+        XCTAssertTrue(fileMatches(folder: "Season 1", name: "E05.mkv", query: "season"))
+        XCTAssertTrue(fileMatches(folder: "", name: "readme.nfo", query: "  "))
+        XCTAssertFalse(fileMatches(folder: "Season 1", name: "E05.mkv", query: "E06"))
+        XCTAssertEqual(checkOf(selected: 0, total: 3), .off)
+        XCTAssertEqual(checkOf(selected: 2, total: 3), .some)
+        XCTAssertEqual(checkOf(selected: 3, total: 3), .on)
+        XCTAssertEqual(checkOf(selected: 0, total: 0), .off)
+        XCTAssertEqual(toggledFiles([3, 0], [1], on: true), [0, 1, 3])
+        XCTAssertEqual(toggledFiles([3, 0, 1], [0, 1], on: false), [3])
+        XCTAssertEqual(fileFraction(have: 0, size: 0), 1)
+        XCTAssertEqual(fileFraction(have: 5, size: 10), 0.5)
+        XCTAssertEqual(fileFraction(have: 20, size: 10), 1)
+    }
+
     func testWaitingPhasesShowAnIndeterminateBar() {
         XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "fetching metadata")))
         XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "connecting to peers")))

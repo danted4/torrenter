@@ -770,6 +770,10 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -805,6 +809,8 @@ fun uniffi_torrenter_checksum_method_engine_has_account(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_hydrate(
 ): Short
+fun uniffi_torrenter_checksum_method_engine_job_files(
+): Short
 fun uniffi_torrenter_checksum_method_engine_jobs(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_persist(
@@ -832,6 +838,8 @@ fun uniffi_torrenter_checksum_method_engine_set_connections(
 fun uniffi_torrenter_checksum_method_engine_set_debrid_account(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(
+): Short
+fun uniffi_torrenter_checksum_method_engine_set_job_files(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_seed(
 ): Short
@@ -910,6 +918,8 @@ fun uniffi_torrenter_fn_method_engine_has_account(`ptr`: Pointer,`id`: RustBuffe
 ): Byte
 fun uniffi_torrenter_fn_method_engine_hydrate(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+fun uniffi_torrenter_fn_method_engine_job_files(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_torrenter_fn_method_engine_jobs(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 fun uniffi_torrenter_fn_method_engine_persist(`ptr`: Pointer,`force`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -938,6 +948,8 @@ fun uniffi_torrenter_fn_method_engine_set_debrid_account(`ptr`: Pointer,`id`: Ru
 ): Unit
 fun uniffi_torrenter_fn_method_engine_set_debrid_remove_after(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+fun uniffi_torrenter_fn_method_engine_set_job_files(`ptr`: Pointer,`id`: Long,`ids`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Long
 fun uniffi_torrenter_fn_method_engine_set_seed(`ptr`: Pointer,`seed`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_stop(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1106,6 +1118,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_hydrate() != 18602.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_job_files() != 13786.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_jobs() != 38627.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1146,6 +1161,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_debrid_remove_after() != 8005.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_method_engine_set_job_files() != 49589.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_seed() != 25898.toShort()) {
@@ -1638,6 +1656,13 @@ public interface EngineInterface {
     
     fun `hydrate`()
     
+    /**
+     * A torrent job's files, grouped by folder (`None` for HTTP and debrid
+     * jobs and before a magnet's file list is known). Poll it only while the
+     * files screen is open.
+     */
+    fun `jobFiles`(`id`: kotlin.ULong): JobFilesView?
+    
     fun `jobs`(): List<JobView>
     
     fun `persist`(`force`: kotlin.Boolean)
@@ -1692,6 +1717,12 @@ public interface EngineInterface {
     fun `setDebridAccount`(`id`: kotlin.String, `service`: kotlin.String, `key`: kotlin.String?)
     
     fun `setDebridRemoveAfter`(`enabled`: kotlin.Boolean)
+    
+    /**
+     * Choose a torrent job's files; returns the job's id (a done job starts
+     * again under it).
+     */
+    fun `setJobFiles`(`id`: kotlin.ULong, `ids`: List<kotlin.UInt>): kotlin.ULong
     
     fun `setSeed`(`seed`: kotlin.Boolean)
     
@@ -1873,6 +1904,23 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 }
     }
     
+    
+
+    
+    /**
+     * A torrent job's files, grouped by folder (`None` for HTTP and debrid
+     * jobs and before a magnet's file list is known). Poll it only while the
+     * files screen is open.
+     */override fun `jobFiles`(`id`: kotlin.ULong): JobFilesView? {
+            return FfiConverterOptionalTypeJobFilesView.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_job_files(
+        it, FfiConverterULong.lower(`id`),_status)
+}
+    }
+    )
+    }
     
 
     override fun `jobs`(): List<JobView> {
@@ -2070,6 +2118,23 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     
     
 
+    
+    /**
+     * Choose a torrent job's files; returns the job's id (a done job starts
+     * again under it).
+     */
+    @Throws(EngineException::class)override fun `setJobFiles`(`id`: kotlin.ULong, `ids`: List<kotlin.UInt>): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithPointer {
+    uniffiRustCallWithError(EngineException) { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_job_files(
+        it, FfiConverterULong.lower(`id`),FfiConverterSequenceUInt.lower(`ids`),_status)
+}
+    }
+    )
+    }
+    
+
     override fun `setSeed`(`seed`: kotlin.Boolean)
         = 
     callWithPointer {
@@ -2187,6 +2252,123 @@ public object FfiConverterTypeAccountView: FfiConverterRustBuffer<AccountView> {
 
 
 
+/**
+ * Files under one parent folder (`folder` is empty for root files).
+ */
+data class FileGroupView (
+    var `folder`: kotlin.String, 
+    var `files`: List<FileRowView>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFileGroupView: FfiConverterRustBuffer<FileGroupView> {
+    override fun read(buf: ByteBuffer): FileGroupView {
+        return FileGroupView(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeFileRowView.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FileGroupView) = (
+            FfiConverterString.allocationSize(value.`folder`) +
+            FfiConverterSequenceTypeFileRowView.allocationSize(value.`files`)
+    )
+
+    override fun write(value: FileGroupView, buf: ByteBuffer) {
+            FfiConverterString.write(value.`folder`, buf)
+            FfiConverterSequenceTypeFileRowView.write(value.`files`, buf)
+    }
+}
+
+
+
+data class FileRowView (
+    /**
+     * The id `Engine::set_job_files` takes.
+     */
+    var `id`: kotlin.UInt, 
+    var `name`: kotlin.String, 
+    var `size`: kotlin.ULong, 
+    var `have`: kotlin.ULong, 
+    var `selected`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFileRowView: FfiConverterRustBuffer<FileRowView> {
+    override fun read(buf: ByteBuffer): FileRowView {
+        return FileRowView(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FileRowView) = (
+            FfiConverterUInt.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterULong.allocationSize(value.`size`) +
+            FfiConverterULong.allocationSize(value.`have`) +
+            FfiConverterBoolean.allocationSize(value.`selected`)
+    )
+
+    override fun write(value: FileRowView, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterULong.write(value.`size`, buf)
+            FfiConverterULong.write(value.`have`, buf)
+            FfiConverterBoolean.write(value.`selected`, buf)
+    }
+}
+
+
+
+/**
+ * A torrent job's files for the files screen (`Engine::job_files`).
+ */
+data class JobFilesView (
+    var `id`: kotlin.ULong, 
+    var `groups`: List<FileGroupView>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeJobFilesView: FfiConverterRustBuffer<JobFilesView> {
+    override fun read(buf: ByteBuffer): JobFilesView {
+        return JobFilesView(
+            FfiConverterULong.read(buf),
+            FfiConverterSequenceTypeFileGroupView.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: JobFilesView) = (
+            FfiConverterULong.allocationSize(value.`id`) +
+            FfiConverterSequenceTypeFileGroupView.allocationSize(value.`groups`)
+    )
+
+    override fun write(value: JobFilesView, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`id`, buf)
+            FfiConverterSequenceTypeFileGroupView.write(value.`groups`, buf)
+    }
+}
+
+
+
 data class JobView (
     var `id`: kotlin.ULong, 
     var `kind`: Kind, 
@@ -2223,7 +2405,13 @@ data class JobView (
     /**
      * Debrid route only: the account id the job runs through.
      */
-    var `account`: kotlin.String? = null
+    var `account`: kotlin.String? = null, 
+    /**
+     * Torrent jobs: real files in the torrent (0 while the list is unknown)
+     * and how many are selected. The files button shows from 2 files.
+     */
+    var `filesTotal`: kotlin.UInt = 0u, 
+    var `filesSelected`: kotlin.UInt = 0u
 ) {
     
     companion object
@@ -2259,6 +2447,8 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
         )
     }
 
@@ -2286,7 +2476,9 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterUShort.allocationSize(value.`remotePermille`) +
             FfiConverterUInt.allocationSize(value.`fileIndex`) +
             FfiConverterUInt.allocationSize(value.`fileCount`) +
-            FfiConverterOptionalString.allocationSize(value.`account`)
+            FfiConverterOptionalString.allocationSize(value.`account`) +
+            FfiConverterUInt.allocationSize(value.`filesTotal`) +
+            FfiConverterUInt.allocationSize(value.`filesSelected`)
     )
 
     override fun write(value: JobView, buf: ByteBuffer) {
@@ -2314,6 +2506,8 @@ public object FfiConverterTypeJobView: FfiConverterRustBuffer<JobView> {
             FfiConverterUInt.write(value.`fileIndex`, buf)
             FfiConverterUInt.write(value.`fileCount`, buf)
             FfiConverterOptionalString.write(value.`account`, buf)
+            FfiConverterUInt.write(value.`filesTotal`, buf)
+            FfiConverterUInt.write(value.`filesSelected`, buf)
     }
 }
 
@@ -2558,6 +2752,66 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeJobFilesView: FfiConverterRustBuffer<JobFilesView?> {
+    override fun read(buf: ByteBuffer): JobFilesView? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeJobFilesView.read(buf)
+    }
+
+    override fun allocationSize(value: JobFilesView?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeJobFilesView.allocationSize(value)
+        }
+    }
+
+    override fun write(value: JobFilesView?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeJobFilesView.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>> {
+    override fun read(buf: ByteBuffer): List<kotlin.UInt> {
+        val len = buf.getInt()
+        return List<kotlin.UInt>(len) {
+            FfiConverterUInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.UInt>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterUInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.UInt>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterUInt.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -2576,6 +2830,62 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFileGroupView: FfiConverterRustBuffer<List<FileGroupView>> {
+    override fun read(buf: ByteBuffer): List<FileGroupView> {
+        val len = buf.getInt()
+        return List<FileGroupView>(len) {
+            FfiConverterTypeFileGroupView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FileGroupView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFileGroupView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FileGroupView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFileGroupView.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeFileRowView: FfiConverterRustBuffer<List<FileRowView>> {
+    override fun read(buf: ByteBuffer): List<FileRowView> {
+        val len = buf.getInt()
+        return List<FileRowView>(len) {
+            FfiConverterTypeFileRowView.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FileRowView>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFileRowView.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FileRowView>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFileRowView.write(it, buf)
         }
     }
 }

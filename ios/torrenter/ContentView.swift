@@ -26,7 +26,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             header(colors)
             if settingsOpen {
+                PageBar(name: "settings", colors: colors) { settingsOpen = false }
                 SettingsView(themeId: $themeId, tab: $settingsTab)
+            } else if owner.filesOpen != nil {
+                FilesView(list: owner.fileList, owner: owner, colors: colors)
             } else {
                 main
             }
@@ -159,6 +162,7 @@ struct ContentView: View {
             // The title doubles as "home": back to the main screen.
             Button {
                 settingsOpen = false
+                owner.filesOpen = nil
             } label: {
                 HStack(spacing: 10) {
                     Image("Brand")
@@ -176,15 +180,18 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("main screen")
+            // The header never changes: the cog only opens settings; inner
+            // pages go back from their own page bar.
             Button {
-                settingsOpen.toggle()
+                settingsOpen = true
+                owner.filesOpen = nil
             } label: {
-                Image(systemName: settingsOpen ? "arrow.left" : "gearshape")
+                Image(systemName: "gearshape")
                     .font(.system(size: 20))
                     .foregroundColor(settingsOpen ? colors.fg : colors.dim)
                     .frame(width: 32, height: 32)
             }
-            .accessibilityLabel(settingsOpen ? "back" : "settings")
+            .accessibilityLabel("settings")
         }
     }
 
@@ -332,7 +339,8 @@ private struct JobsSection: View {
                             onClear: { owner.clear(job: job) },
                             onRestart: { owner.restart(job: job) },
                             onShare: { shareJob = job },
-                            onAsTorrent: { owner.asTorrent(job: job) }
+                            onAsTorrent: { owner.asTorrent(job: job) },
+                            onFiles: { owner.openFiles(job: job) }
                         )
                     }
                 }
@@ -356,6 +364,7 @@ private struct JobCard: View {
     let onRestart: () -> Void
     let onShare: () -> Void
     let onAsTorrent: () -> Void
+    let onFiles: () -> Void
 
     var body: some View {
         let fraction = jobBarFraction(job)
@@ -397,6 +406,10 @@ private struct JobCard: View {
                     Button("clear", action: onClear)
                         .buttonStyle(MonoButton(palette: palette))
                     Button("share", action: onShare)
+                        .buttonStyle(MonoButton(palette: palette))
+                }
+                if job.filesTotal >= 2 {
+                    Button("files", action: onFiles)
                         .buttonStyle(MonoButton(palette: palette))
                 }
             }
@@ -461,7 +474,7 @@ struct MonoButton: ButtonStyle {
     }
 }
 
-private func mix(_ a: Color, _ b: Color, _ towardB: Double) -> Color {
+func mix(_ a: Color, _ b: Color, _ towardB: Double) -> Color {
     let t = min(max(towardB, 0), 1)
     let aa = UIColor(a)
     let bb = UIColor(b)
