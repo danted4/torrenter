@@ -1816,17 +1816,26 @@ mod tests {
         assert!(snap.is_stopped());
     }
 
-    /// Up to 30 s: a loaded CI runner has taken over 10 s for a fake debrid
-    /// job's first poll (restart_keeps_the_remote_or_switches_to_peers, on
-    /// main and on #49).
     fn wait_for(mut done: impl FnMut() -> bool) {
-        for _ in 0..1200 {
+        for _ in 0..400 {
             if done() {
                 return;
             }
             thread::sleep(Duration::from_millis(25));
         }
         panic!("timed out waiting");
+    }
+
+    /// A magnet of its own per test (`tag` repeated as the hex info hash).
+    /// The folder lock is process-wide per info hash, and a job whose test
+    /// has ended keeps retrying its dropped fake server for ~45 s while it
+    /// holds that lock, so tests that share a hash stall each other (seen as
+    /// "timed out waiting" in restart_keeps_the_remote_or_switches_to_peers).
+    fn own_magnet(tag: u8) -> String {
+        format!(
+            "magnet:?xt=urn:btih:{}&dn=Album",
+            format!("{tag:02x}").repeat(20)
+        )
     }
 
     async fn torbox_session(
@@ -1852,12 +1861,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn debrid_job_completes_and_persists_ids_not_secrets() {
-        use crate::debrid::torbox::tests::{magnet, KEY};
+        use crate::debrid::torbox::tests::KEY;
         let dir = tempdir().unwrap();
         let (session, _server, _fake) = torbox_session(dir.path(), 0).await;
         session.set_connections(Some(8));
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa1), Some("torbox"))
             .unwrap();
         let job = session.job(id).unwrap();
         assert_eq!(job.kind, JobKind::Debrid);
@@ -1991,15 +2000,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn debrid_routes_share_duplicate_checks_and_need_a_key() {
-        use crate::debrid::torbox::tests::{magnet, HASH};
         let dir = tempdir().unwrap();
         let (session, _server, _fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa4), Some("torbox"))
             .unwrap();
         // Same torrent (base32 spelling) as a plain magnet: one job per torrent.
-        let b32 = "zhqvoy7xelzd5gfctxwn7lrudomnkmcw";
-        assert_eq!(crate::torrent::normalize_info_hash(b32), HASH);
+        let b32 = "usskjjfeusskjjfeusskjjfeusskjjfe";
+        assert_eq!(crate::torrent::normalize_info_hash(b32), "a4".repeat(20));
         let plain = format!("magnet:?xt=urn:btih:{b32}");
         assert_eq!(
             session.queue(JobKind::Magnet, &plain).unwrap_err(),
@@ -2022,11 +2030,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn restart_keeps_the_remote_or_switches_to_peers() {
-        use crate::debrid::torbox::tests::{magnet, KEY};
+        use crate::debrid::torbox::tests::KEY;
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa5), Some("torbox"))
             .unwrap();
         let session = tokio::task::spawn_blocking(move || {
             wait_for(|| {
@@ -2144,11 +2152,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn removal_never_borrows_another_accounts_key() {
-        use crate::debrid::torbox::tests::{magnet, KEY};
+        use crate::debrid::torbox::tests::KEY;
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa6), Some("torbox"))
             .unwrap();
         tokio::task::spawn_blocking(move || {
             wait_for(|| {
@@ -2193,11 +2201,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn removal_without_a_key_says_it_was_kept() {
-        use crate::debrid::torbox::tests::magnet;
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa7), Some("torbox"))
             .unwrap();
         tokio::task::spawn_blocking(move || {
             wait_for(|| {
@@ -2239,11 +2246,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn clearing_an_unfinished_job_can_delete_it_from_the_provider() {
-        use crate::debrid::torbox::tests::magnet;
         let dir = tempdir().unwrap();
         let (session, _server, fake) = torbox_session(dir.path(), 10_000).await;
         let id = session
-            .queue_with(JobKind::Magnet, &magnet(), Some("torbox"))
+            .queue_with(JobKind::Magnet, &own_magnet(0xa8), Some("torbox"))
             .unwrap();
         let session = tokio::task::spawn_blocking(move || {
             wait_for(|| {
