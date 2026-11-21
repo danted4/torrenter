@@ -99,19 +99,68 @@ fun jobStatsLine(
     if (job.kind == Kind.HTTP) {
         return "${job.status}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"
     }
+    val files = filesHint(job.filesTotal, job.filesSelected)
     val sharing = job.kind == Kind.MAGNET && job.seed
     val seeding = sharing && job.active && total > 0uL && downloaded >= total
     val upSpeed = if (job.upSpeed > 0.0) job.upSpeed else job.uploadBps.toDouble()
-    return if (sharing) {
-        if (seeding) {
-            "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)}  U ${formatSize(job.uploaded)} @ ${formatSpeed(upSpeed)}  ${formatSize(total)}"
+    val line =
+        if (sharing) {
+            if (seeding) {
+                "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)}  U ${formatSize(job.uploaded)} @ ${formatSpeed(upSpeed)}  ${formatSize(total)}"
+            } else {
+                "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  U ${formatSize(job.uploaded)} @ ${formatSpeed(upSpeed)}  ${formatSize(total)}  eta $eta"
+            }
         } else {
-            "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  U ${formatSize(job.uploaded)} @ ${formatSpeed(upSpeed)}  ${formatSize(total)}  eta $eta"
+            "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"
         }
-    } else {
-        "${job.status}  peers ${job.peers}  D ${formatSize(downloaded)} @ ${formatSpeed(job.speed)}  ${formatSize(total)}  eta $eta"
-    }
+    return line + files
 }
+
+/** Appended to a torrent job's stats line when only some files download. */
+fun filesHint(
+    total: UInt,
+    selected: UInt,
+): String =
+    when {
+        total < 2u || selected >= total -> ""
+        selected == 0u -> "  no files selected"
+        else -> "  $selected of $total files"
+    }
+
+/** A file row matches when its name or folder contains the query. */
+fun fileMatches(
+    folder: String,
+    name: String,
+    query: String,
+): Boolean {
+    val needle = query.trim().lowercase()
+    return needle.isEmpty() || name.lowercase().contains(needle) || folder.lowercase().contains(needle)
+}
+
+enum class Check { OFF, SOME, ON }
+
+fun checkOf(
+    selected: Int,
+    total: Int,
+): Check =
+    when {
+        total == 0 || selected == 0 -> Check.OFF
+        selected >= total -> Check.ON
+        else -> Check.SOME
+    }
+
+/** The selection after ticking (`on`) or unticking `ids`, sorted. */
+fun toggledFiles(
+    chosen: Set<UInt>,
+    ids: List<UInt>,
+    on: Boolean,
+): List<UInt> = (if (on) chosen + ids else chosen - ids.toSet()).sorted()
+
+/** A file's bar, 0–1 (an empty file counts as complete). */
+fun fileFraction(
+    have: ULong,
+    size: ULong,
+): Float = if (size == 0uL) 1f else (have.toDouble() / size.toDouble()).toFloat().coerceIn(0f, 1f)
 
 private fun plural(
     n: Long,

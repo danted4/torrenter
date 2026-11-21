@@ -92,6 +92,62 @@ pub struct JobView {
     /// Debrid route only: the account id the job runs through.
     #[uniffi(default = None)]
     pub account: Option<String>,
+    /// Torrent jobs: real files in the torrent (0 while the list is unknown)
+    /// and how many are selected. The files button shows from 2 files.
+    #[uniffi(default = 0)]
+    pub files_total: u32,
+    #[uniffi(default = 0)]
+    pub files_selected: u32,
+}
+
+/// A torrent job's files for the files screen (`Engine::job_files`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct JobFilesView {
+    pub id: u64,
+    pub groups: Vec<FileGroupView>,
+}
+
+/// Files under one parent folder (`folder` is empty for root files).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FileGroupView {
+    pub folder: String,
+    pub files: Vec<FileRowView>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FileRowView {
+    /// The id `Engine::set_job_files` takes.
+    pub id: u32,
+    pub name: String,
+    pub size: u64,
+    pub have: u64,
+    pub selected: bool,
+}
+
+impl From<session::JobFiles> for JobFilesView {
+    fn from(files: session::JobFiles) -> Self {
+        Self {
+            id: files.id,
+            groups: files
+                .groups
+                .into_iter()
+                .map(|group| FileGroupView {
+                    folder: group.folder,
+                    files: group
+                        .files
+                        .into_iter()
+                        .map(|file| FileRowView {
+                            id: file.id,
+                            name: file.name,
+                            size: file.size,
+                            have: file.have,
+                            selected: file.selected,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A debrid service this build offers.
@@ -155,7 +211,13 @@ impl JobView {
     fn from_job(job: &Job) -> Self {
         let error = job.snapshot.error();
         let debrid = job.debrid.as_ref().map(|d| d.view());
+        let (files_total, files_selected) = match job.kind {
+            JobKind::Magnet => job.snapshot.file_counts(),
+            _ => (0, 0),
+        };
         Self {
+            files_total,
+            files_selected,
             id: job.id,
             kind: job.kind.into(),
             source: job.source.clone(),
@@ -362,6 +424,19 @@ impl Engine {
         self.session.toggle_pause(id);
     }
 
+    /// A torrent job's files, grouped by folder (`None` for HTTP and debrid
+    /// jobs and before a magnet's file list is known). Poll it only while the
+    /// files screen is open.
+    pub fn job_files(&self, id: u64) -> Option<JobFilesView> {
+        self.session.job_files(id).map(Into::into)
+    }
+
+    /// Choose a torrent job's files; returns the job's id (a done job starts
+    /// again under it).
+    pub fn set_job_files(&self, id: u64, ids: Vec<u32>) -> Result<u64, EngineError> {
+        self.session.set_files(id, &ids).map_err(Into::into)
+    }
+
     pub fn stop(&self, id: u64) {
         self.session.stop(id);
     }
@@ -428,6 +503,7 @@ mod tests {
             part_count: 4,
             debrid: None,
             private_torrent: false,
+            extra: Default::default(),
         }
     }
 
@@ -445,6 +521,7 @@ mod tests {
         assert!(view.error.is_none());
         assert!(view.service.is_none());
         assert_eq!(view.file_count, 0);
+        assert_eq!((view.files_total, view.files_selected), (0, 0));
     }
 
     #[test]

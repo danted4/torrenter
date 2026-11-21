@@ -99,6 +99,36 @@ class FormatTest {
         )
     }
 
+    @Test
+    fun aPartialSelectionIsCountedOnTheRow() {
+        assertEquals("", filesHint(0u, 0u))
+        assertEquals("", filesHint(1u, 1u))
+        assertEquals("", filesHint(20u, 20u))
+        assertEquals("  4 of 20 files", filesHint(20u, 4u))
+        assertEquals("  no files selected", filesHint(20u, 0u))
+        val job = sample(Kind.MAGNET, seed = false, downloaded = 0uL, total = 0uL).copy(filesTotal = 20u, filesSelected = 4u)
+        assertTrue(jobStatsLine(job).endsWith("  4 of 20 files"))
+        // HTTP jobs never count files.
+        assertTrue(!jobStatsLine(sample(Kind.HTTP, seed = false, downloaded = 0uL, total = 0uL)).contains("files"))
+    }
+
+    @Test
+    fun fileSearchChecksAndToggles() {
+        assertTrue(fileMatches("Season 1", "E05.mkv", "e05"))
+        assertTrue(fileMatches("Season 1", "E05.mkv", "season"))
+        assertTrue(fileMatches("", "readme.nfo", "  "))
+        assertTrue(!fileMatches("Season 1", "E05.mkv", "E06"))
+        assertEquals(Check.OFF, checkOf(0, 3))
+        assertEquals(Check.SOME, checkOf(2, 3))
+        assertEquals(Check.ON, checkOf(3, 3))
+        assertEquals(Check.OFF, checkOf(0, 0))
+        assertEquals(listOf(0u, 1u, 3u), toggledFiles(setOf(3u, 0u), listOf(1u), true))
+        assertEquals(listOf(3u), toggledFiles(setOf(3u, 0u, 1u), listOf(0u, 1u), false))
+        assertEquals(1f, fileFraction(0uL, 0uL))
+        assertEquals(0.5f, fileFraction(5uL, 10uL))
+        assertEquals(1f, fileFraction(20uL, 10uL))
+    }
+
     private fun sample(
         kind: Kind,
         seed: Boolean,

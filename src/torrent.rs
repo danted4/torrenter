@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,10 @@ use crate::progress::{
     CONNECTING_TO_PEERS, FETCHING_METADATA,
 };
 use crate::validate::is_valid_magnet_url;
+
+/// Called once with a magnet's rebuilt `.torrent` bytes when its metadata
+/// arrives, so the session can keep a copy.
+pub type OnMetadata = Box<dyn FnOnce(Vec<u8>) + Send>;
 
 /// Locks on the normalised hash so base32 and hex spellings of one torrent share it.
 pub(crate) fn magnet_folder_lock(hash: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -272,19 +277,22 @@ pub async fn start_download(
     start_download_with(magnet_uri, torrent, ProgressHandle::cli(1), seed, dest).await
 }
 
+/// `on_metadata`: see [`OnMetadata`] (only called when `torrent` is `None`).
 pub async fn start_download_reported(
     magnet_uri: &str,
     torrent: Option<Vec<u8>>,
     snapshot: Arc<JobSnapshot>,
     seed: bool,
     dest: PathBuf,
+    on_metadata: Option<OnMetadata>,
 ) -> Result<()> {
-    start_download_with(
+    start_download_inner(
         magnet_uri,
         torrent,
         ProgressHandle::gui(1, snapshot),
         seed,
         dest,
+        on_metadata,
     )
     .await
 }
@@ -295,6 +303,17 @@ pub async fn start_download_with(
     progress: ProgressHandle,
     seed: bool,
     dest: PathBuf,
+) -> Result<()> {
+    start_download_inner(magnet_uri, torrent, progress, seed, dest, None).await
+}
+
+async fn start_download_inner(
+    magnet_uri: &str,
+    torrent: Option<Vec<u8>>,
+    progress: ProgressHandle,
+    seed: bool,
+    dest: PathBuf,
+    on_metadata: Option<OnMetadata>,
 ) -> Result<()> {
     if !is_valid_magnet_url(magnet_uri) {
         bail!("Invalid magnet URL!");
@@ -333,7 +352,17 @@ pub async fn start_download_with(
     .await
     .context("failed to start torrent session")?;
 
-    let result = run_torrent(&session, magnet_uri, torrent, progress, seed, sub_folder).await;
+    let on_metadata = on_metadata.filter(|_| torrent.is_none());
+    let result = run_torrent(
+        &session,
+        magnet_uri,
+        torrent,
+        progress,
+        seed,
+        sub_folder,
+        on_metadata,
+    )
+    .await;
     session.stop().await;
     result
 }
@@ -394,7 +423,16 @@ async fn run_torrent(
     progress: ProgressHandle,
     seed: bool,
     sub_folder: String,
+    mut on_metadata: Option<OnMetadata>,
 ) -> Result<()> {
+    // The selection to start with; later changes arrive through the snapshot.
+    let (mut applied, only_files) = match progress.snapshot() {
+        Some(snapshot) => {
+            let files = snapshot.files();
+            (files.generation, files.only.clone())
+        }
+        None => (0, None),
+    };
     let add = match torrent {
         Some(bytes) => AddTorrent::from_bytes(bytes),
         None => AddTorrent::from_url(magnet_uri),
@@ -405,6 +443,7 @@ async fn run_torrent(
             Some(AddTorrentOptions {
                 overwrite: true,
                 sub_folder: Some(sub_folder),
+                only_files,
                 ..Default::default()
             }),
         )
@@ -444,8 +483,6 @@ async fn run_torrent(
         engine_paused = true;
     }
 
-    let completed = handle.wait_until_completed();
-    tokio::pin!(completed);
     let controls = async {
         if progress.announce() {
             if let Some(snapshot) = progress.snapshot() {
@@ -459,40 +496,15 @@ async fn run_torrent(
     };
     tokio::pin!(controls);
 
+    // Completion is read from the stats every tick (librqbit's completion
+    // future only wakes on a finished piece, so unticking the last missing
+    // file would never wake it).
     let mut download_done = false;
+    let mut seed_announced = false;
     // "2" ends the controls future; never poll it again after that.
     let mut controls_done = false;
     loop {
         tokio::select! {
-            result = &mut completed, if !download_done => {
-                if let Err(error) = result {
-                    progress.finish_and_clear();
-                    return Err(error).context("torrent failed");
-                }
-                download_done = true;
-                let stats = handle.stats();
-                let total = stats.total_bytes.max(1);
-                progress.set_length(total);
-                progress.set_position(total);
-                apply_live_stats(&progress, &stats, session);
-                if progress.is_paused() {
-                    continue;
-                }
-                if !seed {
-                    progress.finish();
-                    if progress.announce() {
-                        println!("\nTorrent download finished!");
-                    }
-                    return Ok(());
-                }
-                progress.set_status("seeding");
-                progress.use_seed_style();
-                let (peers, uploaded, up_speed) = live_peers_and_upload(&stats, session);
-                progress.set_seed_message(peers, uploaded, up_speed);
-                if progress.announce() {
-                    println!("\nTorrent download finished — seeding until you press 2.");
-                }
-            }
             _ = &mut controls, if !controls_done => {
                 controls_done = true;
                 if let Some(snapshot) = progress.snapshot() {
@@ -532,16 +544,76 @@ async fn run_torrent(
                     bail!("{error}");
                 }
                 apply_live_stats(&progress, &stats, session);
-                if !want_pause && download_done && !seed {
-                    progress.finish();
-                    if progress.announce() {
-                        println!("\nTorrent download finished!");
+                let initializing = matches!(stats.state, TorrentStatsState::Initializing { .. });
+                let settled = matches!(stats.state, TorrentStatsState::Live | TorrentStatsState::Paused);
+                if let Some(snapshot) = progress.snapshot() {
+                    sync_files(snapshot, &handle, &stats, &mut on_metadata);
+                    let wanted = {
+                        let files = snapshot.files();
+                        (files.generation != applied).then(|| (files.generation, files.only.clone()))
+                    };
+                    if let Some((generation, only)) = wanted.filter(|_| !initializing) {
+                        let set: HashSet<usize> = match only {
+                            Some(only) => only.into_iter().collect(),
+                            None => (0..handle.with_metadata(|m| m.file_infos.len()).unwrap_or(0)).collect(),
+                        };
+                        // Refused while librqbit is still checking: tried again next tick.
+                        if session.update_only_files(&handle, &set).await.is_ok() {
+                            applied = generation;
+                        }
                     }
-                    return Ok(());
                 }
-                if !want_pause && (!stats.finished || seed) {
-                    let total = stats.total_bytes.max(1);
-                    let position = if stats.finished {
+                let finished_now = selection_finished(stats.finished, settled, applied, generation_of(&progress));
+                let total = stats.total_bytes.max(1);
+                if finished_now && !want_pause && !seed {
+                    // Finish under the files lock: a tick that lands now
+                    // either is seen here or finds the job done and reopens it.
+                    let finished = match progress.snapshot() {
+                        Some(snapshot) => {
+                            let files = snapshot.files();
+                            if files.generation == applied {
+                                progress.set_length(total);
+                                progress.set_position(total);
+                                progress.finish();
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        None => {
+                            progress.set_length(total);
+                            progress.set_position(total);
+                            progress.finish();
+                            true
+                        }
+                    };
+                    if finished {
+                        if progress.announce() {
+                            println!("\nTorrent download finished!");
+                        }
+                        return Ok(());
+                    }
+                    continue;
+                }
+                if seed && finished_now != download_done && !want_pause {
+                    download_done = finished_now;
+                    if download_done {
+                        progress.set_length(total);
+                        progress.set_position(total);
+                        progress.set_status("seeding");
+                        progress.use_seed_style();
+                        if progress.announce() && !seed_announced {
+                            seed_announced = true;
+                            println!("\nTorrent download finished — seeding until you press 2.");
+                        }
+                    } else {
+                        // A file was ticked on a seeding torrent: download again.
+                        progress.use_download_style();
+                        progress.set_status("downloading");
+                    }
+                }
+                if !want_pause {
+                    let position = if download_done {
                         total
                     } else {
                         stats.progress_bytes.min(total)
@@ -549,7 +621,6 @@ async fn run_torrent(
                     progress.set_length(total);
                     progress.set_position(position);
                     let (peers, uploaded, up_speed) = live_peers_and_upload(&stats, session);
-                    let verifying = matches!(stats.state, TorrentStatsState::Initializing { .. });
                     // "connecting to peers" until the first bytes arrive (or
                     // data already on disk); then "downloading" for good, so
                     // a slow stretch does not flip back.
@@ -561,12 +632,12 @@ async fn run_torrent(
                     if stats.progress_bytes > 0 || down_speed > 0 {
                         got_data = true;
                     }
-                    if download_done && seed {
+                    if download_done {
                         progress.set_status("seeding");
                         progress.set_seed_message(peers, uploaded, up_speed);
-                    } else if verifying {
+                    } else if initializing {
                         progress.set_status("verifying");
-                    } else if !download_done {
+                    } else {
                         progress.set_status(if got_data {
                             "downloading"
                         } else {
@@ -580,9 +651,61 @@ async fn run_torrent(
     }
 }
 
+fn generation_of(progress: &ProgressHandle) -> u64 {
+    progress
+        .snapshot()
+        .map(|snapshot| snapshot.files().generation)
+        .unwrap_or(0)
+}
+
+/// The torrent is done with the selection the user last asked for: every
+/// selected byte is there, librqbit is past its check, and no newer
+/// selection is waiting to be applied.
+fn selection_finished(finished: bool, settled: bool, applied: u64, generation: u64) -> bool {
+    finished && settled && applied == generation
+}
+
+/// Publish the file list once the metadata is known (and hand a magnet's
+/// rebuilt `.torrent` to `on_metadata` once), and keep per-file bytes current.
+fn sync_files(
+    snapshot: &JobSnapshot,
+    handle: &librqbit::ManagedTorrent,
+    stats: &librqbit::TorrentStats,
+    on_metadata: &mut Option<OnMetadata>,
+) {
+    let needs_list = snapshot.files().list.is_none();
+    if needs_list || on_metadata.is_some() {
+        if let Ok(bytes) = handle.with_metadata(|m| m.torrent_bytes.to_vec()) {
+            if needs_list {
+                if let Ok(list) = crate::torrent_file::files(&bytes) {
+                    snapshot.files().list = Some(Arc::new(list));
+                }
+            }
+            if let Some(callback) = on_metadata.take() {
+                callback(bytes);
+            }
+        }
+    }
+    if !stats.file_progress.is_empty() {
+        snapshot.files().have = stats.file_progress.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_finishes_only_with_the_latest_selection_applied() {
+        // Every selected byte there, past the check, nothing newer waiting.
+        assert!(selection_finished(true, true, 3, 3));
+        // Still checking the data on disk.
+        assert!(!selection_finished(true, false, 3, 3));
+        // A tick arrived that the engine has not applied yet.
+        assert!(!selection_finished(true, true, 2, 3));
+        // Bytes still missing.
+        assert!(!selection_finished(false, true, 3, 3));
+    }
 
     const HEX: &str = "c9e15763f722f23e98a29decdfae341b98d53056";
     const B32: &str = "zhqvoy7xelzd5gfctxwn7lrudomnkmcw";

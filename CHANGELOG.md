@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-11-21
+
+### Added
+
+- Choose which files of a torrent download, while it runs (desktop GUI, Android, iOS, MCP). A **files** button on a torrent job with two or more files opens a files screen in place of the job list: files grouped by folder with a checkbox, size and progress bar each, a checkbox per folder, **all**, and search. A tick or untick applies at once; a tick on a done job starts it again in the same row; stopped and failed jobs keep the choice for restart. The row shows `n of m files` while some are unticked. Files on disk are never deleted. MCP gets `list_files` and `set_files`. Debrid jobs and the CLI download the whole torrent as before.
+- A magnet keeps a copy of its `.torrent` once the metadata arrives (as `.torrent` jobs already did), so its file list survives a relaunch and a restart needs no metadata wait. A magnet whose metadata turns out private is then treated like a private `.torrent`.
+
+### Fixed
+
+- Fields written by a newer build on a known job in `jobs.json` are kept when this build saves the list (they were dropped).
+
 ## [3.9.4] - 2026-11-20
 
 ### Fixed
