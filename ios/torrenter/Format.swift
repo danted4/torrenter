@@ -96,13 +96,50 @@ func jobStatsLine(_ job: JobView, names: [String: String] = [:]) -> String {
     let sharing = job.kind == .magnet && job.seed
     let seeding = sharing && job.active && total > 0 && downloaded >= total
     let upSpeed = job.upSpeed > 0.0 ? job.upSpeed : Double(job.uploadBps)
+    let files = filesHint(total: job.filesTotal, selected: job.filesSelected)
     if sharing {
         if seeding {
-            return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded))  U \(formatSize(job.uploaded)) @ \(formatSpeed(upSpeed))  \(formatSize(total))"
+            return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded))  U \(formatSize(job.uploaded)) @ \(formatSpeed(upSpeed))  \(formatSize(total))\(files)"
         }
-        return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  U \(formatSize(job.uploaded)) @ \(formatSpeed(upSpeed))  \(formatSize(total))  eta \(eta)"
+        return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  U \(formatSize(job.uploaded)) @ \(formatSpeed(upSpeed))  \(formatSize(total))  eta \(eta)\(files)"
     }
-    return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)"
+    return "\(job.status)  peers \(job.peers)  D \(formatSize(downloaded)) @ \(formatSpeed(job.speed))  \(formatSize(total))  eta \(eta)\(files)"
+}
+
+/// Appended to a torrent job's stats line when only some files download.
+func filesHint(total: UInt32, selected: UInt32) -> String {
+    if total < 2 || selected >= total {
+        return ""
+    }
+    return selected == 0 ? "  no files selected" : "  \(selected) of \(total) files"
+}
+
+/// A file row matches when its name or folder contains the query.
+func fileMatches(folder: String, name: String, query: String) -> Bool {
+    let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+    return needle.isEmpty || name.lowercased().contains(needle) || folder.lowercased().contains(needle)
+}
+
+enum Check {
+    case off, some, on
+}
+
+func checkOf(selected: Int, total: Int) -> Check {
+    if total == 0 || selected == 0 {
+        return .off
+    }
+    return selected >= total ? .on : .some
+}
+
+/// The selection after ticking (`on`) or unticking `ids`, sorted.
+func toggledFiles(_ chosen: Set<UInt32>, _ ids: [UInt32], on: Bool) -> [UInt32] {
+    let next = on ? chosen.union(ids) : chosen.subtracting(ids)
+    return next.sorted()
+}
+
+/// A file's bar, 0–1 (an empty file counts as complete).
+func fileFraction(have: UInt64, size: UInt64) -> Double {
+    size == 0 ? 1 : min(max(Double(have) / Double(size), 0), 1)
 }
 
 func jobBarFraction(_ job: JobView) -> Float? {

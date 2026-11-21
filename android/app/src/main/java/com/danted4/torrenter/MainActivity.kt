@@ -68,6 +68,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.torrenter.Engine
+import uniffi.torrenter.JobFilesView
 import uniffi.torrenter.JobView
 import uniffi.torrenter.Kind
 import uniffi.torrenter.banner
@@ -133,6 +134,10 @@ private fun AppScreen(
     var jobs by remember { mutableStateOf(listOf<JobView>()) }
     var engine by remember { mutableStateOf<Engine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
+    // A job's files screen in place of the list (its id), and its rows.
+    var filesOpen by remember { mutableStateOf<ULong?>(null) }
+    var jobFiles by remember { mutableStateOf<JobFilesView?>(null) }
+    var fileQuery by remember { mutableStateOf("") }
     var debridRoute by remember { mutableStateOf(Prefs.debridRoute(prefs)) }
     var connections by remember { mutableStateOf(Prefs.connections(prefs)) }
     var removeAfter by remember { mutableStateOf(Prefs.removeAfter(prefs)) }
@@ -158,6 +163,12 @@ private fun AppScreen(
         val live = engine ?: return
         app.takeNotices().lastOrNull()?.let { notice = it }
         jobs = live.jobs()
+        filesOpen?.let { id ->
+            jobFiles = live.jobFiles(id)
+            if (jobFiles == null) {
+                filesOpen = null
+            }
+        }
         if (live.anyActive()) {
             DownloadService.startFromUi(activity)
         }
@@ -293,6 +304,7 @@ private fun AppScreen(
     }
 
     BackHandler(enabled = settingsOpen) { settingsOpen = false }
+    BackHandler(enabled = filesOpen != null) { filesOpen = null }
 
     LaunchedEffect(allowed) {
         if (!allowed) {
@@ -338,7 +350,11 @@ private fun AppScreen(
         ) {
             // The title doubles as "home": back to the main screen.
             Row(
-                modifier = Modifier.weight(1f).clickable { settingsOpen = false },
+                modifier =
+                    Modifier.weight(1f).clickable {
+                        settingsOpen = false
+                        filesOpen = null
+                    },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -355,10 +371,14 @@ private fun AppScreen(
                 )
             }
             // A back arrow while settings fill the screen.
+            // The header never changes: the cog only opens settings; inner
+            // pages go back from their own page bar.
             CogGlyph(
                 color = if (settingsOpen) palette.fg else palette.dim,
-                open = settingsOpen,
-                onClick = { settingsOpen = !settingsOpen },
+                onClick = {
+                    settingsOpen = true
+                    filesOpen = null
+                },
             )
         }
         if (!allowed) {
@@ -375,6 +395,7 @@ private fun AppScreen(
         }
         notice?.let { Text(it, color = palette.fail, fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
         if (settingsOpen) {
+            PageBar(name = "settings", palette = palette, onBack = { settingsOpen = false })
             SettingsScreen(
                 palette = palette,
                 themeId = themeId,
@@ -399,6 +420,27 @@ private fun AppScreen(
                 onAddAccount = { service, name, key -> addAccount(service, name, key) },
                 onTestAccount = { testAccount(it) },
                 onRemoveAccount = { removeAccount(it) },
+            )
+            return@Column
+        }
+        val shownFiles = filesOpen?.let { id -> jobFiles?.takeIf { it.id == id } }
+        if (filesOpen != null && shownFiles != null) {
+            FilesScreen(
+                title = jobs.firstOrNull { it.id == shownFiles.id }?.title ?: "",
+                files = shownFiles,
+                palette = palette,
+                query = fileQuery,
+                onQuery = { fileQuery = it },
+                onSet = { ids ->
+                    try {
+                        engine?.setJobFiles(shownFiles.id, ids)?.let { filesOpen = it }
+                    } catch (error: Exception) {
+                        notice = error.message
+                    }
+                    refresh()
+                },
+                onBack = { filesOpen = null },
+                modifier = Modifier.weight(1f),
             )
             return@Column
         }
@@ -526,6 +568,13 @@ private fun AppScreen(
                                 asTorrent(job, false)
                             }
                         },
+                        onFiles = {
+                            fileQuery = ""
+                            jobFiles = engine?.jobFiles(job.id)
+                            if (jobFiles != null) {
+                                filesOpen = job.id
+                            }
+                        },
                     )
                 }
             }
@@ -602,6 +651,7 @@ private fun JobCard(
     onStop: () -> Unit,
     onClear: () -> Unit,
     onAsTorrent: () -> Unit,
+    onFiles: () -> Unit,
 ) {
     val fraction = jobBarFraction(job)
     val accent = if (job.active) mix(palette.fg, palette.dim, 0.65f) else palette.fg
@@ -665,6 +715,11 @@ private fun JobCard(
             } else {
                 Button(onClick = onClear, colors = buttons, shape = RoundedCornerShape(2.dp)) {
                     Text("clear", fontFamily = FontFamily.Monospace)
+                }
+            }
+            if (job.filesTotal >= 2u) {
+                Button(onClick = onFiles, colors = buttons, shape = RoundedCornerShape(2.dp)) {
+                    Text("files", fontFamily = FontFamily.Monospace)
                 }
             }
         }
@@ -809,7 +864,7 @@ private fun jobBarFraction(job: JobView): Float? {
     return (job.downloaded.toDouble() / job.total.toDouble()).toFloat().coerceIn(0f, 1f)
 }
 
-private fun mix(
+internal fun mix(
     a: androidx.compose.ui.graphics.Color,
     b: androidx.compose.ui.graphics.Color,
     towardB: Float,

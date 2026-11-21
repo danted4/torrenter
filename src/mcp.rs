@@ -123,6 +123,37 @@ struct QueueOut {
     id: u64,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SetFilesArg {
+    id: u64,
+    /// File ids from `list_files` to download; the rest stop. All ids = the
+    /// whole torrent; an empty list stops every file.
+    ids: Vec<u32>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FilesOut {
+    id: u64,
+    groups: Vec<FileGroupOut>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FileGroupOut {
+    /// Parent folder inside the torrent; empty for files at its root.
+    folder: String,
+    files: Vec<FileOut>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FileOut {
+    id: u32,
+    name: String,
+    size: u64,
+    /// Bytes on disk.
+    have: u64,
+    selected: bool,
+}
+
 fn mutex_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
@@ -371,6 +402,55 @@ impl Mcp {
         }
         self.session.remove(id);
         Ok("ok".into())
+    }
+
+    #[tool(
+        description = "List a torrent job's files, grouped by folder, with sizes, bytes on disk and whether each is selected (not for HTTP or debrid jobs, or a magnet still fetching its metadata)"
+    )]
+    fn list_files(
+        &self,
+        Parameters(IdArg { id }): Parameters<IdArg>,
+    ) -> Result<Json<FilesOut>, String> {
+        if !self.session.has_job(id) {
+            return Err("job gone".into());
+        }
+        let files = self.session.job_files(id).ok_or_else(|| {
+            "no file list for this job (HTTP, debrid, or the magnet's metadata has not arrived)"
+                .to_string()
+        })?;
+        Ok(Json(FilesOut {
+            id: files.id,
+            groups: files
+                .groups
+                .into_iter()
+                .map(|group| FileGroupOut {
+                    folder: group.folder,
+                    files: group
+                        .files
+                        .into_iter()
+                        .map(|file| FileOut {
+                            id: file.id,
+                            name: file.name,
+                            size: file.size,
+                            have: file.have,
+                            selected: file.selected,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }))
+    }
+
+    #[tool(
+        description = "Choose which files of a torrent job download (ids from list_files). A running job applies it at once; a finished job starts again for newly chosen files; files on disk are never deleted. Returns the job id"
+    )]
+    fn set_files(
+        &self,
+        Parameters(SetFilesArg { id, ids }): Parameters<SetFilesArg>,
+    ) -> Result<Json<QueueOut>, String> {
+        self.session
+            .set_files(id, &ids)
+            .map(|id| Json(QueueOut { id }))
     }
 
     #[tool(

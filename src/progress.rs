@@ -129,6 +129,77 @@ const WAITING_PHASES: [&str; 4] = [
     "fetching",
 ];
 
+/// File selection for a torrent job, shared by the fronts (which set the
+/// selection) and the engine (which applies it and fills the list and `have`).
+/// The selection is kept sorted and the counts cached, so per-frame and
+/// per-poll reads stay cheap on torrents with many files.
+#[derive(Debug, Default, Clone)]
+pub struct FileState {
+    /// Files to download (sorted librqbit indices); `None` = all.
+    only: Option<Vec<usize>>,
+    /// Bumped on every change, so the engine knows what it has applied.
+    pub generation: u64,
+    /// Bytes on disk per file (live, or the last saved values).
+    pub have: Vec<u64>,
+    /// The torrent's files, once the metadata is known.
+    list: Option<Arc<Vec<crate::torrent_file::FileEntry>>>,
+    /// (real files, selected real files), kept in step with `only` and `list`.
+    counts: (u32, u32),
+}
+
+impl FileState {
+    pub fn only(&self) -> Option<&Vec<usize>> {
+        self.only.as_ref()
+    }
+
+    pub fn list(&self) -> Option<&Arc<Vec<crate::torrent_file::FileEntry>>> {
+        self.list.as_ref()
+    }
+
+    /// Set the selection (sorted and deduplicated here). Does not bump
+    /// `generation`: callers that want the engine to apply it do that.
+    pub fn set_only(&mut self, only: Option<Vec<usize>>) {
+        self.only = only.map(|mut only| {
+            only.sort_unstable();
+            only.dedup();
+            only
+        });
+        self.recount();
+    }
+
+    pub fn set_list(&mut self, list: Arc<Vec<crate::torrent_file::FileEntry>>) {
+        self.list = Some(list);
+        self.recount();
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.only
+            .as_ref()
+            .is_none_or(|only| only.binary_search(&index).is_ok())
+    }
+
+    /// (real files, selected real files); (0, 0) while the list is unknown.
+    pub fn counts(&self) -> (u32, u32) {
+        self.counts
+    }
+
+    fn recount(&mut self) {
+        let Some(list) = &self.list else {
+            self.counts = (0, 0);
+            return;
+        };
+        let mut real = 0u32;
+        let mut selected = 0u32;
+        for entry in list.iter().filter(|entry| !entry.padding) {
+            real += 1;
+            if self.is_selected(entry.index) {
+                selected += 1;
+            }
+        }
+        self.counts = (real, selected);
+    }
+}
+
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub downloaded: AtomicU64,
@@ -148,6 +219,8 @@ pub struct JobSnapshot {
     before_pause: Mutex<Option<String>>,
     title: Mutex<String>,
     error: Mutex<Option<String>>,
+    /// Lock order: `files` before `status`.
+    files: Mutex<FileState>,
 }
 
 impl Default for JobSnapshot {
@@ -166,6 +239,7 @@ impl Default for JobSnapshot {
             before_pause: Mutex::new(None),
             title: Mutex::new(String::new()),
             error: Mutex::new(None),
+            files: Mutex::new(FileState::default()),
         }
     }
 }
@@ -276,6 +350,15 @@ impl JobSnapshot {
 
     pub fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// The job's file selection (torrent jobs; empty for HTTP and debrid).
+    pub fn files(&self) -> MutexGuard<'_, FileState> {
+        mutex_lock(&self.files)
+    }
+
+    pub fn file_counts(&self) -> (u32, u32) {
+        self.files().counts()
     }
 }
 
@@ -523,6 +606,11 @@ impl ProgressHandle {
 
     pub fn use_seed_style(&self) {
         self.bar.set_style(seed_progress_style());
+    }
+
+    /// Back to the download bar (a seeding torrent got a new file ticked).
+    pub fn use_download_style(&self) {
+        self.bar.set_style(progress_style());
     }
 
     pub fn set_seed_message(&self, peers: u64, uploaded: u64, up_speed: f64) {

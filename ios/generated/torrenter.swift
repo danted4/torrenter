@@ -585,6 +585,13 @@ public protocol EngineProtocol: AnyObject, Sendable {
     
     func hydrate() throws 
     
+    /**
+     * A torrent job's files, grouped by folder (`None` for HTTP and debrid
+     * jobs and before a magnet's file list is known). Poll it only while the
+     * files screen is open.
+     */
+    func jobFiles(id: UInt64)  -> JobFilesView?
+    
     func jobs()  -> [JobView]
     
     func persist(force: Bool) 
@@ -639,6 +646,12 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func setDebridAccount(id: String, service: String, key: String?) throws 
     
     func setDebridRemoveAfter(enabled: Bool) 
+    
+    /**
+     * Choose a torrent job's files; returns the job's id (a done job starts
+     * again under it).
+     */
+    func setJobFiles(id: UInt64, ids: [UInt32]) throws  -> UInt64
     
     func setSeed(seed: Bool) 
     
@@ -765,6 +778,19 @@ open func hydrate()throws   {try rustCallWithError(FfiConverterTypeEngineError_l
     uniffi_torrenter_fn_method_engine_hydrate(self.uniffiClonePointer(),$0
     )
 }
+}
+    
+    /**
+     * A torrent job's files, grouped by folder (`None` for HTTP and debrid
+     * jobs and before a magnet's file list is known). Poll it only while the
+     * files screen is open.
+     */
+open func jobFiles(id: UInt64) -> JobFilesView?  {
+    return try!  FfiConverterOptionTypeJobFilesView.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_job_files(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),$0
+    )
+})
 }
     
 open func jobs() -> [JobView]  {
@@ -908,6 +934,19 @@ open func setDebridRemoveAfter(enabled: Bool)  {try! rustCall() {
         FfiConverterBool.lower(enabled),$0
     )
 }
+}
+    
+    /**
+     * Choose a torrent job's files; returns the job's id (a done job starts
+     * again under it).
+     */
+open func setJobFiles(id: UInt64, ids: [UInt32])throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeEngineError_lift) {
+    uniffi_torrenter_fn_method_engine_set_job_files(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(id),
+        FfiConverterSequenceUInt32.lower(ids),$0
+    )
+})
 }
     
 open func setSeed(seed: Bool)  {try! rustCall() {
@@ -1060,6 +1099,252 @@ public func FfiConverterTypeAccountView_lower(_ value: AccountView) -> RustBuffe
 }
 
 
+/**
+ * Files under one parent folder (`folder` is empty for root files).
+ */
+public struct FileGroupView {
+    public var folder: String
+    public var files: [FileRowView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(folder: String, files: [FileRowView]) {
+        self.folder = folder
+        self.files = files
+    }
+}
+
+#if compiler(>=6)
+extension FileGroupView: Sendable {}
+#endif
+
+
+extension FileGroupView: Equatable, Hashable {
+    public static func ==(lhs: FileGroupView, rhs: FileGroupView) -> Bool {
+        if lhs.folder != rhs.folder {
+            return false
+        }
+        if lhs.files != rhs.files {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(folder)
+        hasher.combine(files)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFileGroupView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FileGroupView {
+        return
+            try FileGroupView(
+                folder: FfiConverterString.read(from: &buf), 
+                files: FfiConverterSequenceTypeFileRowView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FileGroupView, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.folder, into: &buf)
+        FfiConverterSequenceTypeFileRowView.write(value.files, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileGroupView_lift(_ buf: RustBuffer) throws -> FileGroupView {
+    return try FfiConverterTypeFileGroupView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileGroupView_lower(_ value: FileGroupView) -> RustBuffer {
+    return FfiConverterTypeFileGroupView.lower(value)
+}
+
+
+public struct FileRowView {
+    /**
+     * The id `Engine::set_job_files` takes.
+     */
+    public var id: UInt32
+    public var name: String
+    public var size: UInt64
+    public var have: UInt64
+    public var selected: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The id `Engine::set_job_files` takes.
+         */id: UInt32, name: String, size: UInt64, have: UInt64, selected: Bool) {
+        self.id = id
+        self.name = name
+        self.size = size
+        self.have = have
+        self.selected = selected
+    }
+}
+
+#if compiler(>=6)
+extension FileRowView: Sendable {}
+#endif
+
+
+extension FileRowView: Equatable, Hashable {
+    public static func ==(lhs: FileRowView, rhs: FileRowView) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.size != rhs.size {
+            return false
+        }
+        if lhs.have != rhs.have {
+            return false
+        }
+        if lhs.selected != rhs.selected {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(size)
+        hasher.combine(have)
+        hasher.combine(selected)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFileRowView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FileRowView {
+        return
+            try FileRowView(
+                id: FfiConverterUInt32.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                size: FfiConverterUInt64.read(from: &buf), 
+                have: FfiConverterUInt64.read(from: &buf), 
+                selected: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FileRowView, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterUInt64.write(value.size, into: &buf)
+        FfiConverterUInt64.write(value.have, into: &buf)
+        FfiConverterBool.write(value.selected, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileRowView_lift(_ buf: RustBuffer) throws -> FileRowView {
+    return try FfiConverterTypeFileRowView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFileRowView_lower(_ value: FileRowView) -> RustBuffer {
+    return FfiConverterTypeFileRowView.lower(value)
+}
+
+
+/**
+ * A torrent job's files for the files screen (`Engine::job_files`).
+ */
+public struct JobFilesView {
+    public var id: UInt64
+    public var groups: [FileGroupView]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: UInt64, groups: [FileGroupView]) {
+        self.id = id
+        self.groups = groups
+    }
+}
+
+#if compiler(>=6)
+extension JobFilesView: Sendable {}
+#endif
+
+
+extension JobFilesView: Equatable, Hashable {
+    public static func ==(lhs: JobFilesView, rhs: JobFilesView) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.groups != rhs.groups {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(groups)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeJobFilesView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> JobFilesView {
+        return
+            try JobFilesView(
+                id: FfiConverterUInt64.read(from: &buf), 
+                groups: FfiConverterSequenceTypeFileGroupView.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: JobFilesView, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.id, into: &buf)
+        FfiConverterSequenceTypeFileGroupView.write(value.groups, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJobFilesView_lift(_ buf: RustBuffer) throws -> JobFilesView {
+    return try FfiConverterTypeJobFilesView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeJobFilesView_lower(_ value: JobFilesView) -> RustBuffer {
+    return FfiConverterTypeJobFilesView.lower(value)
+}
+
+
 public struct JobView {
     public var id: UInt64
     public var kind: Kind
@@ -1097,6 +1382,12 @@ public struct JobView {
      * Debrid route only: the account id the job runs through.
      */
     public var account: String?
+    /**
+     * Torrent jobs: real files in the torrent (0 while the list is unknown)
+     * and how many are selected. The files button shows from 2 files.
+     */
+    public var filesTotal: UInt32
+    public var filesSelected: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1112,7 +1403,11 @@ public struct JobView {
          */fileIndex: UInt32, fileCount: UInt32, 
         /**
          * Debrid route only: the account id the job runs through.
-         */account: String? = nil) {
+         */account: String? = nil, 
+        /**
+         * Torrent jobs: real files in the torrent (0 while the list is unknown)
+         * and how many are selected. The files button shows from 2 files.
+         */filesTotal: UInt32 = UInt32(0), filesSelected: UInt32 = UInt32(0)) {
         self.id = id
         self.kind = kind
         self.source = source
@@ -1137,6 +1432,8 @@ public struct JobView {
         self.fileIndex = fileIndex
         self.fileCount = fileCount
         self.account = account
+        self.filesTotal = filesTotal
+        self.filesSelected = filesSelected
     }
 }
 
@@ -1219,6 +1516,12 @@ extension JobView: Equatable, Hashable {
         if lhs.account != rhs.account {
             return false
         }
+        if lhs.filesTotal != rhs.filesTotal {
+            return false
+        }
+        if lhs.filesSelected != rhs.filesSelected {
+            return false
+        }
         return true
     }
 
@@ -1247,6 +1550,8 @@ extension JobView: Equatable, Hashable {
         hasher.combine(fileIndex)
         hasher.combine(fileCount)
         hasher.combine(account)
+        hasher.combine(filesTotal)
+        hasher.combine(filesSelected)
     }
 }
 
@@ -1282,7 +1587,9 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
                 remotePermille: FfiConverterUInt16.read(from: &buf), 
                 fileIndex: FfiConverterUInt32.read(from: &buf), 
                 fileCount: FfiConverterUInt32.read(from: &buf), 
-                account: FfiConverterOptionString.read(from: &buf)
+                account: FfiConverterOptionString.read(from: &buf), 
+                filesTotal: FfiConverterUInt32.read(from: &buf), 
+                filesSelected: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -1311,6 +1618,8 @@ public struct FfiConverterTypeJobView: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.fileIndex, into: &buf)
         FfiConverterUInt32.write(value.fileCount, into: &buf)
         FfiConverterOptionString.write(value.account, into: &buf)
+        FfiConverterUInt32.write(value.filesTotal, into: &buf)
+        FfiConverterUInt32.write(value.filesSelected, into: &buf)
     }
 }
 
@@ -1697,6 +2006,55 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeJobFilesView: FfiConverterRustBuffer {
+    typealias SwiftType = JobFilesView?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeJobFilesView.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeJobFilesView.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -1714,6 +2072,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterString.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFileGroupView: FfiConverterRustBuffer {
+    typealias SwiftType = [FileGroupView]
+
+    public static func write(_ value: [FileGroupView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFileGroupView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FileGroupView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FileGroupView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFileGroupView.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFileRowView: FfiConverterRustBuffer {
+    typealias SwiftType = [FileRowView]
+
+    public static func write(_ value: [FileRowView], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFileRowView.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FileRowView] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FileRowView]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFileRowView.read(from: &buf))
         }
         return seq
     }
@@ -1833,6 +2241,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_hydrate() != 18602) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_job_files() != 13786) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_jobs() != 38627) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1873,6 +2284,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_debrid_remove_after() != 8005) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_job_files() != 49589) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_seed() != 25898) {

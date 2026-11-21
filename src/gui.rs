@@ -276,6 +276,11 @@ struct GuiApp {
     banner_dismissed: bool,
     installed_tag: Option<String>,
     job_query: String,
+    /// The job whose files screen replaces the job list (its id).
+    files_open: Option<u64>,
+    file_query: String,
+    /// The open files screen's rows and when they were read.
+    files_cache: Option<(u64, Instant, Arc<session::JobFiles>)>,
     glass_tint: u8,
     applied_glass_tint: u8,
     settings_open: bool,
@@ -457,6 +462,9 @@ impl GuiApp {
             banner_dismissed: false,
             installed_tag: None,
             job_query: String::new(),
+            files_open: None,
+            file_query: String::new(),
+            files_cache: None,
             glass_tint,
             applied_glass_tint: glass_tint,
             settings_open: false,
@@ -1010,7 +1018,7 @@ impl eframe::App for GuiApp {
         while let Ok((account, note)) = self.account_rx.try_recv() {
             self.account_notes.insert(account, note);
         }
-        let header_h = if self.settings_open {
+        let header_h = if self.settings_open || self.files_open.is_some() {
             16.0 + CONTROLS_H + 16.0
         } else {
             16.0 + CONTROLS_H + GUTTER + URL_H + GUTTER + DEST_H + 16.0
@@ -1050,6 +1058,7 @@ impl eframe::App for GuiApp {
                                 );
                                 if click_cursor(title).on_hover_text("main page").clicked() {
                                     self.settings_open = false;
+                                    self.files_open = None;
                                 }
                             },
                         );
@@ -1064,8 +1073,14 @@ impl eframe::App for GuiApp {
                                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                if settings_cog(ui, palette, self.settings_open).clicked() {
-                                    self.settings_open = !self.settings_open;
+                                // The header never changes: the cog only opens
+                                // settings; inner pages go back from their
+                                // own page bar.
+                                if settings_cog(ui, palette, self.settings_open).clicked()
+                                    && !self.settings_open
+                                {
+                                    self.settings_open = true;
+                                    self.files_open = None;
                                     self.accounts_cache = None;
                                 }
                                 if auto_update_toggle(ui, self.auto_update, palette).clicked() {
@@ -1080,7 +1095,7 @@ impl eframe::App for GuiApp {
                         );
                     },
                 );
-                if self.settings_open {
+                if self.settings_open || self.files_open.is_some() {
                     return;
                 }
                 ui.add_space(GUTTER);
@@ -1220,6 +1235,10 @@ impl eframe::App for GuiApp {
                     self.show_settings_page(ui, palette);
                     return;
                 }
+                if let Some(id) = self.files_open {
+                    self.show_files_page(ui, palette, id);
+                    return;
+                }
                 if let Some(tag) = self.installed_tag.clone() {
                     let fill = Color32::from_rgba_unmultiplied(
                         palette.fg.r(),
@@ -1330,47 +1349,7 @@ impl eframe::App for GuiApp {
                     .into_iter()
                     .map(|account| (account.id, account.name))
                     .collect();
-                const SEARCH_H: f32 = 28.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), SEARCH_H),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        glass_label(ui, "search", 12.0, palette.dim);
-                        let search_id = ui.make_persistent_id("job-search");
-                        let focused = ui.memory(|memory| memory.has_focus(search_id));
-                        let field_w = ui.available_width().max(160.0);
-                        let mut edit = TextEdit::singleline(&mut self.job_query)
-                            .id(search_id)
-                            .font(FontId::new(14.0, FontFamily::Monospace))
-                            .desired_width((field_w - 16.0).max(120.0))
-                            .margin(egui::Margin::symmetric(8, 5));
-                        if !focused {
-                            edit = edit.hint_text("title, URL, folder…");
-                        }
-                        let response = ui.allocate_ui_with_layout(
-                            egui::vec2(field_w, SEARCH_H),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                let dim = Stroke::new(1.0_f32, palette.dim);
-                                let lit = Stroke::new(1.0_f32, palette.fg);
-                                ui.visuals_mut().widgets.inactive.bg_stroke = dim;
-                                ui.visuals_mut().widgets.hovered.bg_stroke = lit;
-                                ui.visuals_mut().widgets.active.bg_stroke = lit;
-                                ui.visuals_mut().widgets.open.bg_stroke = lit;
-                                ui.visuals_mut().widgets.hovered.expansion = 0.0;
-                                ui.visuals_mut().widgets.active.expansion = 0.0;
-                                ui.visuals_mut().widgets.open.expansion = 0.0;
-                                ui.add(edit)
-                            },
-                        );
-                        if response.inner.has_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Escape))
-                        {
-                            self.job_query.clear();
-                        }
-                    },
-                );
+                search_row(ui, palette, &mut self.job_query, "job-search", "title, URL, folder…");
                 ui.add_space(8.0);
                 let visible: Vec<usize> = jobs
                     .iter()
@@ -1389,6 +1368,7 @@ impl eframe::App for GuiApp {
                 let mut reveal = None;
                 let mut copy_source = None;
                 let mut as_torrent = None;
+                let mut open_files = None;
                 let mut persist_now = false;
                 let row_fill = self.surface(palette.row);
                 let row_alt_fill = self.surface(palette.row_alt);
@@ -1478,6 +1458,7 @@ impl eframe::App for GuiApp {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             glass_label(ui, &job.added, 13.0, palette.dim);
+                                            let (files_total, _) = job_file_counts(job);
                                             if job.snapshot.is_active() {
                                                 if ui
                                                     .button(ink("stop", 12.0, palette.fail))
@@ -1508,6 +1489,14 @@ impl eframe::App for GuiApp {
                                                 {
                                                     as_torrent = Some(index);
                                                 }
+                                                if files_total >= 2
+                                                    && ui
+                                                        .button(ink("files", 12.0, palette.dim))
+                                                        .on_hover_text("choose which files download")
+                                                        .clicked()
+                                                {
+                                                    open_files = Some(job.id);
+                                                }
                                             } else {
                                                 if ui
                                                     .button(ink("clear", 12.0, palette.dim))
@@ -1522,6 +1511,14 @@ impl eframe::App for GuiApp {
                                                         .clicked()
                                                 {
                                                     open_restart = Some(index);
+                                                }
+                                                if files_total >= 2
+                                                    && ui
+                                                        .button(ink("files", 12.0, palette.dim))
+                                                        .on_hover_text("choose which files download")
+                                                        .clicked()
+                                                {
+                                                    open_files = Some(job.id);
                                                 }
                                             }
                                         },
@@ -1606,6 +1603,11 @@ impl eframe::App for GuiApp {
                                         format_size(total),
                                     )
                                 };
+                                let (files_total, files_selected) = job_file_counts(job);
+                                let line = format!(
+                                    "{line}{}",
+                                    files_hint(files_total, files_selected)
+                                );
                                 let color = if job.snapshot.error().is_some() {
                                     palette.fail
                                 } else {
@@ -1619,6 +1621,10 @@ impl eframe::App for GuiApp {
                     if let Some(job) = jobs.get(index) {
                         self.reveal_path(mode_from_kind(job.kind), &job.source, &job.dest);
                     }
+                }
+                if let Some(id) = open_files {
+                    self.files_open = Some(id);
+                    self.file_query.clear();
                 }
                 if let Some(source) = copy_source {
                     if source.is_empty() {
@@ -1675,7 +1681,197 @@ impl GuiApp {
     /// Settings: a category sidebar on the left (stays put) and the chosen
     /// category's setting cards on the right — title and description on the
     /// left of each card, its control flush right, like the download rows.
+    /// A torrent job's files in place of the job list: search, all/none,
+    /// then the files grouped by folder with a checkbox and a bar each. A tick
+    /// or untick is applied at once (`Session::set_files`).
+    fn show_files_page(&mut self, ui: &mut egui::Ui, palette: Theme, id: u64) {
+        let Some(job) = self.session.jobs().into_iter().find(|job| job.id == id) else {
+            self.files_open = None;
+            return;
+        };
+        // Polled like the job list, not every frame: a big torrent's rows
+        // are rebuilt at most every FILES_POLL (and right after a change).
+        let stale = self
+            .files_cache
+            .as_ref()
+            .is_none_or(|(cached, at, _)| *cached != id || at.elapsed() >= FILES_POLL);
+        if stale {
+            self.files_cache = self
+                .session
+                .job_files(id)
+                .map(|files| (id, Instant::now(), Arc::new(files)));
+        }
+        let Some(files) = self
+            .files_cache
+            .as_ref()
+            .map(|(_, _, files)| Arc::clone(files))
+        else {
+            self.files_open = None;
+            return;
+        };
+        let (total, selected) = job_file_counts(&job);
+        let note = format!("{selected} of {total} selected");
+        if page_bar(
+            ui,
+            palette,
+            "files",
+            Some(&job.snapshot.title()),
+            Some(&note),
+        ) {
+            self.files_open = None;
+            return;
+        }
+        search_row(
+            ui,
+            palette,
+            &mut self.file_query,
+            "file-search",
+            "file or folder name…",
+        );
+        ui.add_space(8.0);
+        let query = self.file_query.clone();
+        let chosen: std::collections::HashSet<u32> = files
+            .groups
+            .iter()
+            .flat_map(|group| &group.files)
+            .filter(|file| file.selected)
+            .map(|file| file.id)
+            .collect();
+        // One line per folder header and per file, all the same height, so
+        // only the visible ones are laid out.
+        let mut lines: Vec<FilesLine> = Vec::new();
+        let mut shown: Vec<u32> = Vec::new();
+        for (g, group) in files.groups.iter().enumerate() {
+            let matching: Vec<usize> = group
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file_matches(&group.folder, &file.name, &query))
+                .map(|(f, _)| f)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            if !group.folder.is_empty() {
+                lines.push(FilesLine::Folder(g, matching.clone()));
+            }
+            for f in matching {
+                shown.push(group.files[f].id);
+                lines.push(FilesLine::File(g, f));
+            }
+        }
+        let toggled = |ids: &[u32], on: bool| {
+            let mut next = chosen.clone();
+            for id in ids {
+                if on {
+                    next.insert(*id);
+                } else {
+                    next.remove(id);
+                }
+            }
+            next
+        };
+        let mut next: Option<std::collections::HashSet<u32>> = None;
+        ui.horizontal(|ui| {
+            let on = shown.iter().filter(|id| chosen.contains(id)).count();
+            let state = check_of(on, shown.len());
+            if check_box(ui, palette, state).clicked() && !shown.is_empty() {
+                next = Some(toggled(&shown, state != Check::On));
+            }
+            ui.add_space(6.0);
+            let label = if query.trim().is_empty() {
+                "all"
+            } else {
+                "all shown"
+            };
+            if click_text(ui, label, 12.0, palette.dim).clicked() && !shown.is_empty() {
+                next = Some(toggled(&shown, state != Check::On));
+            }
+        });
+        ui.add_space(6.0);
+        hairline(ui, palette);
+        if lines.is_empty() {
+            ui.centered_and_justified(|ui| {
+                glass_label(ui, "no files match that search", 14.0, palette.dim);
+            });
+            return;
+        }
+        const LINE_H: f32 = 28.0;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, LINE_H, lines.len(), |ui, range| {
+                    for line in &lines[range] {
+                        let width = ui.available_width();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, LINE_H - 1.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| match line {
+                                FilesLine::Folder(g, matching) => {
+                                    let group = &files.groups[*g];
+                                    let ids: Vec<u32> =
+                                        matching.iter().map(|&f| group.files[f].id).collect();
+                                    let on = matching
+                                        .iter()
+                                        .filter(|&&f| group.files[f].selected)
+                                        .count();
+                                    let state = check_of(on, matching.len());
+                                    if check_box(ui, palette, state).clicked() {
+                                        next = Some(toggled(&ids, state != Check::On));
+                                    }
+                                    ui.add_space(6.0);
+                                    glass_label(
+                                        ui,
+                                        truncate_middle(&group.folder, 64),
+                                        12.0,
+                                        palette.fg,
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(SCROLLBAR_ROOM);
+                                            glass_label(
+                                                ui,
+                                                format!("{on} of {}", matching.len()),
+                                                12.0,
+                                                palette.dim,
+                                            );
+                                        },
+                                    );
+                                }
+                                FilesLine::File(g, f) => {
+                                    let group = &files.groups[*g];
+                                    let file = &group.files[*f];
+                                    if !group.folder.is_empty() {
+                                        ui.add_space(14.0);
+                                    }
+                                    if file_row(ui, palette, file) {
+                                        next = Some(toggled(&[file.id], !file.selected));
+                                    }
+                                }
+                            },
+                        );
+                        hairline(ui, palette);
+                    }
+                });
+        });
+        if let Some(next) = next {
+            let mut ids: Vec<u32> = next.into_iter().collect();
+            ids.sort_unstable();
+            self.files_cache = None;
+            match self.session.set_files(id, &ids) {
+                Ok(id) => self.files_open = Some(id),
+                Err(error) => self.toast_fail(error),
+            }
+        }
+    }
+
     fn show_settings_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        if page_bar(ui, palette, "settings", None, None) {
+            self.settings_open = false;
+            return;
+        }
         let height = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -2677,10 +2873,12 @@ fn tint_slider(ui: &mut egui::Ui, value: &mut u8, palette: Theme, locked: bool) 
     }
 }
 
-fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response {
+/// The header cog: always the cog (the header never changes), lit while
+/// settings are open.
+fn settings_cog(ui: &mut egui::Ui, palette: Theme, active: bool) -> egui::Response {
     let size = egui::vec2(28.0, 28.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let color = if open || response.hovered() {
+    let color = if active || response.hovered() {
         palette.fg
     } else {
         palette.dim
@@ -2689,22 +2887,6 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     paint_brush_stroke(painter, rect.shrink(1.5));
     let stroke = Stroke::new(1.3_f32, color);
     let c = rect.center();
-    if open {
-        // Back arrow: settings replace the main screen until closed.
-        painter.line_segment(
-            [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
-            stroke,
-        );
-        painter.line_segment(
-            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
-            stroke,
-        );
-        painter.line_segment(
-            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
-            stroke,
-        );
-        return click_cursor(response).on_hover_text("back");
-    }
     painter.circle_stroke(c, 4.8, stroke);
     painter.circle_filled(c, 1.6, color);
     for step in 0..6 {
@@ -2713,6 +2895,62 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
         painter.line_segment([c + dir * 6.2, c + dir * 8.4], stroke);
     }
     click_cursor(response).on_hover_text("settings")
+}
+
+/// The first line of every inner page (settings, a job's files): "← name",
+/// an optional detail after it and a note on the right, then a hairline.
+/// The arrow and the name go back to the job list; true when clicked.
+fn page_bar(
+    ui: &mut egui::Ui,
+    palette: Theme,
+    name: &str,
+    detail: Option<&str>,
+    note: Option<&str>,
+) -> bool {
+    let mut back = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 28.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let (rect, arrow) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+            let arrow = click_cursor(arrow);
+            let lit = arrow.hovered();
+            let painter = ui.painter();
+            paint_brush_stroke(painter, rect.shrink(1.5));
+            let stroke = Stroke::new(1.3_f32, if lit { palette.fg } else { palette.dim });
+            let c = rect.center();
+            painter.line_segment(
+                [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
+                stroke,
+            );
+            back |= arrow.on_hover_text("back").clicked();
+            ui.add_space(6.0);
+            back |= click_text(ui, name, 13.0, palette.dim)
+                .on_hover_text("back")
+                .clicked();
+            if let Some(detail) = detail {
+                ui.add_space(8.0);
+                glass_label(ui, truncate(detail, 72), 13.0, palette.fg);
+            }
+            if let Some(note) = note {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    glass_label(ui, note, 12.0, palette.dim);
+                });
+            }
+        },
+    );
+    ui.add_space(8.0);
+    hairline(ui, palette);
+    ui.add_space(10.0);
+    back
 }
 
 /// Repaint cadence while something moves, and when idle.
@@ -3583,6 +3821,201 @@ fn glass_pair(
     response
 }
 
+/// The search field above a list (jobs, or a job's files): label, a bordered
+/// field that lights up on hover or focus, Esc clears it.
+fn search_row(ui: &mut egui::Ui, palette: Theme, query: &mut String, id_salt: &str, hint: &str) {
+    const SEARCH_H: f32 = 28.0;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), SEARCH_H),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            glass_label(ui, "search", 12.0, palette.dim);
+            let search_id = ui.make_persistent_id(id_salt);
+            let focused = ui.memory(|memory| memory.has_focus(search_id));
+            let field_w = ui.available_width().max(160.0);
+            let mut edit = TextEdit::singleline(query)
+                .id(search_id)
+                .font(FontId::new(14.0, FontFamily::Monospace))
+                .desired_width((field_w - 16.0).max(120.0))
+                .margin(egui::Margin::symmetric(8, 5));
+            if !focused {
+                edit = edit.hint_text(hint);
+            }
+            let response = ui.allocate_ui_with_layout(
+                egui::vec2(field_w, SEARCH_H),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let dim = Stroke::new(1.0_f32, palette.dim);
+                    let lit = Stroke::new(1.0_f32, palette.fg);
+                    ui.visuals_mut().widgets.inactive.bg_stroke = dim;
+                    ui.visuals_mut().widgets.hovered.bg_stroke = lit;
+                    ui.visuals_mut().widgets.active.bg_stroke = lit;
+                    ui.visuals_mut().widgets.open.bg_stroke = lit;
+                    ui.visuals_mut().widgets.hovered.expansion = 0.0;
+                    ui.visuals_mut().widgets.active.expansion = 0.0;
+                    ui.visuals_mut().widgets.open.expansion = 0.0;
+                    ui.add(edit)
+                },
+            );
+            if response.inner.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape))
+            {
+                query.clear();
+            }
+        },
+    );
+}
+
+/// (real files, selected) for a torrent job; (0, 0) for HTTP, debrid and a
+/// magnet whose file list is not known yet.
+fn job_file_counts(job: &Job) -> (u32, u32) {
+    if job.kind == JobKind::Magnet {
+        job.snapshot.file_counts()
+    } else {
+        (0, 0)
+    }
+}
+
+/// Appended to a torrent job's stats line when only some files download.
+fn files_hint(total: u32, selected: u32) -> String {
+    if total < 2 || selected >= total {
+        String::new()
+    } else if selected == 0 {
+        "  no files selected".into()
+    } else {
+        format!("  {selected} of {total} files")
+    }
+}
+
+/// A file row matches when its name or folder contains the query.
+fn file_matches(folder: &str, name: &str, query: &str) -> bool {
+    let needle = query.trim().to_lowercase();
+    needle.is_empty()
+        || name.to_lowercase().contains(&needle)
+        || folder.to_lowercase().contains(&needle)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    Off,
+    Some,
+    On,
+}
+
+fn check_of(selected: usize, total: usize) -> Check {
+    if total == 0 || selected == 0 {
+        Check::Off
+    } else if selected >= total {
+        Check::On
+    } else {
+        Check::Some
+    }
+}
+
+/// A small square checkbox in the theme's ink: filled with a tick when on,
+/// a bar when some of a group is on.
+fn check_box(ui: &mut egui::Ui, palette: Theme, state: Check) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::click());
+    let response = click_cursor(response);
+    let painter = ui.painter();
+    let edge = if response.hovered() || state != Check::Off {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    match state {
+        Check::On => {
+            painter.rect_filled(rect, 3.0, palette.fg);
+            let tick = Stroke::new(1.8_f32, palette.bg);
+            let a = egui::pos2(rect.left() + 3.2, rect.center().y + 0.2);
+            let b = egui::pos2(rect.center().x - 1.0, rect.bottom() - 3.6);
+            let c = egui::pos2(rect.right() - 3.0, rect.top() + 3.6);
+            painter.line_segment([a, b], tick);
+            painter.line_segment([b, c], tick);
+        }
+        Check::Some => {
+            painter.rect_stroke(
+                rect,
+                3.0,
+                Stroke::new(1.2_f32, edge),
+                egui::StrokeKind::Inside,
+            );
+            let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(8.0, 2.0));
+            painter.rect_filled(bar, 1.0, palette.fg);
+        }
+        Check::Off => {
+            painter.rect_stroke(
+                rect,
+                3.0,
+                Stroke::new(1.2_f32, edge),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    response
+}
+
+/// How often an open files screen re-reads its rows.
+const FILES_POLL: Duration = Duration::from_millis(250);
+
+/// One line of the files list: a folder header (with the indices of its
+/// files that match the search) or a file (group, file).
+enum FilesLine {
+    Folder(usize, Vec<usize>),
+    File(usize, usize),
+}
+
+/// A file's line: checkbox, name, size, then bar and percent on the right.
+/// True when the checkbox or name was clicked.
+fn file_row(ui: &mut egui::Ui, palette: Theme, file: &session::FileRow) -> bool {
+    let state = if file.selected { Check::On } else { Check::Off };
+    let color = if file.selected {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    let fraction = if file.size == 0 {
+        1.0
+    } else {
+        (file.have as f32 / file.size as f32).clamp(0.0, 1.0)
+    };
+    let mut clicked = check_box(ui, palette, state).clicked();
+    ui.add_space(6.0);
+    clicked |= click_text(ui, truncate_middle(&file.name, 56), 13.0, color).clicked();
+    ui.add_space(8.0);
+    glass_label(ui, format_size(file.size), 12.0, palette.dim);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(SCROLLBAR_ROOM);
+        glass_label(
+            ui,
+            format!("{:>3}%", (fraction * 100.0).floor() as u32),
+            12.0,
+            palette.dim,
+        );
+        ui.add_space(6.0);
+        let bar = if file.selected {
+            palette.fg
+        } else {
+            mix_rgb(palette.fg, palette.dim, 0.75)
+        };
+        paint_job_progress(ui, bar, palette.row_alt, Some(fraction), Some(150.0));
+    });
+    clicked
+}
+
+/// Keeps the files list's right-hand labels clear of the scroll bar.
+const SCROLLBAR_ROOM: f32 = 14.0;
+
+/// A hairline between rows of the files list.
+fn hairline(ui: &mut egui::Ui, palette: Theme) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0_f32, mix_rgb(palette.row_alt, palette.dim, 0.35)),
+    );
+}
+
 fn ink(text: impl Into<String>, size: f32, color: Color32) -> RichText {
     RichText::new(text.into())
         .font(FontId::new(size, FontFamily::Monospace))
@@ -3903,6 +4336,7 @@ mod tests {
             part_count: 4,
             debrid: None,
             private_torrent: false,
+            extra: Default::default(),
         }
     }
 
@@ -3961,5 +4395,29 @@ mod tests {
         assert!(job_matches(&job, "films"));
         assert!(job_matches(&job, "http"));
         assert!(!job_matches(&job, "ubuntu"));
+    }
+
+    #[test]
+    fn the_row_says_how_many_files_download() {
+        assert_eq!(files_hint(0, 0), "");
+        assert_eq!(files_hint(1, 1), "");
+        assert_eq!(files_hint(20, 20), "");
+        assert_eq!(files_hint(20, 4), "  4 of 20 files");
+        assert_eq!(files_hint(20, 0), "  no files selected");
+        // HTTP jobs never count files.
+        let job = sample_job("Sintel", "https://example.com/sintel.mkv", "/tmp/films");
+        assert_eq!(job_file_counts(&job), (0, 0));
+    }
+
+    #[test]
+    fn file_search_and_group_checkboxes() {
+        assert!(file_matches("Season 1", "E05.mkv", "e05"));
+        assert!(file_matches("Season 1", "E05.mkv", "season"));
+        assert!(file_matches("", "readme.nfo", "  "));
+        assert!(!file_matches("Season 1", "E05.mkv", "E06"));
+        assert_eq!(check_of(0, 3), Check::Off);
+        assert_eq!(check_of(2, 3), Check::Some);
+        assert_eq!(check_of(3, 3), Check::On);
+        assert_eq!(check_of(0, 0), Check::Off);
     }
 }

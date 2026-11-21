@@ -101,6 +101,42 @@ pub fn parse(bytes: &[u8]) -> Result<Imported> {
     })
 }
 
+/// One file inside a torrent, in librqbit's order (its index is the id
+/// `only_files` and `update_only_files` take).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    pub index: usize,
+    /// Path inside the torrent, `/`-separated (no leading torrent name).
+    pub path: String,
+    pub len: u64,
+    /// BEP 47 padding: not a real file, never shown or selectable.
+    pub padding: bool,
+}
+
+/// The files of a `.torrent` (same size cap and validation as `parse`).
+pub fn files(bytes: &[u8]) -> Result<Vec<FileEntry>> {
+    if bytes.is_empty() || bytes.len() > MAX_TORRENT_FILE {
+        bail!("not a valid .torrent file");
+    }
+    let meta = librqbit::torrent_from_bytes(bytes)
+        .map_err(|_| anyhow::anyhow!("not a valid .torrent file"))?;
+    let info = meta
+        .info
+        .data
+        .validate()
+        .map_err(|_| anyhow::anyhow!("not a valid .torrent file"))?;
+    Ok(info
+        .iter_file_details()
+        .enumerate()
+        .map(|(index, details)| FileEntry {
+            index,
+            path: details.filename.to_vec().join("/"),
+            len: details.len,
+            padding: details.attrs().padding,
+        })
+        .collect())
+}
+
 /// Read a local `.torrent`, refusing anything over `MAX_TORRENT_FILE` before
 /// reading it all (never librqbit's uncapped `from_local_filename`).
 pub fn read_capped(path: &Path) -> Result<Vec<u8>> {
@@ -209,6 +245,76 @@ pub(crate) mod tests {
         }
         info.extend(b"e");
         info
+    }
+
+    /// A one-piece multi-file `.torrent`: `(path, length, padding)` per file,
+    /// `path` split on `/` (total length must stay under 16 KiB).
+    pub(crate) fn multi_torrent_bytes(name: &str, files: &[(&str, u64, bool)]) -> Vec<u8> {
+        let mut info = b"d".to_vec();
+        info.extend(bstr(b"files"));
+        info.extend(b"l");
+        for (path, len, padding) in files {
+            info.extend(b"d");
+            if *padding {
+                info.extend(bstr(b"attr"));
+                info.extend(bstr(b"p"));
+            }
+            info.extend(bstr(b"length"));
+            info.extend(format!("i{len}e").into_bytes());
+            info.extend(bstr(b"path"));
+            info.extend(b"l");
+            for part in path.split('/') {
+                info.extend(bstr(part.as_bytes()));
+            }
+            info.extend(b"e");
+            info.extend(b"e");
+        }
+        info.extend(b"e");
+        info.extend(bstr(b"name"));
+        info.extend(bstr(name.as_bytes()));
+        info.extend(bstr(b"piece length"));
+        info.extend(b"i16384e");
+        info.extend(bstr(b"pieces"));
+        info.extend(bstr(&[7u8; 20]));
+        info.extend(b"e");
+        let mut out = b"d".to_vec();
+        out.extend(bstr(b"info"));
+        out.extend(info);
+        out.extend(b"e");
+        out
+    }
+
+    #[test]
+    fn files_lists_every_entry_in_order() {
+        let bytes = multi_torrent_bytes(
+            "Show",
+            &[
+                ("readme.nfo", 3, false),
+                ("Season 1/E01.mkv", 10, false),
+                (".pad/6", 6, true),
+                ("Season 1/E02.mkv", 12, false),
+            ],
+        );
+        let list = files(&bytes).unwrap();
+        let paths: Vec<_> = list.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "readme.nfo",
+                "Season 1/E01.mkv",
+                ".pad/6",
+                "Season 1/E02.mkv"
+            ]
+        );
+        assert_eq!(list[3].index, 3);
+        assert_eq!(list[3].len, 12);
+        assert!(list[2].padding && !list[1].padding);
+        // A single-file torrent lists its one file under the torrent's name.
+        let single = files(&torrent_bytes("Sintel.mkv", &[])).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].path, "Sintel.mkv");
+        assert!(files(b"junk").is_err());
+        assert!(files(b"").is_err());
     }
 
     /// A minimal single-file `.torrent`, with optional trackers.

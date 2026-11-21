@@ -19,6 +19,7 @@ use crate::paths::plain_path;
 use crate::progress::{is_stopped, until_stop, JobSnapshot};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
+    OnMetadata,
 };
 use crate::torrent_file;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
@@ -53,6 +54,8 @@ pub struct Job {
     /// From a private `.torrent`: only ever started from its stored copy, never
     /// the magnet (the DHT must not see it) and never through debrid.
     pub private_torrent: bool,
+    /// Fields a newer build wrote on this record, written back on every save.
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -83,6 +86,17 @@ pub enum Route {
 
 pub fn persist_record(job: &Job) -> PersistedJob {
     let debrid = job.debrid.as_ref().map(JobDebrid::view);
+    let files = match job.kind {
+        JobKind::Magnet => {
+            let files = job.snapshot.files();
+            (files.only().cloned(), files.have.clone())
+        }
+        _ => (None, Vec::new()),
+    };
+    let files = PersistedSelection {
+        only: files.0,
+        have: files.1,
+    };
     PersistedJob {
         id: job.id,
         kind: job.kind.as_str().to_string(),
@@ -104,8 +118,15 @@ pub fn persist_record(job: &Job) -> PersistedJob {
         added_by_us: debrid.as_ref().is_some_and(|d| d.added_by_us),
         files: debrid.map(|d| d.files).unwrap_or_default(),
         private_torrent: job.private_torrent,
-        ..Default::default()
+        only_files: files.only,
+        file_have: files.have,
+        extra: job.extra.clone(),
     }
+}
+
+struct PersistedSelection {
+    only: Option<Vec<usize>>,
+    have: Vec<u64>,
 }
 
 fn persist_fingerprint(jobs: &[Job]) -> String {
@@ -113,7 +134,7 @@ fn persist_fingerprint(jobs: &[Job]) -> String {
         .map(|job| {
             let record = persist_record(job);
             format!(
-                "{}:{}:{}:{}:{}:{}:{:?}:{}:{:?}:{:?}:{}",
+                "{}:{}:{}:{}:{}:{}:{:?}:{}:{:?}:{:?}:{}:{:?}:{}:{}",
                 record.id,
                 record.kind,
                 record.downloaded,
@@ -124,7 +145,10 @@ fn persist_fingerprint(jobs: &[Job]) -> String {
                 record.title,
                 record.remote_id,
                 record.part_count,
-                record.files.iter().filter(|file| file.done).count()
+                record.files.iter().filter(|file| file.done).count(),
+                record.only_files,
+                record.file_have.iter().sum::<u64>(),
+                record.private_torrent
             )
         })
         .collect::<Vec<_>>()
@@ -183,7 +207,12 @@ pub enum SessionEvent {
 }
 
 enum EngineEvent {
-    DownloadFailed { id: u64, error: String },
+    DownloadFailed {
+        id: u64,
+        error: String,
+    },
+    /// A magnet's metadata arrived: its rebuilt `.torrent`, to keep a copy.
+    Resolved(Vec<u8>),
     Probed(Vec<(u64, bool, bool)>),
 }
 
@@ -235,6 +264,17 @@ impl Session {
         let (engine_tx, engine_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         thread::spawn(move || engine_loop(engine_rx, event_tx));
+        Self::with_channels(dest, jobs_path, seed, leech_only, engine_tx, event_rx)
+    }
+
+    fn with_channels(
+        dest: PathBuf,
+        jobs_path: PathBuf,
+        seed: bool,
+        leech_only: bool,
+        engine_tx: Sender<EngineCmd>,
+        event_rx: Receiver<EngineEvent>,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 dest: plain_path(dest),
@@ -344,6 +384,9 @@ impl Session {
                     };
                     let snapshot = Arc::new(JobSnapshot::default());
                     record.apply_to(&snapshot);
+                    if kind == JobKind::Magnet {
+                        load_file_list(&inner, &record.source, &snapshot);
+                    }
                     // Folders saved verbatim by an earlier Windows build
                     // (\\?\E:\...) come back plain everywhere they show.
                     let dest = plain_path(record.dest.clone());
@@ -395,6 +438,7 @@ impl Session {
                         part_count: record.part_count.map(usize::from).unwrap_or(PART_COUNT),
                         debrid,
                         private_torrent: record.private_torrent,
+                        extra: record.extra,
                     });
                 }
                 // Rewrite now when a folder was cleaned, so jobs.json holds the
@@ -442,6 +486,7 @@ impl Session {
                     self.persist(true);
                     out.push(SessionEvent::DownloadFailed { id, error });
                 }
+                EngineEvent::Resolved(bytes) => self.keep_resolved(&bytes),
                 EngineEvent::Probed(results) => {
                     let missing = self.apply_probes(results);
                     if missing > 0 {
@@ -604,7 +649,13 @@ impl Session {
             part_count: inner.part_count,
             debrid,
             private_torrent: torrent.is_some_and(|(imported, _)| imported.private),
+            extra: Default::default(),
         };
+        if let (JobKind::Magnet, Some((_, bytes))) = (kind, torrent) {
+            if let Ok(list) = torrent_file::files(bytes) {
+                job.snapshot.files().set_list(Arc::new(list));
+            }
+        }
         let cmd = match launch(&inner, &job) {
             Ok(cmd) => cmd,
             Err(error) => {
@@ -654,6 +705,32 @@ impl Session {
         let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
             return Err("job gone".into());
         };
+        self.relaunch(
+            &mut inner,
+            index,
+            route,
+            seed,
+            dest,
+            remove_from_service,
+            false,
+        )
+    }
+
+    /// Restart (a new id, added today) or, with `reopen`, start a done job
+    /// again under its own id and date (a file was ticked on it: no task of
+    /// the old run is left to send late events). Magnet jobs keep their file
+    /// selection either way.
+    #[allow(clippy::too_many_arguments)]
+    fn relaunch(
+        &self,
+        inner: &mut Inner,
+        index: usize,
+        route: Route,
+        seed: bool,
+        dest: PathBuf,
+        remove_from_service: bool,
+        reopen: bool,
+    ) -> Result<u64, String> {
         let old = inner.jobs[index].clone();
         let source = old.source.clone();
         if old.private_torrent && matches!(route, Route::Via(_)) {
@@ -670,7 +747,7 @@ impl Session {
                     state: Arc::new(Mutex::new(existing.view())),
                 },
                 _ => JobDebrid {
-                    service: account_service(&inner, account)?,
+                    service: account_service(inner, account)?,
                     account: account.clone(),
                     state: SharedDebridState::default(),
                 },
@@ -703,12 +780,28 @@ impl Session {
         if !title.is_empty() {
             snapshot.set_title(title);
         }
-        // Claim the id now: a failed launch still stores the job under it.
-        let new_id = inner.next_id;
-        inner.next_id += 1;
+        if kind == JobKind::Magnet {
+            *snapshot.files() = old.snapshot.files().clone();
+        }
+        let (new_id, added) = if reopen {
+            snapshot.downloaded.store(
+                old.snapshot.downloaded.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            snapshot.total.store(
+                old.snapshot.total.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            (old.id, old.added.clone())
+        } else {
+            // Claim the id now: a failed launch still stores the job under it.
+            let new_id = inner.next_id;
+            inner.next_id += 1;
+            (new_id, today())
+        };
         let leave_remote = left_remote(&old, &route)
             .filter(|_| remove_from_service)
-            .map(|left| delete_remote_cmd(&inner, left));
+            .map(|left| delete_remote_cmd(inner, left));
         if let Some(cmd) = leave_remote {
             let _ = self.engine.send(cmd);
         }
@@ -724,7 +817,7 @@ impl Session {
             kind,
             source,
             snapshot,
-            added: today(),
+            added,
             last_bytes: 0,
             last_uploaded: 0,
             last_check: Instant::now(),
@@ -735,20 +828,118 @@ impl Session {
             part_count,
             debrid,
             private_torrent: old.private_torrent,
+            extra: old.extra.clone(),
         };
-        let cmd = match launch(&inner, &job) {
+        let cmd = match launch(inner, &job) {
             Ok(cmd) => cmd,
             Err(error) => {
                 job.snapshot.set_error(error.clone());
                 inner.jobs[index] = job;
-                persist_inner(&mut inner, true);
+                persist_inner(inner, true);
                 return Err(error);
             }
         };
         let _ = self.engine.send(cmd);
         inner.jobs[index] = job;
-        persist_inner(&mut inner, true);
+        persist_inner(inner, true);
         Ok(new_id)
+    }
+
+    /// A torrent job's files for the files screen (`None` for HTTP and
+    /// debrid jobs, and while a magnet's file list is not known yet).
+    pub fn job_files(&self, id: u64) -> Option<JobFiles> {
+        let inner = mutex_lock(&self.inner);
+        let job = inner
+            .jobs
+            .iter()
+            .find(|job| job.id == id && job.kind == JobKind::Magnet)?;
+        let files = job.snapshot.files();
+        let list = files.list()?.clone();
+        Some(JobFiles {
+            id,
+            groups: group_files(&list, &files),
+        })
+    }
+
+    /// Choose a torrent job's files (`ids` = file ids from [`Self::job_files`]).
+    /// A running job applies it at once, a stopped or failed one keeps it for
+    /// its restart, and a done job starts again under its own id. Returns the
+    /// job's id.
+    pub fn set_files(&self, id: u64, ids: &[u32]) -> Result<u64, String> {
+        let mut inner = mutex_lock(&self.inner);
+        let Some(index) = inner.jobs.iter().position(|job| job.id == id) else {
+            return Err("job gone".into());
+        };
+        let job = inner.jobs[index].clone();
+        if job.kind != JobKind::Magnet {
+            return Err("only torrent jobs have files to choose".into());
+        }
+        let reopen = {
+            let mut files = job.snapshot.files();
+            let Some(list) = files.list().cloned() else {
+                return Err("this torrent's file list is not known yet".into());
+            };
+            let only = normalize_selection(&list, ids)?;
+            if files.only() == only.as_ref() {
+                return Ok(job.id);
+            }
+            let adds = adds_files(files.only(), only.as_ref());
+            files.set_only(only);
+            files.generation += 1;
+            // Checked under the files lock: the engine finishes a job only
+            // under it, after checking the generation it applied. A done job
+            // starts again only for a newly ticked file; an untick just stays
+            // stored (nothing to download).
+            adds && job.snapshot.is_done()
+        };
+        if reopen {
+            let (seed, dest) = (job.seed, job.dest.clone());
+            return self.relaunch(&mut inner, index, Route::Keep, seed, dest, false, true);
+        }
+        persist_inner(&mut inner, true);
+        Ok(job.id)
+    }
+
+    /// Keep the `.torrent` librqbit rebuilt for a magnet (once, and only while
+    /// a job still refers to its hash), so its files and restart need no
+    /// metadata wait. A private one is marked so it never leaves its tracker.
+    fn keep_resolved(&self, bytes: &[u8]) {
+        let Ok(imported) = torrent_file::parse(bytes) else {
+            return;
+        };
+        let mut inner = mutex_lock(&self.inner);
+        let matching: Vec<usize> = inner
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(_, job)| {
+                job.kind == JobKind::Magnet
+                    && magnet_info_hash_hex(&job.source).as_deref()
+                        == Some(imported.hash_hex.as_str())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if matching.is_empty() {
+            return;
+        }
+        let store = torrent_file::store_dir(&inner.jobs_path);
+        if torrent_file::load(&store, &imported.hash_hex).is_none()
+            && torrent_file::save(&store, &imported, bytes).is_err()
+        {
+            return;
+        }
+        let list = torrent_file::files(bytes).ok().map(Arc::new);
+        for index in matching {
+            let job = &mut inner.jobs[index];
+            if imported.private {
+                job.private_torrent = true;
+            }
+            let mut files = job.snapshot.files();
+            if let (None, Some(list)) = (files.list(), &list) {
+                files.set_list(Arc::clone(list));
+            }
+        }
+        persist_inner(&mut inner, true);
     }
 
     pub fn toggle_pause(&self, id: u64) {
@@ -1030,6 +1221,116 @@ fn offered(service: Service) -> Result<(), String> {
     }
 }
 
+/// A torrent job's files, grouped by parent folder (root files first, then
+/// folders in torrent order). Padding files are left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFiles {
+    pub id: u64,
+    pub groups: Vec<FileGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileGroup {
+    /// Parent path inside the torrent (`/`-separated); empty for root files.
+    pub folder: String,
+    pub files: Vec<FileRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    /// The id `set_files` takes.
+    pub id: u32,
+    pub name: String,
+    pub size: u64,
+    /// Bytes on disk (live, or as last saved).
+    pub have: u64,
+    pub selected: bool,
+}
+
+fn group_files(
+    list: &[torrent_file::FileEntry],
+    state: &crate::progress::FileState,
+) -> Vec<FileGroup> {
+    let mut groups: Vec<FileGroup> = vec![FileGroup {
+        folder: String::new(),
+        files: Vec::new(),
+    }];
+    let mut by_folder: HashMap<String, usize> = HashMap::from([(String::new(), 0)]);
+    for entry in list.iter().filter(|entry| !entry.padding) {
+        let (folder, name) = match entry.path.rsplit_once('/') {
+            Some((folder, name)) => (folder.to_string(), name.to_string()),
+            None => (String::new(), entry.path.clone()),
+        };
+        let row = FileRow {
+            id: u32::try_from(entry.index).unwrap_or(u32::MAX),
+            name,
+            size: entry.len,
+            have: state
+                .have
+                .get(entry.index)
+                .copied()
+                .unwrap_or(0)
+                .min(entry.len),
+            selected: state.is_selected(entry.index),
+        };
+        match by_folder.get(&folder) {
+            Some(&index) => groups[index].files.push(row),
+            None => {
+                by_folder.insert(folder.clone(), groups.len());
+                groups.push(FileGroup {
+                    folder,
+                    files: vec![row],
+                });
+            }
+        }
+    }
+    groups.retain(|group| !group.files.is_empty());
+    groups
+}
+
+/// Check `ids` against the torrent's real files; all of them = `None`.
+fn normalize_selection(
+    list: &[torrent_file::FileEntry],
+    ids: &[u32],
+) -> Result<Option<Vec<usize>>, String> {
+    let real: HashSet<usize> = list
+        .iter()
+        .filter(|entry| !entry.padding)
+        .map(|entry| entry.index)
+        .collect();
+    let mut chosen = std::collections::BTreeSet::new();
+    for &id in ids {
+        let index = id as usize;
+        if !real.contains(&index) {
+            return Err(format!("this torrent has no file {id}"));
+        }
+        chosen.insert(index);
+    }
+    Ok((chosen.len() != real.len()).then(|| chosen.into_iter().collect()))
+}
+
+/// Whether `new` selects a file `old` did not (both sorted; `None` = all).
+fn adds_files(old: Option<&Vec<usize>>, new: Option<&Vec<usize>>) -> bool {
+    match (old, new) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(old), Some(new)) => new.iter().any(|index| old.binary_search(index).is_err()),
+    }
+}
+
+/// Fill a restored magnet job's file list from its stored `.torrent` copy.
+fn load_file_list(inner: &Inner, source: &str, snapshot: &JobSnapshot) {
+    let store = torrent_file::store_dir(&inner.jobs_path);
+    let Some(bytes) =
+        magnet_info_hash_hex(source).and_then(|hash| torrent_file::load(&store, &hash))
+    else {
+        return;
+    };
+    if let Ok(list) = torrent_file::files(&bytes) {
+        snapshot.files().set_list(Arc::new(list));
+    }
+}
+
 const PRIVATE_COPY_MISSING: &str =
     "this private torrent's .torrent copy is missing; add the file again";
 
@@ -1198,8 +1499,19 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                         (JobKind::Magnet, _) => {
                             match torrent_for_launch(&torrent_store, &source, private_torrent) {
                                 Ok(torrent) => {
-                                    start_download_reported(&source, torrent, snapshot, seed, dest)
-                                        .await
+                                    let resolved = tx.clone();
+                                    let on_metadata: OnMetadata = Box::new(move |bytes| {
+                                        let _ = resolved.send(EngineEvent::Resolved(bytes));
+                                    });
+                                    start_download_reported(
+                                        &source,
+                                        torrent,
+                                        snapshot,
+                                        seed,
+                                        dest,
+                                        Some(on_metadata),
+                                    )
+                                    .await
                                 }
                                 Err(error) => {
                                     snapshot.set_error(error);
@@ -1291,6 +1603,7 @@ mod tests {
             part_count: 4,
             debrid: None,
             private_torrent: false,
+            extra: Default::default(),
         }
     }
 
@@ -1503,8 +1816,11 @@ mod tests {
         assert!(snap.is_stopped());
     }
 
+    /// Up to 30 s: a loaded CI runner has taken over 10 s for a fake debrid
+    /// job's first poll (restart_keeps_the_remote_or_switches_to_peers, on
+    /// main and on #49).
     fn wait_for(mut done: impl FnMut() -> bool) {
-        for _ in 0..400 {
+        for _ in 0..1200 {
             if done() {
                 return;
             }
@@ -1996,5 +2312,257 @@ mod tests {
             }
             _ => panic!("expected jobs"),
         }
+    }
+
+    /// A session whose engine is the test: commands land in the receiver and
+    /// events come from the sender (no librqbit, no network).
+    fn detached(dir: &std::path::Path) -> (Session, Receiver<EngineCmd>, Sender<EngineEvent>) {
+        let (engine_tx, engine_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let dest = dir.join("dl");
+        std::fs::create_dir_all(&dest).unwrap();
+        let session = Session::with_channels(
+            dest,
+            dir.join("jobs.json"),
+            false,
+            false,
+            engine_tx,
+            event_rx,
+        );
+        (session, engine_rx, event_tx)
+    }
+
+    fn season_pack() -> Vec<u8> {
+        crate::torrent_file::tests::multi_torrent_bytes(
+            "Show",
+            &[
+                ("readme.nfo", 3, false),
+                ("Season 1/E01.mkv", 10, false),
+                (".pad/6", 6, true),
+                ("Season 1/E02.mkv", 12, false),
+                ("Season 2/E01.mkv", 8, false),
+            ],
+        )
+    }
+
+    /// One restored magnet job (id 5) for `bytes`, its copy stored.
+    fn restored_pack(
+        dir: &std::path::Path,
+        bytes: &[u8],
+        status: &str,
+    ) -> (Session, Receiver<EngineCmd>, Sender<EngineEvent>) {
+        let imported = torrent_file::parse(bytes).unwrap();
+        torrent_file::save(&dir.join("torrents"), &imported, bytes).unwrap();
+        let mut record = PersistedJob {
+            id: 5,
+            kind: "magnet".into(),
+            source: imported.magnet.clone(),
+            dest: dir.join("dl"),
+            added: "2026-11-01".into(),
+            title: "Show".into(),
+            status: status.into(),
+            ..Default::default()
+        };
+        record
+            .extra
+            .insert("futureKey".into(), serde_json::json!({"kept": true}));
+        jobs::save_jobs_to(&dir.join("jobs.json"), &[record]).unwrap();
+        let (session, rx, tx) = detached(dir);
+        assert!(matches!(session.hydrate(), Hydrate::Loaded));
+        (session, rx, tx)
+    }
+
+    fn downloads(rx: &Receiver<EngineCmd>) -> usize {
+        rx.try_iter()
+            .filter(|cmd| matches!(cmd, EngineCmd::Download { .. }))
+            .count()
+    }
+
+    #[test]
+    fn files_are_grouped_and_a_stopped_job_keeps_its_choice() {
+        let dir = tempdir().unwrap();
+        let (session, rx, _tx) = restored_pack(dir.path(), &season_pack(), "stopped");
+        let files = session.job_files(5).expect("list from the stored copy");
+        let shape: Vec<(String, Vec<(u32, String)>)> = files
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.folder.clone(),
+                    group
+                        .files
+                        .iter()
+                        .map(|file| (file.id, file.name.clone()))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (String::new(), vec![(0, "readme.nfo".to_string())]),
+                (
+                    "Season 1".to_string(),
+                    vec![(1, "E01.mkv".to_string()), (3, "E02.mkv".to_string())]
+                ),
+                ("Season 2".to_string(), vec![(4, "E01.mkv".to_string())]),
+            ]
+        );
+        assert!(files
+            .groups
+            .iter()
+            .flat_map(|g| &g.files)
+            .all(|f| f.selected));
+        assert_eq!(session.jobs()[0].snapshot.file_counts(), (4, 4));
+
+        // Padding and unknown ids are refused; all files is "no selection".
+        assert!(session.set_files(5, &[1, 2]).is_err());
+        assert!(session.set_files(5, &[9]).is_err());
+        assert_eq!(session.set_files(5, &[4, 3, 1, 0]), Ok(5));
+        assert_eq!(session.jobs()[0].snapshot.files().only(), None);
+
+        // A stopped job only stores the choice (no launch) and saves it,
+        // keeping what a newer build wrote on the record.
+        assert_eq!(session.set_files(5, &[3, 1, 1]), Ok(5));
+        assert_eq!(downloads(&rx), 0);
+        assert_eq!(session.jobs()[0].snapshot.files().only(), Some(&vec![1, 3]));
+        assert_eq!(session.jobs()[0].snapshot.file_counts(), (4, 2));
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("jobs.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["jobs"][0]["onlyFiles"], serde_json::json!([1, 3]));
+        assert_eq!(
+            saved["jobs"][0]["futureKey"],
+            serde_json::json!({"kept": true})
+        );
+        let row = &session.job_files(5).unwrap().groups[1].files[0];
+        assert!(row.selected);
+        assert!(!session.job_files(5).unwrap().groups[0].files[0].selected);
+
+        // Restart keeps the selection (and the newer build's field).
+        let id = session.restart(5, false, dir.path().join("dl")).unwrap();
+        assert_ne!(id, 5);
+        assert_eq!(downloads(&rx), 1);
+        let job = &session.jobs()[0];
+        assert_eq!(job.snapshot.files().only(), Some(&vec![1, 3]));
+        assert!(persist_record(job).extra.contains_key("futureKey"));
+    }
+
+    #[test]
+    fn ticking_a_file_on_a_done_job_reopens_it_in_place() {
+        let dir = tempdir().unwrap();
+        let (session, rx, _tx) = restored_pack(dir.path(), &season_pack(), "done");
+        assert!(session.jobs()[0].snapshot.is_done());
+        // Unticking on a done job only stores it: nothing to download.
+        assert_eq!(session.set_files(5, &[0]), Ok(5));
+        assert!(session.jobs()[0].snapshot.is_done());
+        assert_eq!(downloads(&rx), 0);
+        assert_eq!(session.set_files(5, &[]), Ok(5));
+        assert!(session.jobs()[0].snapshot.is_done());
+        assert_eq!(downloads(&rx), 0);
+        // Ticking a file starts it again under the same id and date.
+        assert_eq!(session.set_files(5, &[3]), Ok(5));
+        let job = session.jobs()[0].clone();
+        assert_eq!((job.id, job.added.as_str()), (5, "2026-11-01"));
+        assert!(job.snapshot.is_active());
+        assert_eq!(job.snapshot.files().only(), Some(&vec![3]));
+        assert_eq!(downloads(&rx), 1);
+        // The reopened job is running: more ticks are applied by its engine.
+        let generation = session.jobs()[0].snapshot.files().generation;
+        assert_eq!(session.set_files(5, &[0, 3]), Ok(5));
+        assert_eq!(downloads(&rx), 0);
+        assert_eq!(
+            session.jobs()[0].snapshot.files().generation,
+            generation + 1
+        );
+        // Unchanged selection: nothing to do.
+        assert_eq!(session.set_files(5, &[3, 0]), Ok(5));
+        assert_eq!(
+            session.jobs()[0].snapshot.files().generation,
+            generation + 1
+        );
+    }
+
+    #[test]
+    fn only_a_newly_ticked_file_counts_as_adding() {
+        assert!(!adds_files(None, Some(&vec![1])));
+        assert!(adds_files(Some(&vec![1]), None));
+        assert!(adds_files(Some(&vec![1, 3]), Some(&vec![1, 2])));
+        assert!(!adds_files(Some(&vec![1, 3]), Some(&vec![3])));
+        assert!(!adds_files(Some(&vec![1, 3]), Some(&vec![])));
+    }
+
+    #[test]
+    fn only_torrent_jobs_choose_files() {
+        let dir = tempdir().unwrap();
+        let (session, _rx, _tx) = detached(dir.path());
+        assert_eq!(session.set_files(1, &[0]).unwrap_err(), "job gone");
+        let mut job = sample_job("Sintel", "https://example.com/s.mkv", "/tmp/films");
+        job.id = 3;
+        mutex_lock(&session.inner).jobs.push(job);
+        assert!(session.set_files(3, &[0]).is_err());
+        assert!(session.job_files(3).is_none());
+        // A magnet whose metadata has not arrived has no list yet.
+        let mut magnet = sample_job(
+            "M",
+            "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056",
+            "/tmp/films",
+        );
+        magnet.id = 4;
+        magnet.kind = JobKind::Magnet;
+        mutex_lock(&session.inner).jobs.push(magnet);
+        assert!(session.job_files(4).is_none());
+        assert!(session.set_files(4, &[0]).is_err());
+    }
+
+    #[test]
+    fn a_resolved_magnet_keeps_one_copy() {
+        use crate::torrent_file::tests::private_torrent_bytes;
+        let dir = tempdir().unwrap();
+        let (session, _rx, tx) = detached(dir.path());
+        let store = dir.path().join("torrents");
+        let bytes = season_pack();
+        let imported = torrent_file::parse(&bytes).unwrap();
+        let copy = store.join(format!("{}.torrent", imported.hash_hex));
+
+        // No job for that hash: nothing is kept.
+        tx.send(EngineEvent::Resolved(bytes.clone())).unwrap();
+        session.drain_events();
+        assert!(!copy.exists());
+
+        let mut job = sample_job("Show", &imported.magnet, "/tmp/films");
+        job.id = 2;
+        job.kind = JobKind::Magnet;
+        mutex_lock(&session.inner).jobs.push(job);
+        tx.send(EngineEvent::Resolved(bytes.clone())).unwrap();
+        session.drain_events();
+        assert_eq!(std::fs::read(&copy).unwrap(), bytes);
+        assert_eq!(session.job_files(2).unwrap().groups.len(), 3);
+        assert!(!session.jobs()[0].private_torrent);
+        // The copy is kept for that job.
+        prune_torrents(&mutex_lock(&session.inner));
+        assert!(copy.exists());
+
+        // An existing copy is never replaced.
+        std::fs::write(&copy, b"placeholder that does not parse").unwrap();
+        torrent_file::save(&store, &imported, &bytes).unwrap();
+        let first = std::fs::read(&copy).unwrap();
+        tx.send(EngineEvent::Resolved(bytes.clone())).unwrap();
+        session.drain_events();
+        assert_eq!(std::fs::read(&copy).unwrap(), first);
+
+        // A magnet that turns out private is marked so.
+        let private = private_torrent_bytes("Private.mkv", &[]);
+        let hidden = torrent_file::parse(&private).unwrap();
+        let mut job = sample_job("P", &hidden.magnet, "/tmp/films");
+        job.id = 3;
+        job.kind = JobKind::Magnet;
+        mutex_lock(&session.inner).jobs.push(job);
+        tx.send(EngineEvent::Resolved(private)).unwrap();
+        session.drain_events();
+        assert!(session
+            .jobs()
+            .iter()
+            .any(|job| job.id == 3 && job.private_torrent));
     }
 }

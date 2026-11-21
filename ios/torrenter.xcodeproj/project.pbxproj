@@ -13,6 +13,7 @@
 		3C518F465432402E820F6FD0 /* torrenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2335FFB73EA4AD58582493C /* torrenter.swift */; };
 		63DA998EE0B1418BB8BC4CD1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F783D3E13C949ECAA9EAD5B /* ContentView.swift */; };
 		6754B42AC8E14BEAAA86E8DA /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DC005C7743246B5B8DC8613 /* Format.swift */; };
+		9D6F59895553F4D26D6576F9 /* FilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B3FA493F8478219F22C6FF6 /* FilesView.swift */; };
 		7CD553FCE27C4F4CB538E85A /* ShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E2B3BCF83142E9ABF1A7FA /* ShareSheet.swift */; };
 		8EC69E4BDDFF412C8D9FC185 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 04E141E951114AC3869AD5ED /* Security.framework */; };
 		A119A4F5CC0440A9A0A9998C /* TorrenterFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4F641A277B6946089CB54536 /* TorrenterFFI.xcframework */; };
@@ -46,6 +47,7 @@
 		5D9E729B663043049E053191 /* Paths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Paths.swift; sourceTree = "<group>"; };
 		6C2BD598FA5746B792556DDA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		6DC005C7743246B5B8DC8613 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
+		7B3FA493F8478219F22C6FF6 /* FilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilesView.swift; sourceTree = "<group>"; };
 		76B19D840C774EB7AED8D4DF /* EngineOwner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineOwner.swift; sourceTree = "<group>"; };
 		94E2B3BCF83142E9ABF1A7FA /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
 		97B7173CB6BA406F8106B0DE /* torrenter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = torrenter.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -106,6 +108,7 @@
 				AB10000000000000000000F3 /* Keychain.swift */,
 				0E9E28A699024C3F953BDBBF /* Theme.swift */,
 				6DC005C7743246B5B8DC8613 /* Format.swift */,
+				7B3FA493F8478219F22C6FF6 /* FilesView.swift */,
 				5D9E729B663043049E053191 /* Paths.swift */,
 				94E2B3BCF83142E9ABF1A7FA /* ShareSheet.swift */,
 				E2335FFB73EA4AD58582493C /* torrenter.swift */,
@@ -233,6 +236,7 @@
 				AB10000000000000000000B3 /* Keychain.swift in Sources */,
 				BE12C43783DA4C7DA286C99A /* Theme.swift in Sources */,
 				6754B42AC8E14BEAAA86E8DA /* Format.swift in Sources */,
+				9D6F59895553F4D26D6576F9 /* FilesView.swift in Sources */,
 				BF50B220D1B54BBF9B18E5E2 /* Paths.swift in Sources */,
 				7CD553FCE27C4F4CB538E85A /* ShareSheet.swift in Sources */,
 				3C518F465432402E820F6FD0 /* torrenter.swift in Sources */,
@@ -313,7 +317,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.9.4;
+				MARKETING_VERSION = 3.10.0;
 				OTHER_LDFLAGS = (
 					"-lc++",
 					"-framework",
@@ -347,7 +351,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.9.4;
+				MARKETING_VERSION = 3.10.0;
 				OTHER_LDFLAGS = (
 					"-lc++",
 					"-framework",
@@ -378,7 +382,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.9.4;
+				MARKETING_VERSION = 3.10.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.danted4.torrenter.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -402,7 +406,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				MARKETING_VERSION = 3.9.4;
+				MARKETING_VERSION = 3.10.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.danted4.torrenter.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

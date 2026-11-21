@@ -12,6 +12,10 @@ final class EngineOwner: ObservableObject {
     /// settings) does not.
     let jobList = JobList()
     var jobs: [JobView] { jobList.jobs }
+    /// The job whose files screen replaces the list (its id), and its rows
+    /// (their own object, polled only while the screen is open).
+    @Published var filesOpen: UInt64?
+    let fileList = FileList()
     @Published var notice: String?
     @Published private(set) var bannerText: String = ""
     @Published var keepAliveOn: Bool = Prefs.keepAlive() {
@@ -258,6 +262,24 @@ final class EngineOwner: ObservableObject {
             notice = engineMessage(error)
             return false
         }
+    }
+
+    func openFiles(job: JobView) {
+        guard let files = engine?.jobFiles(id: job.id) else { return }
+        fileList.update(files)
+        filesOpen = job.id
+    }
+
+    /// Apply a new file selection at once; a done job starts again under
+    /// the id this returns.
+    func setFiles(_ ids: [UInt32]) {
+        guard let engine, let id = filesOpen else { return }
+        do {
+            filesOpen = try engine.setJobFiles(id: id, ids: ids)
+        } catch {
+            notice = engineMessage(error)
+        }
+        refresh()
     }
 
     func togglePause(id: UInt64) {
@@ -633,11 +655,34 @@ final class EngineOwner: ObservableObject {
         }
         engine.persist(force: !engine.anyActive())
         jobList.update(engine.jobs())
+        refreshFiles()
         syncKeepAlive()
     }
 
     private func refresh() {
         jobList.update(engine?.jobs() ?? [])
+        refreshFiles()
+    }
+
+    private func refreshFiles() {
+        guard let id = filesOpen else { return }
+        if let files = engine?.jobFiles(id: id) {
+            fileList.update(files)
+        } else {
+            filesOpen = nil
+        }
+    }
+}
+
+/// The open files screen's rows, observed only by that screen.
+@MainActor
+final class FileList: ObservableObject {
+    @Published private(set) var files: JobFilesView?
+
+    func update(_ next: JobFilesView?) {
+        if next != files {
+            files = next
+        }
     }
 }
 
