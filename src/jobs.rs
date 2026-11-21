@@ -320,7 +320,7 @@ impl PersistedJob {
         }
         {
             let mut files = snapshot.files();
-            files.only = self.only_files.clone();
+            files.set_only(self.only_files.clone());
             files.have = self.file_have.clone();
         }
         if self.status == "failed" {
@@ -571,7 +571,7 @@ mod tests {
         assert!(json.get("onlyFiles").is_none() && json.get("fileHave").is_none());
         let snapshot = JobSnapshot::default();
         back.apply_to(&snapshot);
-        assert_eq!(snapshot.files().only, Some(vec![0, 3]));
+        assert_eq!(snapshot.files().only(), Some(&vec![0, 3]));
         assert_eq!(snapshot.files().have, vec![5, 0, 0, 7]);
     }
 

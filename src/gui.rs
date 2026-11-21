@@ -279,6 +279,8 @@ struct GuiApp {
     /// The job whose files screen replaces the job list (its id).
     files_open: Option<u64>,
     file_query: String,
+    /// The open files screen's rows and when they were read.
+    files_cache: Option<(u64, Instant, Arc<session::JobFiles>)>,
     glass_tint: u8,
     applied_glass_tint: u8,
     settings_open: bool,
@@ -462,6 +464,7 @@ impl GuiApp {
             job_query: String::new(),
             files_open: None,
             file_query: String::new(),
+            files_cache: None,
             glass_tint,
             applied_glass_tint: glass_tint,
             settings_open: false,
@@ -1686,7 +1689,23 @@ impl GuiApp {
             self.files_open = None;
             return;
         };
-        let Some(files) = self.session.job_files(id) else {
+        // Polled like the job list, not every frame: a big torrent's rows
+        // are rebuilt at most every FILES_POLL (and right after a change).
+        let stale = self
+            .files_cache
+            .as_ref()
+            .is_none_or(|(cached, at, _)| *cached != id || at.elapsed() >= FILES_POLL);
+        if stale {
+            self.files_cache = self
+                .session
+                .job_files(id)
+                .map(|files| (id, Instant::now(), Arc::new(files)));
+        }
+        let Some(files) = self
+            .files_cache
+            .as_ref()
+            .map(|(_, _, files)| Arc::clone(files))
+        else {
             self.files_open = None;
             return;
         };
@@ -1722,22 +1741,29 @@ impl GuiApp {
             .filter(|file| file.selected)
             .map(|file| file.id)
             .collect();
-        let groups: Vec<session::FileGroup> = files
-            .groups
-            .into_iter()
-            .filter_map(|mut group| {
-                let folder = group.folder.clone();
-                group
-                    .files
-                    .retain(|file| file_matches(&folder, &file.name, &query));
-                (!group.files.is_empty()).then_some(group)
-            })
-            .collect();
-        let shown: Vec<u32> = groups
-            .iter()
-            .flat_map(|group| &group.files)
-            .map(|file| file.id)
-            .collect();
+        // One line per folder header and per file, all the same height, so
+        // only the visible ones are laid out.
+        let mut lines: Vec<FilesLine> = Vec::new();
+        let mut shown: Vec<u32> = Vec::new();
+        for (g, group) in files.groups.iter().enumerate() {
+            let matching: Vec<usize> = group
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(_, file)| file_matches(&group.folder, &file.name, &query))
+                .map(|(f, _)| f)
+                .collect();
+            if matching.is_empty() {
+                continue;
+            }
+            if !group.folder.is_empty() {
+                lines.push(FilesLine::Folder(g, matching.clone()));
+            }
+            for f in matching {
+                shown.push(group.files[f].id);
+                lines.push(FilesLine::File(g, f));
+            }
+        }
         let toggled = |ids: &[u32], on: bool| {
             let mut next = chosen.clone();
             for id in ids {
@@ -1768,103 +1794,76 @@ impl GuiApp {
         });
         ui.add_space(6.0);
         hairline(ui, palette);
-        if groups.is_empty() {
+        if lines.is_empty() {
             ui.centered_and_justified(|ui| {
                 glass_label(ui, "no files match that search", 14.0, palette.dim);
             });
             return;
         }
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for group in &groups {
-                    if !group.folder.is_empty() {
-                        let ids: Vec<u32> = group.files.iter().map(|file| file.id).collect();
-                        let on = group.files.iter().filter(|file| file.selected).count();
-                        let state = check_of(on, group.files.len());
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(24.0);
-                            if check_box(ui, palette, state).clicked() {
-                                next = Some(toggled(&ids, state != Check::On));
-                            }
-                            ui.add_space(6.0);
-                            glass_label(ui, truncate_middle(&group.folder, 64), 12.0, palette.fg);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(SCROLLBAR_ROOM);
-                                    glass_label(
-                                        ui,
-                                        format!("{on} of {}", group.files.len()),
-                                        12.0,
-                                        palette.dim,
-                                    );
-                                },
-                            );
-                        });
-                        hairline(ui, palette);
-                    }
-                    for file in &group.files {
-                        let state = if file.selected { Check::On } else { Check::Off };
-                        let color = if file.selected {
-                            palette.fg
-                        } else {
-                            palette.dim
-                        };
-                        let fraction = if file.size == 0 {
-                            1.0
-                        } else {
-                            (file.have as f32 / file.size as f32).clamp(0.0, 1.0)
-                        };
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(26.0);
-                            if !group.folder.is_empty() {
-                                ui.add_space(14.0);
-                            }
-                            let mut clicked = check_box(ui, palette, state).clicked();
-                            ui.add_space(6.0);
-                            clicked |= click_text(ui, truncate_middle(&file.name, 56), 13.0, color)
-                                .clicked();
-                            ui.add_space(8.0);
-                            glass_label(ui, format_size(file.size), 12.0, palette.dim);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(SCROLLBAR_ROOM);
-                                    glass_label(
-                                        ui,
-                                        format!("{:>3}%", (fraction * 100.0).floor() as u32),
-                                        12.0,
-                                        palette.dim,
-                                    );
+        const LINE_H: f32 = 28.0;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, LINE_H, lines.len(), |ui, range| {
+                    for line in &lines[range] {
+                        let width = ui.available_width();
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, LINE_H - 1.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| match line {
+                                FilesLine::Folder(g, matching) => {
+                                    let group = &files.groups[*g];
+                                    let ids: Vec<u32> =
+                                        matching.iter().map(|&f| group.files[f].id).collect();
+                                    let on = matching
+                                        .iter()
+                                        .filter(|&&f| group.files[f].selected)
+                                        .count();
+                                    let state = check_of(on, matching.len());
+                                    if check_box(ui, palette, state).clicked() {
+                                        next = Some(toggled(&ids, state != Check::On));
+                                    }
                                     ui.add_space(6.0);
-                                    let bar = if file.selected {
-                                        palette.fg
-                                    } else {
-                                        mix_rgb(palette.fg, palette.dim, 0.75)
-                                    };
-                                    paint_job_progress(
+                                    glass_label(
                                         ui,
-                                        bar,
-                                        palette.row_alt,
-                                        Some(fraction),
-                                        Some(150.0),
+                                        truncate_middle(&group.folder, 64),
+                                        12.0,
+                                        palette.fg,
                                     );
-                                },
-                            );
-                            if clicked {
-                                next = Some(toggled(&[file.id], !file.selected));
-                            }
-                        });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(SCROLLBAR_ROOM);
+                                            glass_label(
+                                                ui,
+                                                format!("{on} of {}", matching.len()),
+                                                12.0,
+                                                palette.dim,
+                                            );
+                                        },
+                                    );
+                                }
+                                FilesLine::File(g, f) => {
+                                    let group = &files.groups[*g];
+                                    let file = &group.files[*f];
+                                    if !group.folder.is_empty() {
+                                        ui.add_space(14.0);
+                                    }
+                                    if file_row(ui, palette, file) {
+                                        next = Some(toggled(&[file.id], !file.selected));
+                                    }
+                                }
+                            },
+                        );
                         hairline(ui, palette);
                     }
-                }
-            });
+                });
+        });
         if let Some(next) = next {
             let mut ids: Vec<u32> = next.into_iter().collect();
             ids.sort_unstable();
+            self.files_cache = None;
             match self.session.set_files(id, &ids) {
                 Ok(id) => self.files_open = Some(id),
                 Err(error) => self.toast_fail(error),
@@ -3912,6 +3911,54 @@ fn check_box(ui: &mut egui::Ui, palette: Theme, state: Check) -> egui::Response 
         }
     }
     response
+}
+
+/// How often an open files screen re-reads its rows.
+const FILES_POLL: Duration = Duration::from_millis(250);
+
+/// One line of the files list: a folder header (with the indices of its
+/// files that match the search) or a file (group, file).
+enum FilesLine {
+    Folder(usize, Vec<usize>),
+    File(usize, usize),
+}
+
+/// A file's line: checkbox, name, size, then bar and percent on the right.
+/// True when the checkbox or name was clicked.
+fn file_row(ui: &mut egui::Ui, palette: Theme, file: &session::FileRow) -> bool {
+    let state = if file.selected { Check::On } else { Check::Off };
+    let color = if file.selected {
+        palette.fg
+    } else {
+        palette.dim
+    };
+    let fraction = if file.size == 0 {
+        1.0
+    } else {
+        (file.have as f32 / file.size as f32).clamp(0.0, 1.0)
+    };
+    let mut clicked = check_box(ui, palette, state).clicked();
+    ui.add_space(6.0);
+    clicked |= click_text(ui, truncate_middle(&file.name, 56), 13.0, color).clicked();
+    ui.add_space(8.0);
+    glass_label(ui, format_size(file.size), 12.0, palette.dim);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(SCROLLBAR_ROOM);
+        glass_label(
+            ui,
+            format!("{:>3}%", (fraction * 100.0).floor() as u32),
+            12.0,
+            palette.dim,
+        );
+        ui.add_space(6.0);
+        let bar = if file.selected {
+            palette.fg
+        } else {
+            mix_rgb(palette.fg, palette.dim, 0.75)
+        };
+        paint_job_progress(ui, bar, palette.row_alt, Some(fraction), Some(150.0));
+    });
+    clicked
 }
 
 /// Keeps the files list's right-hand labels clear of the scroll bar.

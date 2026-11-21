@@ -129,29 +129,64 @@ const WAITING_PHASES: [&str; 4] = [
     "fetching",
 ];
 
-/// File selection for a torrent job, shared by the fronts (which set `only`)
-/// and the engine (which applies it and fills `list` and `have`).
+/// File selection for a torrent job, shared by the fronts (which set the
+/// selection) and the engine (which applies it and fills the list and `have`).
+/// The selection is kept sorted and the counts cached, so per-frame and
+/// per-poll reads stay cheap on torrents with many files.
 #[derive(Debug, Default, Clone)]
 pub struct FileState {
-    /// Files to download (librqbit indices); `None` = all.
-    pub only: Option<Vec<usize>>,
+    /// Files to download (sorted librqbit indices); `None` = all.
+    only: Option<Vec<usize>>,
     /// Bumped on every change, so the engine knows what it has applied.
     pub generation: u64,
     /// Bytes on disk per file (live, or the last saved values).
     pub have: Vec<u64>,
     /// The torrent's files, once the metadata is known.
-    pub list: Option<Arc<Vec<crate::torrent_file::FileEntry>>>,
+    list: Option<Arc<Vec<crate::torrent_file::FileEntry>>>,
+    /// (real files, selected real files), kept in step with `only` and `list`.
+    counts: (u32, u32),
 }
 
 impl FileState {
+    pub fn only(&self) -> Option<&Vec<usize>> {
+        self.only.as_ref()
+    }
+
+    pub fn list(&self) -> Option<&Arc<Vec<crate::torrent_file::FileEntry>>> {
+        self.list.as_ref()
+    }
+
+    /// Set the selection (sorted and deduplicated here). Does not bump
+    /// `generation`: callers that want the engine to apply it do that.
+    pub fn set_only(&mut self, only: Option<Vec<usize>>) {
+        self.only = only.map(|mut only| {
+            only.sort_unstable();
+            only.dedup();
+            only
+        });
+        self.recount();
+    }
+
+    pub fn set_list(&mut self, list: Arc<Vec<crate::torrent_file::FileEntry>>) {
+        self.list = Some(list);
+        self.recount();
+    }
+
     pub fn is_selected(&self, index: usize) -> bool {
-        self.only.as_ref().is_none_or(|only| only.contains(&index))
+        self.only
+            .as_ref()
+            .is_none_or(|only| only.binary_search(&index).is_ok())
     }
 
     /// (real files, selected real files); (0, 0) while the list is unknown.
     pub fn counts(&self) -> (u32, u32) {
+        self.counts
+    }
+
+    fn recount(&mut self) {
         let Some(list) = &self.list else {
-            return (0, 0);
+            self.counts = (0, 0);
+            return;
         };
         let mut real = 0u32;
         let mut selected = 0u32;
@@ -161,7 +196,7 @@ impl FileState {
                 selected += 1;
             }
         }
-        (real, selected)
+        self.counts = (real, selected);
     }
 }
 

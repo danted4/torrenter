@@ -89,7 +89,7 @@ pub fn persist_record(job: &Job) -> PersistedJob {
     let files = match job.kind {
         JobKind::Magnet => {
             let files = job.snapshot.files();
-            (files.only.clone(), files.have.clone())
+            (files.only().cloned(), files.have.clone())
         }
         _ => (None, Vec::new()),
     };
@@ -653,7 +653,7 @@ impl Session {
         };
         if let (JobKind::Magnet, Some((_, bytes))) = (kind, torrent) {
             if let Ok(list) = torrent_file::files(bytes) {
-                job.snapshot.files().list = Some(Arc::new(list));
+                job.snapshot.files().set_list(Arc::new(list));
             }
         }
         let cmd = match launch(&inner, &job) {
@@ -854,7 +854,7 @@ impl Session {
             .iter()
             .find(|job| job.id == id && job.kind == JobKind::Magnet)?;
         let files = job.snapshot.files();
-        let list = files.list.clone()?;
+        let list = files.list()?.clone();
         Some(JobFiles {
             id,
             groups: group_files(&list, &files),
@@ -876,18 +876,21 @@ impl Session {
         }
         let reopen = {
             let mut files = job.snapshot.files();
-            let Some(list) = files.list.clone() else {
+            let Some(list) = files.list().cloned() else {
                 return Err("this torrent's file list is not known yet".into());
             };
             let only = normalize_selection(&list, ids)?;
-            if files.only == only {
+            if files.only() == only.as_ref() {
                 return Ok(job.id);
             }
-            files.only = only;
+            let adds = adds_files(files.only(), only.as_ref());
+            files.set_only(only);
             files.generation += 1;
             // Checked under the files lock: the engine finishes a job only
-            // under it, after checking the generation it applied.
-            job.snapshot.is_done()
+            // under it, after checking the generation it applied. A done job
+            // starts again only for a newly ticked file; an untick just stays
+            // stored (nothing to download).
+            adds && job.snapshot.is_done()
         };
         if reopen {
             let (seed, dest) = (job.seed, job.dest.clone());
@@ -932,8 +935,8 @@ impl Session {
                 job.private_torrent = true;
             }
             let mut files = job.snapshot.files();
-            if files.list.is_none() {
-                files.list = list.clone();
+            if let (None, Some(list)) = (files.list(), &list) {
+                files.set_list(Arc::clone(list));
             }
         }
         persist_inner(&mut inner, true);
@@ -1252,6 +1255,7 @@ fn group_files(
         folder: String::new(),
         files: Vec::new(),
     }];
+    let mut by_folder: HashMap<String, usize> = HashMap::from([(String::new(), 0)]);
     for entry in list.iter().filter(|entry| !entry.padding) {
         let (folder, name) = match entry.path.rsplit_once('/') {
             Some((folder, name)) => (folder.to_string(), name.to_string()),
@@ -1269,12 +1273,15 @@ fn group_files(
                 .min(entry.len),
             selected: state.is_selected(entry.index),
         };
-        match groups.iter_mut().find(|group| group.folder == folder) {
-            Some(group) => group.files.push(row),
-            None => groups.push(FileGroup {
-                folder,
-                files: vec![row],
-            }),
+        match by_folder.get(&folder) {
+            Some(&index) => groups[index].files.push(row),
+            None => {
+                by_folder.insert(folder.clone(), groups.len());
+                groups.push(FileGroup {
+                    folder,
+                    files: vec![row],
+                });
+            }
         }
     }
     groups.retain(|group| !group.files.is_empty());
@@ -1286,23 +1293,29 @@ fn normalize_selection(
     list: &[torrent_file::FileEntry],
     ids: &[u32],
 ) -> Result<Option<Vec<usize>>, String> {
-    let real: Vec<usize> = list
+    let real: HashSet<usize> = list
         .iter()
         .filter(|entry| !entry.padding)
         .map(|entry| entry.index)
         .collect();
-    let mut chosen: Vec<usize> = Vec::new();
+    let mut chosen = std::collections::BTreeSet::new();
     for &id in ids {
         let index = id as usize;
         if !real.contains(&index) {
             return Err(format!("this torrent has no file {id}"));
         }
-        if !chosen.contains(&index) {
-            chosen.push(index);
-        }
+        chosen.insert(index);
     }
-    chosen.sort_unstable();
-    Ok((chosen.len() != real.len()).then_some(chosen))
+    Ok((chosen.len() != real.len()).then(|| chosen.into_iter().collect()))
+}
+
+/// Whether `new` selects a file `old` did not (both sorted; `None` = all).
+fn adds_files(old: Option<&Vec<usize>>, new: Option<&Vec<usize>>) -> bool {
+    match (old, new) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(old), Some(new)) => new.iter().any(|index| old.binary_search(index).is_err()),
+    }
 }
 
 /// Fill a restored magnet job's file list from its stored `.torrent` copy.
@@ -1314,7 +1327,7 @@ fn load_file_list(inner: &Inner, source: &str, snapshot: &JobSnapshot) {
         return;
     };
     if let Ok(list) = torrent_file::files(&bytes) {
-        snapshot.files().list = Some(Arc::new(list));
+        snapshot.files().set_list(Arc::new(list));
     }
 }
 
@@ -1803,8 +1816,11 @@ mod tests {
         assert!(snap.is_stopped());
     }
 
+    /// Up to 30 s: a loaded CI runner has taken over 10 s for a fake debrid
+    /// job's first poll (restart_keeps_the_remote_or_switches_to_peers, on
+    /// main and on #49).
     fn wait_for(mut done: impl FnMut() -> bool) {
-        for _ in 0..400 {
+        for _ in 0..1200 {
             if done() {
                 return;
             }
@@ -2403,13 +2419,13 @@ mod tests {
         assert!(session.set_files(5, &[1, 2]).is_err());
         assert!(session.set_files(5, &[9]).is_err());
         assert_eq!(session.set_files(5, &[4, 3, 1, 0]), Ok(5));
-        assert_eq!(session.jobs()[0].snapshot.files().only, None);
+        assert_eq!(session.jobs()[0].snapshot.files().only(), None);
 
         // A stopped job only stores the choice (no launch) and saves it,
         // keeping what a newer build wrote on the record.
         assert_eq!(session.set_files(5, &[3, 1, 1]), Ok(5));
         assert_eq!(downloads(&rx), 0);
-        assert_eq!(session.jobs()[0].snapshot.files().only, Some(vec![1, 3]));
+        assert_eq!(session.jobs()[0].snapshot.files().only(), Some(&vec![1, 3]));
         assert_eq!(session.jobs()[0].snapshot.file_counts(), (4, 2));
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("jobs.json")).unwrap())
@@ -2428,7 +2444,7 @@ mod tests {
         assert_ne!(id, 5);
         assert_eq!(downloads(&rx), 1);
         let job = &session.jobs()[0];
-        assert_eq!(job.snapshot.files().only, Some(vec![1, 3]));
+        assert_eq!(job.snapshot.files().only(), Some(&vec![1, 3]));
         assert!(persist_record(job).extra.contains_key("futureKey"));
     }
 
@@ -2437,19 +2453,43 @@ mod tests {
         let dir = tempdir().unwrap();
         let (session, rx, _tx) = restored_pack(dir.path(), &season_pack(), "done");
         assert!(session.jobs()[0].snapshot.is_done());
+        // Unticking on a done job only stores it: nothing to download.
         assert_eq!(session.set_files(5, &[0]), Ok(5));
+        assert!(session.jobs()[0].snapshot.is_done());
+        assert_eq!(downloads(&rx), 0);
+        assert_eq!(session.set_files(5, &[]), Ok(5));
+        assert!(session.jobs()[0].snapshot.is_done());
+        assert_eq!(downloads(&rx), 0);
+        // Ticking a file starts it again under the same id and date.
+        assert_eq!(session.set_files(5, &[3]), Ok(5));
         let job = session.jobs()[0].clone();
         assert_eq!((job.id, job.added.as_str()), (5, "2026-11-01"));
         assert!(job.snapshot.is_active());
-        assert_eq!(job.snapshot.files().only, Some(vec![0]));
+        assert_eq!(job.snapshot.files().only(), Some(&vec![3]));
         assert_eq!(downloads(&rx), 1);
         // The reopened job is running: more ticks are applied by its engine.
-        assert_eq!(session.set_files(5, &[0, 1]), Ok(5));
+        let generation = session.jobs()[0].snapshot.files().generation;
+        assert_eq!(session.set_files(5, &[0, 3]), Ok(5));
         assert_eq!(downloads(&rx), 0);
-        assert_eq!(session.jobs()[0].snapshot.files().generation, 2);
+        assert_eq!(
+            session.jobs()[0].snapshot.files().generation,
+            generation + 1
+        );
         // Unchanged selection: nothing to do.
-        assert_eq!(session.set_files(5, &[1, 0]), Ok(5));
-        assert_eq!(session.jobs()[0].snapshot.files().generation, 2);
+        assert_eq!(session.set_files(5, &[3, 0]), Ok(5));
+        assert_eq!(
+            session.jobs()[0].snapshot.files().generation,
+            generation + 1
+        );
+    }
+
+    #[test]
+    fn only_a_newly_ticked_file_counts_as_adding() {
+        assert!(!adds_files(None, Some(&vec![1])));
+        assert!(adds_files(Some(&vec![1]), None));
+        assert!(adds_files(Some(&vec![1, 3]), Some(&vec![1, 2])));
+        assert!(!adds_files(Some(&vec![1, 3]), Some(&vec![3])));
+        assert!(!adds_files(Some(&vec![1, 3]), Some(&vec![])));
     }
 
     #[test]

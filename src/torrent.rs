@@ -429,7 +429,7 @@ async fn run_torrent(
     let (mut applied, only_files) = match progress.snapshot() {
         Some(snapshot) => {
             let files = snapshot.files();
-            (files.generation, files.only.clone())
+            (files.generation, files.only().cloned())
         }
         None => (0, None),
     };
@@ -546,11 +546,12 @@ async fn run_torrent(
                 apply_live_stats(&progress, &stats, session);
                 let initializing = matches!(stats.state, TorrentStatsState::Initializing { .. });
                 let settled = matches!(stats.state, TorrentStatsState::Live | TorrentStatsState::Paused);
+                let mut applied_now = false;
                 if let Some(snapshot) = progress.snapshot() {
                     sync_files(snapshot, &handle, &stats, &mut on_metadata);
                     let wanted = {
                         let files = snapshot.files();
-                        (files.generation != applied).then(|| (files.generation, files.only.clone()))
+                        (files.generation != applied).then(|| (files.generation, files.only().cloned()))
                     };
                     if let Some((generation, only)) = wanted.filter(|_| !initializing) {
                         let set: HashSet<usize> = match only {
@@ -560,10 +561,17 @@ async fn run_torrent(
                         // Refused while librqbit is still checking: tried again next tick.
                         if session.update_only_files(&handle, &set).await.is_ok() {
                             applied = generation;
+                            applied_now = true;
                         }
                     }
                 }
-                let finished_now = selection_finished(stats.finished, settled, applied, generation_of(&progress));
+                let finished_now = selection_finished(
+                    stats.finished,
+                    settled,
+                    applied,
+                    generation_of(&progress),
+                    applied_now,
+                );
                 let total = stats.total_bytes.max(1);
                 if finished_now && !want_pause && !seed {
                     // Finish under the files lock: a tick that lands now
@@ -595,7 +603,7 @@ async fn run_torrent(
                     }
                     continue;
                 }
-                if seed && finished_now != download_done && !want_pause {
+                if seed && !applied_now && finished_now != download_done && !want_pause {
                     download_done = finished_now;
                     if download_done {
                         progress.set_length(total);
@@ -660,9 +668,17 @@ fn generation_of(progress: &ProgressHandle) -> u64 {
 
 /// The torrent is done with the selection the user last asked for: every
 /// selected byte is there, librqbit is past its check, and no newer
-/// selection is waiting to be applied.
-fn selection_finished(finished: bool, settled: bool, applied: u64, generation: u64) -> bool {
-    finished && settled && applied == generation
+/// selection is waiting to be applied. `finished` comes from stats read
+/// before this tick's apply, so a tick that just applied a selection never
+/// finishes (the next tick judges it on fresh stats).
+fn selection_finished(
+    finished: bool,
+    settled: bool,
+    applied: u64,
+    generation: u64,
+    applied_now: bool,
+) -> bool {
+    finished && settled && applied == generation && !applied_now
 }
 
 /// Publish the file list once the metadata is known (and hand a magnet's
@@ -673,12 +689,21 @@ fn sync_files(
     stats: &librqbit::TorrentStats,
     on_metadata: &mut Option<OnMetadata>,
 ) {
-    let needs_list = snapshot.files().list.is_none();
+    let needs_list = snapshot.files().list().is_none();
     if needs_list || on_metadata.is_some() {
         if let Ok(bytes) = handle.with_metadata(|m| m.torrent_bytes.to_vec()) {
             if needs_list {
                 if let Ok(list) = crate::torrent_file::files(&bytes) {
-                    snapshot.files().list = Some(Arc::new(list));
+                    let real = list.iter().filter(|entry| !entry.padding).count();
+                    let mut files = snapshot.files();
+                    files.set_list(Arc::new(list));
+                    // A magnet's own select-only list (`so=`) is what librqbit
+                    // downloads when no selection was given: show it as such.
+                    if files.only().is_none() {
+                        if let Some(engine) = handle.only_files().filter(|only| only.len() < real) {
+                            files.set_only(Some(engine));
+                        }
+                    }
                 }
             }
             if let Some(callback) = on_metadata.take() {
@@ -698,13 +723,16 @@ mod tests {
     #[test]
     fn a_job_finishes_only_with_the_latest_selection_applied() {
         // Every selected byte there, past the check, nothing newer waiting.
-        assert!(selection_finished(true, true, 3, 3));
+        assert!(selection_finished(true, true, 3, 3, false));
         // Still checking the data on disk.
-        assert!(!selection_finished(true, false, 3, 3));
+        assert!(!selection_finished(true, false, 3, 3, false));
         // A tick arrived that the engine has not applied yet.
-        assert!(!selection_finished(true, true, 2, 3));
+        assert!(!selection_finished(true, true, 2, 3, false));
         // Bytes still missing.
-        assert!(!selection_finished(false, true, 3, 3));
+        assert!(!selection_finished(false, true, 3, 3, false));
+        // Just applied this tick: the stats predate it (a newly ticked file
+        // may be missing), so wait for the next tick's stats.
+        assert!(!selection_finished(true, true, 3, 3, true));
     }
 
     const HEX: &str = "c9e15763f722f23e98a29decdfae341b98d53056";
