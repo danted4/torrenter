@@ -26,6 +26,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             header(colors)
             if settingsOpen {
+                PageBar(name: "settings", colors: colors) { settingsOpen = false }
                 SettingsView(themeId: $themeId, tab: $settingsTab)
             } else if owner.filesOpen != nil {
                 FilesView(list: owner.fileList, owner: owner, colors: colors)
@@ -179,20 +180,18 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("main screen")
-            let inner = settingsOpen || owner.filesOpen != nil
+            // The header never changes: the cog only opens settings; inner
+            // pages go back from their own page bar.
             Button {
-                if owner.filesOpen != nil {
-                    owner.filesOpen = nil
-                } else {
-                    settingsOpen.toggle()
-                }
+                settingsOpen = true
+                owner.filesOpen = nil
             } label: {
-                Image(systemName: inner ? "arrow.left" : "gearshape")
+                Image(systemName: "gearshape")
                     .font(.system(size: 20))
-                    .foregroundColor(inner ? colors.fg : colors.dim)
+                    .foregroundColor(settingsOpen ? colors.fg : colors.dim)
                     .frame(width: 32, height: 32)
             }
-            .accessibilityLabel(inner ? "back" : "settings")
+            .accessibilityLabel("settings")
         }
     }
 

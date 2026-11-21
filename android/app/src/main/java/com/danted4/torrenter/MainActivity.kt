@@ -371,15 +371,13 @@ private fun AppScreen(
                 )
             }
             // A back arrow while settings fill the screen.
+            // The header never changes: the cog only opens settings; inner
+            // pages go back from their own page bar.
             CogGlyph(
-                color = if (settingsOpen || filesOpen != null) palette.fg else palette.dim,
-                open = settingsOpen || filesOpen != null,
+                color = if (settingsOpen) palette.fg else palette.dim,
                 onClick = {
-                    if (filesOpen != null) {
-                        filesOpen = null
-                    } else {
-                        settingsOpen = !settingsOpen
-                    }
+                    settingsOpen = true
+                    filesOpen = null
                 },
             )
         }
@@ -397,6 +395,7 @@ private fun AppScreen(
         }
         notice?.let { Text(it, color = palette.fail, fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
         if (settingsOpen) {
+            PageBar(name = "settings", palette = palette, onBack = { settingsOpen = false })
             SettingsScreen(
                 palette = palette,
                 themeId = themeId,
@@ -440,6 +439,7 @@ private fun AppScreen(
                     }
                     refresh()
                 },
+                onBack = { filesOpen = null },
                 modifier = Modifier.weight(1f),
             )
             return@Column

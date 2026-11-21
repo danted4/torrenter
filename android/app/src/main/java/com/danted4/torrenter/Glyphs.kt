@@ -235,6 +235,44 @@ private fun SwapArrows(color: Color) {
 }
 
 /** Header cog: opens settings; a back arrow while settings are open. */
+/**
+ * The first line of every inner page (settings, a job's files): "← name",
+ * an optional detail and a note on the right, then a hairline. The arrow and
+ * the name go back (the header never changes).
+ */
+@Composable
+fun PageBar(
+    name: String,
+    palette: Palette,
+    onBack: () -> Unit,
+    detail: String? = null,
+    note: String? = null,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.clickable(onClick = onBack).padding(end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                CogGlyph(color = palette.fg, open = true, onClick = onBack)
+                Text(name, color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            }
+            Text(
+                detail ?: "",
+                color = palette.fg,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            note?.let { Text(it, color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+        }
+        androidx.compose.material3.HorizontalDivider(color = mix(palette.rowAlt, palette.dim, 0.35f))
+    }
+}
+
 @Composable
 fun CogGlyph(
     color: Color,

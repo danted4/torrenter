@@ -46,6 +46,7 @@ fun FilesScreen(
     query: String,
     onQuery: (String) -> Unit,
     onSet: (List<UInt>) -> Unit,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val all = files.groups.flatMap { it.files }
@@ -58,23 +59,13 @@ fun FilesScreen(
     val shown = groups.flatMap { group -> group.files.map { it.id } }
     val line = mix(palette.rowAlt, palette.dim, 0.35f)
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                title,
-                color = palette.fg,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                "${chosen.size} of ${all.size}",
-                color = palette.dim,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-            )
-        }
+        PageBar(
+            name = "files",
+            palette = palette,
+            onBack = onBack,
+            detail = title,
+            note = "${chosen.size} of ${all.size}",
+        )
         OutlinedTextField(
             value = query,
             onValueChange = onQuery,

@@ -1073,15 +1073,15 @@ impl eframe::App for GuiApp {
                                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
                             |ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                let inner_page = self.settings_open || self.files_open.is_some();
-                                if settings_cog(ui, palette, inner_page).clicked() {
-                                    if self.files_open.is_some() {
-                                        // Back from a job's files to the list.
-                                        self.files_open = None;
-                                    } else {
-                                        self.settings_open = !self.settings_open;
-                                        self.accounts_cache = None;
-                                    }
+                                // The header never changes: the cog only opens
+                                // settings; inner pages go back from their
+                                // own page bar.
+                                if settings_cog(ui, palette, self.settings_open).clicked()
+                                    && !self.settings_open
+                                {
+                                    self.settings_open = true;
+                                    self.files_open = None;
+                                    self.accounts_cache = None;
                                 }
                                 if auto_update_toggle(ui, self.auto_update, palette).clicked() {
                                     self.auto_update = !self.auto_update;
@@ -1710,21 +1710,17 @@ impl GuiApp {
             return;
         };
         let (total, selected) = job_file_counts(&job);
-        ui.horizontal(|ui| {
-            glass_label(ui, "files", 13.0, palette.dim);
-            ui.add_space(8.0);
-            let title = job.snapshot.title();
-            glass_label(ui, truncate(&title, 72), 13.0, palette.fg);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                glass_label(
-                    ui,
-                    format!("{selected} of {total} selected"),
-                    12.0,
-                    palette.dim,
-                );
-            });
-        });
-        ui.add_space(10.0);
+        let note = format!("{selected} of {total} selected");
+        if page_bar(
+            ui,
+            palette,
+            "files",
+            Some(&job.snapshot.title()),
+            Some(&note),
+        ) {
+            self.files_open = None;
+            return;
+        }
         search_row(
             ui,
             palette,
@@ -1872,6 +1868,10 @@ impl GuiApp {
     }
 
     fn show_settings_page(&mut self, ui: &mut egui::Ui, palette: Theme) {
+        if page_bar(ui, palette, "settings", None, None) {
+            self.settings_open = false;
+            return;
+        }
         let height = ui.available_height();
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -2873,10 +2873,12 @@ fn tint_slider(ui: &mut egui::Ui, value: &mut u8, palette: Theme, locked: bool) 
     }
 }
 
-fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response {
+/// The header cog: always the cog (the header never changes), lit while
+/// settings are open.
+fn settings_cog(ui: &mut egui::Ui, palette: Theme, active: bool) -> egui::Response {
     let size = egui::vec2(28.0, 28.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let color = if open || response.hovered() {
+    let color = if active || response.hovered() {
         palette.fg
     } else {
         palette.dim
@@ -2885,22 +2887,6 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
     paint_brush_stroke(painter, rect.shrink(1.5));
     let stroke = Stroke::new(1.3_f32, color);
     let c = rect.center();
-    if open {
-        // Back arrow: settings replace the main screen until closed.
-        painter.line_segment(
-            [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
-            stroke,
-        );
-        painter.line_segment(
-            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
-            stroke,
-        );
-        painter.line_segment(
-            [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
-            stroke,
-        );
-        return click_cursor(response).on_hover_text("back");
-    }
     painter.circle_stroke(c, 4.8, stroke);
     painter.circle_filled(c, 1.6, color);
     for step in 0..6 {
@@ -2909,6 +2895,62 @@ fn settings_cog(ui: &mut egui::Ui, palette: Theme, open: bool) -> egui::Response
         painter.line_segment([c + dir * 6.2, c + dir * 8.4], stroke);
     }
     click_cursor(response).on_hover_text("settings")
+}
+
+/// The first line of every inner page (settings, a job's files): "← name",
+/// an optional detail after it and a note on the right, then a hairline.
+/// The arrow and the name go back to the job list; true when clicked.
+fn page_bar(
+    ui: &mut egui::Ui,
+    palette: Theme,
+    name: &str,
+    detail: Option<&str>,
+    note: Option<&str>,
+) -> bool {
+    let mut back = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 28.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let (rect, arrow) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), Sense::click());
+            let arrow = click_cursor(arrow);
+            let lit = arrow.hovered();
+            let painter = ui.painter();
+            paint_brush_stroke(painter, rect.shrink(1.5));
+            let stroke = Stroke::new(1.3_f32, if lit { palette.fg } else { palette.dim });
+            let c = rect.center();
+            painter.line_segment(
+                [c + egui::vec2(6.0, 0.0), c + egui::vec2(-6.0, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, -4.5)],
+                stroke,
+            );
+            painter.line_segment(
+                [c + egui::vec2(-6.0, 0.0), c + egui::vec2(-1.5, 4.5)],
+                stroke,
+            );
+            back |= arrow.on_hover_text("back").clicked();
+            ui.add_space(6.0);
+            back |= click_text(ui, name, 13.0, palette.dim)
+                .on_hover_text("back")
+                .clicked();
+            if let Some(detail) = detail {
+                ui.add_space(8.0);
+                glass_label(ui, truncate(detail, 72), 13.0, palette.fg);
+            }
+            if let Some(note) = note {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    glass_label(ui, note, 12.0, palette.dim);
+                });
+            }
+        },
+    );
+    ui.add_space(8.0);
+    hairline(ui, palette);
+    ui.add_space(10.0);
+    back
 }
 
 /// Repaint cadence while something moves, and when idle.

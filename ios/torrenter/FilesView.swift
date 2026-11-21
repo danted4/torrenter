@@ -29,15 +29,8 @@ struct FilesView: View {
         let allState = checkOf(selected: shown.filter { chosen.contains($0) }.count, total: shown.count)
         let title = owner.jobs.first { $0.id == files.id }?.title ?? ""
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(title)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundColor(colors.fg)
-                    .lineLimit(2)
-                Spacer(minLength: 8)
-                Text("\(chosen.count) of \(all.count)")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(colors.dim)
+            PageBar(name: "files", detail: title, note: "\(chosen.count) of \(all.count)", colors: colors) {
+                owner.filesOpen = nil
             }
             TextField("", text: $query, prompt: Text("search files").foregroundColor(colors.dim))
                 .font(.system(size: 14, design: .monospaced))
@@ -182,5 +175,53 @@ struct CheckGlyph: View {
         }
         .frame(width: 18, height: 18)
         .accessibilityValue(state == .on ? "selected" : state == .some ? "partly selected" : "not selected")
+    }
+}
+
+/// The first line of every inner page (settings, a job's files): "← name",
+/// an optional detail and a note on the right, then a hairline. The arrow and
+/// the name go back (the header never changes).
+struct PageBar: View {
+    let name: String
+    var detail: String?
+    var note: String?
+    let colors: Palette
+    let onBack: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button(action: onBack) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.left")
+                            .font(.system(size: 18))
+                            .foregroundColor(colors.fg)
+                            .frame(width: 28, height: 28)
+                        Text(name)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(colors.dim)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("back from \(name)")
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(colors.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                if let note {
+                    Text(note)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(colors.dim)
+                }
+            }
+            Rectangle()
+                .fill(mix(colors.rowAlt, colors.dim, 0.35))
+                .frame(height: 1)
+        }
     }
 }
