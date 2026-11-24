@@ -3861,8 +3861,6 @@ fn glass_pair(
     response
 }
 
-/// The search field above a list (jobs, or a job's files): label, a bordered
-/// field that lights up on hover or focus, Esc clears it.
 /// Above the job list while a full disk holds the queue: waiting jobs start
 /// again on **resume** (or any restart, add or un-pause).
 fn queue_held_line(ui: &mut egui::Ui, palette: Theme, session: &Session) {
@@ -3889,6 +3887,8 @@ fn queue_held_line(ui: &mut egui::Ui, palette: Theme, session: &Session) {
     ui.add_space(8.0);
 }
 
+/// The search field above a list (jobs, or a job's files): label, a bordered
+/// field that lights up on hover or focus, Esc clears it.
 fn search_row(ui: &mut egui::Ui, palette: Theme, query: &mut String, id_salt: &str, hint: &str) {
     const SEARCH_H: f32 = 28.0;
     ui.allocate_ui_with_layout(

@@ -16,8 +16,8 @@ use crate::http::{
 };
 use crate::jobs::{self, JobKind, LoadJobs, PersistedJob, RestoreAction};
 use crate::paths::plain_path;
-use crate::progress::{acquire_slot, is_disk_full, is_stopped, JobSnapshot, DISK_FULL};
-use crate::slots::{clamp_max_downloads, Slots};
+use crate::progress::{acquire_slot, is_disk_full, is_stopped, JobSnapshot, DISK_FULL, QUEUED};
+use crate::slots::{clamp_max_downloads, Slots, DEFAULT_MAX_DOWNLOADS};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
     OnMetadata,
@@ -25,8 +25,6 @@ use crate::torrent::{
 use crate::torrent_file;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
-/// Downloads at once when the setting is unset.
-pub const MAX_ACTIVE_DOWNLOADS: usize = crate::slots::DEFAULT_MAX_DOWNLOADS;
 const PERSIST_EVERY: Duration = Duration::from_secs(2);
 
 fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -274,7 +272,7 @@ impl Session {
     fn open_inner(dest: PathBuf, jobs_path: PathBuf, seed: bool, leech_only: bool) -> Self {
         let (engine_tx, engine_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        let slots = Slots::new(MAX_ACTIVE_DOWNLOADS);
+        let slots = Slots::new(DEFAULT_MAX_DOWNLOADS);
         let engine_slots = Arc::clone(&slots);
         thread::spawn(move || engine_loop(engine_rx, event_tx, engine_slots));
         Self::with_channels(
@@ -352,7 +350,7 @@ impl Session {
     pub fn set_max_downloads(&self, max: Option<u8>) {
         self.slots.set_cap(
             max.map(|max| usize::from(clamp_max_downloads(max)))
-                .unwrap_or(MAX_ACTIVE_DOWNLOADS),
+                .unwrap_or(DEFAULT_MAX_DOWNLOADS),
         );
     }
 
@@ -362,8 +360,23 @@ impl Session {
 
     /// A download hit a full disk: waiting jobs do not start until something
     /// tries to start one (resume, restart, add, un-pause, ticking a file).
+    ///
+    /// A hold with nothing left waiting (the jobs were cleared, stopped,
+    /// paused or have failed) lifts itself here, so the fronts never show a
+    /// stale "queue held" line.
     pub fn queue_held(&self) -> bool {
-        self.slots.held()
+        if !self.slots.held() {
+            return false;
+        }
+        let waiting = mutex_lock(&self.inner).jobs.iter().any(|job| {
+            job.snapshot.is_active()
+                && !job.snapshot.is_paused()
+                && job.snapshot.status() != "seeding"
+        });
+        if !waiting {
+            self.slots.lift();
+        }
+        waiting
     }
 
     /// Lifts a disk-full hold. If the disk is still full the next write
@@ -783,8 +796,6 @@ impl Session {
     ) -> Result<u64, String> {
         let old = inner.jobs[index].clone();
         let source = old.source.clone();
-        // Restart and reopen try to start a job: lift a disk-full hold.
-        self.slots.lift();
         if old.private_torrent && matches!(route, Route::Via(_)) {
             return Err(PRIVATE_NO_DEBRID.into());
         }
@@ -892,6 +903,9 @@ impl Session {
                 return Err(error);
             }
         };
+        // Restart and reopen try to start a job: lift a disk-full hold (only
+        // now, so a refused restart leaves the hold in place).
+        self.slots.lift();
         let _ = self.engine.send(cmd);
         inner.jobs[index] = job;
         persist_inner(inner, true);
@@ -927,7 +941,7 @@ impl Session {
         if job.kind != JobKind::Magnet {
             return Err("only torrent jobs have files to choose".into());
         }
-        let reopen = {
+        let (adds, reopen) = {
             let mut files = job.snapshot.files();
             let Some(list) = files.list().cloned() else {
                 return Err("this torrent's file list is not known yet".into());
@@ -937,18 +951,19 @@ impl Session {
                 return Ok(job.id);
             }
             let adds = adds_files(files.only(), only.as_ref());
-            if adds {
-                // More to download: a try to start, like resume.
-                self.slots.lift();
-            }
             files.set_only(only);
             files.generation += 1;
             // Checked under the files lock: the engine finishes a job only
             // under it, after checking the generation it applied. A done job
             // starts again only for a newly ticked file; an untick just stays
             // stored (nothing to download).
-            adds && job.snapshot.is_done()
+            (adds, adds && job.snapshot.is_done())
         };
+        if adds && !reopen {
+            // More to download on a live job: a try to start, like resume
+            // (a reopen lifts it in `relaunch`).
+            self.slots.lift();
+        }
         if reopen {
             let (seed, dest) = (job.seed, job.dest.clone());
             return self.relaunch(&mut inner, index, Route::Keep, seed, dest, false, true);
@@ -1495,6 +1510,16 @@ fn persist_inner(inner: &mut Inner, force: bool) {
     }
 }
 
+/// Gives a job's download slot back (and leaves the line) however its engine
+/// task ends, a panic included.
+struct SlotRelease(Arc<JobSnapshot>);
+
+impl Drop for SlotRelease {
+    fn drop(&mut self) {
+        self.0.detach_slot();
+    }
+}
+
 fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>, slots: Arc<Slots>) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
@@ -1524,12 +1549,12 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>, slots: Arc<Slot
                         return;
                     }
                     if !snapshot.is_paused() {
-                        snapshot.set_status("queued");
+                        snapshot.set_status(QUEUED);
                     }
                     // A paused job waits outside the line and takes no slot.
                     snapshot.attach_slot(slots, rank);
+                    let _release = SlotRelease(Arc::clone(&snapshot));
                     if acquire_slot(&snapshot).await.is_err() {
-                        snapshot.detach_slot();
                         snapshot.mark_stopped();
                         return;
                     }
@@ -1588,23 +1613,25 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>, slots: Arc<Slot
                         }
                     };
                     match result {
-                        Err(error) if is_disk_full(&error) => {
-                            // Hold before the slot is given back, so no
-                            // waiting job starts into the full disk.
-                            snapshot.hold_queue_and_detach();
+                        // A late write error from a job already stopped or
+                        // restarted must not hold the queue again.
+                        Err(error) if is_disk_full(&error) && !snapshot.should_stop() => {
+                            // Held while this job still has its slot (given
+                            // back when `_release` drops), so no waiting job
+                            // starts into the full disk.
+                            snapshot.hold_queue();
                             let _ = tx.send(EngineEvent::DownloadFailed {
                                 id,
                                 error: DISK_FULL.to_string(),
                             });
                         }
                         Err(error) if !is_stopped(&error) => {
-                            snapshot.detach_slot();
                             let _ = tx.send(EngineEvent::DownloadFailed {
                                 id,
                                 error: format!("{error:#}"),
                             });
                         }
-                        _ => snapshot.detach_slot(),
+                        _ => {}
                     }
                 }
                 EngineCmd::DeleteRemote {
@@ -1722,7 +1749,7 @@ mod tests {
 
     #[test]
     fn caps_active_downloads() {
-        assert_eq!(MAX_ACTIVE_DOWNLOADS, 4);
+        assert_eq!(DEFAULT_MAX_DOWNLOADS, 4);
     }
 
     #[test]
@@ -2410,7 +2437,7 @@ mod tests {
             false,
             engine_tx,
             event_rx,
-            Slots::new(MAX_ACTIVE_DOWNLOADS),
+            Slots::new(DEFAULT_MAX_DOWNLOADS),
         );
         (session, engine_rx, event_tx)
     }
@@ -2477,6 +2504,49 @@ mod tests {
         session.job(a).unwrap().snapshot.set_error(DISK_FULL);
         session.restart(a, false, dir.path().join("dl")).unwrap();
         assert!(!session.queue_held(), "restart lifts it");
+    }
+
+    #[test]
+    fn a_hold_with_nothing_waiting_lifts_itself() {
+        let dir = tempdir().unwrap();
+        let (session, _rx, _tx) = detached(dir.path());
+        let a = session
+            .queue(JobKind::Http, "https://example.com/a.bin")
+            .unwrap();
+        session.slots.hold();
+        assert!(session.queue_held(), "a job is still waiting");
+        session.job(a).unwrap().snapshot.set_error(DISK_FULL);
+        assert!(!session.queue_held(), "only a failed job left");
+        assert!(!session.slots.held());
+        let b = session
+            .queue(JobKind::Http, "https://example.com/b.bin")
+            .unwrap();
+        session.slots.hold();
+        session.remove(b);
+        assert!(!session.queue_held(), "cleared");
+    }
+
+    #[test]
+    fn a_refused_restart_keeps_the_hold() {
+        let dir = tempdir().unwrap();
+        let (session, _rx, _tx) = detached(dir.path());
+        let a = session
+            .queue(JobKind::Http, "https://example.com/a.bin")
+            .unwrap();
+        session
+            .queue(JobKind::Http, "https://example.com/b.bin")
+            .unwrap();
+        session.job(a).unwrap().snapshot.set_error(DISK_FULL);
+        session.slots.hold();
+        let refused = session.restart_with(
+            a,
+            Route::Via("torbox".into()),
+            false,
+            dir.path().join("dl"),
+            false,
+        );
+        assert!(refused.is_err(), "debrid applies to magnet links");
+        assert!(session.queue_held());
     }
 
     #[test]
@@ -2616,7 +2686,7 @@ mod tests {
         // Unticking on a done job only stores it: nothing to download.
         session.slots.hold();
         assert_eq!(session.set_files(5, &[0]), Ok(5));
-        assert!(session.queue_held(), "an untick is no try to start");
+        assert!(session.slots.held(), "an untick is no try to start");
         session.resume_queue();
         assert!(session.jobs()[0].snapshot.is_done());
         assert_eq!(downloads(&rx), 0);
@@ -2627,7 +2697,7 @@ mod tests {
         // as a try to start, lifts a disk-full hold; unticking did not).
         session.slots.hold();
         assert_eq!(session.set_files(5, &[3]), Ok(5));
-        assert!(!session.queue_held());
+        assert!(!session.slots.held());
         let job = session.jobs()[0].clone();
         assert_eq!((job.id, job.added.as_str()), (5, "2026-11-01"));
         assert!(job.snapshot.is_active());

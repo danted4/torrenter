@@ -401,13 +401,12 @@ impl JobSnapshot {
             .map(|ticket| Arc::clone(ticket.slots()))
     }
 
-    /// Holds the queue (disk full) before this job's slot is given back, so
-    /// no waiting job starts in between.
-    pub fn hold_queue_and_detach(&self) {
+    /// Disk full: holds the queue. Call it while the job still holds its
+    /// slot, so no waiting job starts before the hold is in place.
+    pub fn hold_queue(&self) {
         if let Some(slots) = self.slots() {
             slots.hold();
         }
-        self.detach_slot();
     }
 }
 
@@ -458,19 +457,27 @@ pub async fn wait_while_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
 /// spent outside the line. Fails with [`DownloadStopped`] on stop.
 pub async fn acquire_slot(snapshot: &JobSnapshot) -> Result<()> {
     let mut before: Option<String> = None;
+    let taken = |before: Option<String>| {
+        if let Some(previous) = before {
+            if snapshot.status() == QUEUED {
+                snapshot.set_status(previous);
+            }
+        }
+    };
     loop {
         if snapshot.should_stop() {
             anyhow::bail!(DownloadStopped);
         }
-        // Armed before the check so a slot freed in between still wakes us.
+        // Cheap path first: this runs per merge chunk through honor_control.
+        if snapshot.poll_slot() {
+            taken(before);
+            return Ok(());
+        }
+        // Armed, then checked again, so a slot freed in between wakes us.
         let slots = snapshot.slots();
         let wake = slots.as_ref().map(|slots| slots.notified());
         if snapshot.poll_slot() {
-            if let Some(previous) = before {
-                if snapshot.status() == QUEUED {
-                    snapshot.set_status(previous);
-                }
-            }
+            taken(before);
             return Ok(());
         }
         if !snapshot.is_paused() {
@@ -515,16 +522,19 @@ pub fn text_is_disk_full(text: &str) -> bool {
     if text.contains(DISK_FULL) {
         return true;
     }
+    // The OS's own wording and error number only (librqbit passes write
+    // errors on as text): the same numbers mean other things elsewhere
+    // (Linux errno 112 is "host is down").
     let text = text.to_ascii_lowercase();
-    [
-        "no space left on device",
-        "os error 28)",
-        "os error 112)",
+    #[cfg(not(windows))]
+    let needles = ["no space left on device", "(os error 28)"];
+    #[cfg(windows)]
+    let needles = [
         "not enough space on the disk",
-        "disk is full",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
+        "(os error 112)",
+        "(os error 39)",
+    ];
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn io_error_is_disk_full(error: &std::io::Error) -> bool {
@@ -908,6 +918,16 @@ mod tests {
     use crate::slots::Slots;
 
     #[test]
+    fn other_errors_with_the_same_numbers_are_not_disk_full() {
+        // Linux errno 112 is EHOSTDOWN; Windows error 28 is unrelated too.
+        #[cfg(not(windows))]
+        let other = "error sending request: Host is down (os error 112)";
+        #[cfg(windows)]
+        let other = "The printer is out of paper. (os error 28)";
+        assert!(!is_disk_full(&anyhow::anyhow!(other)));
+    }
+
+    #[test]
     fn disk_full_is_recognised_from_io_errors_and_librqbit_text() {
         let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
         assert!(is_disk_full(
@@ -918,9 +938,13 @@ mod tests {
         #[cfg(windows)]
         let raw = std::io::Error::from_raw_os_error(112);
         assert!(is_disk_full(&anyhow::Error::from(raw)));
-        assert!(is_disk_full(&anyhow::anyhow!(
-            "fatal error: error writing chunk to disk: No space left on device (os error 28)"
-        )));
+        // librqbit hands write errors over as text.
+        #[cfg(not(windows))]
+        let text =
+            "fatal error: error writing chunk to disk: No space left on device (os error 28)";
+        #[cfg(windows)]
+        let text = "fatal error: error writing chunk to disk: There is not enough space on the disk. (os error 112)";
+        assert!(is_disk_full(&anyhow::anyhow!(text)));
         assert!(is_disk_full(&anyhow::anyhow!(DISK_FULL)));
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(!is_disk_full(&anyhow::Error::from(denied)));
@@ -986,7 +1010,8 @@ mod tests {
         let waiting = JobSnapshot::default();
         waiting.attach_slot(Arc::clone(&slots), 2);
         assert!(!waiting.poll_slot());
-        failing.hold_queue_and_detach();
+        failing.hold_queue();
+        failing.detach_slot();
         assert!(slots.held());
         assert!(!waiting.poll_slot(), "held: the freed slot is not taken");
         slots.lift();

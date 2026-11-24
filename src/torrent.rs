@@ -448,7 +448,9 @@ async fn run_torrent(
     );
     tokio::pin!(adding);
     // A magnet waits here for its metadata. Meanwhile a pause gives the
-    // download slot back (the tick below takes one again) and a stop ends it.
+    // download slot back, a resume takes its turn for one again (librqbit
+    // keeps fetching either way; the tick below pauses it until it has one)
+    // and a stop ends it.
     let added = loop {
         tokio::select! {
             added = &mut adding => break added,
@@ -461,6 +463,8 @@ async fn run_torrent(
                     }
                     if snapshot.is_paused() {
                         snapshot.release_slot();
+                    } else {
+                        snapshot.poll_slot();
                     }
                 }
             }
