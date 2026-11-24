@@ -35,6 +35,15 @@ final class EngineOwner: ObservableObject {
             engine?.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
         }
     }
+    /// Downloads at once (1–8). Applies live.
+    @Published var maxDownloads: Int = Prefs.maxDownloads() {
+        didSet {
+            Prefs.saveMaxDownloads(maxDownloads)
+            engine?.setMaxDownloads(max: UInt8(Prefs.clampMaxDownloads(maxDownloads)))
+        }
+    }
+    /// A download hit a full disk: waiting jobs are held until "resume".
+    @Published private(set) var queueHeld = false
     @Published var removeAfter: Bool = Prefs.removeAfter() {
         didSet {
             Prefs.saveRemoveAfter(removeAfter)
@@ -95,6 +104,7 @@ final class EngineOwner: ObservableObject {
             debridRoute = nil
         }
         created.setConnections(parts: connections > 0 ? UInt8(min(connections, 16)) : nil)
+        created.setMaxDownloads(max: UInt8(Prefs.clampMaxDownloads(maxDownloads)))
         created.setDebridRemoveAfter(enabled: removeAfter)
         do {
             try created.hydrate()
@@ -279,6 +289,12 @@ final class EngineOwner: ObservableObject {
         } catch {
             notice = engineMessage(error)
         }
+        refresh()
+    }
+
+    func resumeQueue() {
+        engine?.resumeQueue()
+        queueHeld = engine?.queueHeld() ?? false
         refresh()
     }
 
@@ -587,7 +603,9 @@ final class EngineOwner: ObservableObject {
 
     /// Run the silent loop only while keep alive is on and something is transferring.
     private func syncKeepAlive() {
-        let want = keepAliveOn && BackgroundPlan.hasLive(engine?.jobs() ?? [])
+        // A queue held for a full disk with nothing running is idle.
+        let want = keepAliveOn && engine?.anyActive() == true
+            && BackgroundPlan.hasLive(engine?.jobs() ?? [])
         if want {
             guard !keepAlive.playing else { return }
             if inBackground {
@@ -654,6 +672,10 @@ final class EngineOwner: ObservableObject {
             notice = last
         }
         engine.persist(force: !engine.anyActive())
+        let held = engine.queueHeld()
+        if held != queueHeld {
+            queueHeld = held
+        }
         jobList.update(engine.jobs())
         refreshFiles()
         syncKeepAlive()

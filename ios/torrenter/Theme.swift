@@ -93,6 +93,7 @@ enum Prefs {
 
     static let debridRouteKey = "debridRoute"
     static let connectionsKey = "connections"
+    static let maxDownloadsKey = "maxDownloads"
     static let removeAfterKey = "debridRemoveAfter"
 
     /// Remembered debrid account id for magnet jobs; nil is default (peers).
@@ -115,6 +116,20 @@ enum Prefs {
 
     static func saveConnections(_ parts: Int) {
         UserDefaults.standard.set(parts, forKey: connectionsKey)
+    }
+
+    /// Downloads at once, 1–8; 4 when never set.
+    static func maxDownloads() -> Int {
+        let saved = UserDefaults.standard.integer(forKey: maxDownloadsKey)
+        return clampMaxDownloads(saved == 0 ? 4 : saved)
+    }
+
+    static func saveMaxDownloads(_ max: Int) {
+        UserDefaults.standard.set(clampMaxDownloads(max), forKey: maxDownloadsKey)
+    }
+
+    static func clampMaxDownloads(_ max: Int) -> Int {
+        Swift.min(Swift.max(max, 1), 8)
     }
 
     static func removeAfter() -> Bool {

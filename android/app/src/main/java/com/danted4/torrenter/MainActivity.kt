@@ -140,6 +140,9 @@ private fun AppScreen(
     var fileQuery by remember { mutableStateOf("") }
     var debridRoute by remember { mutableStateOf(Prefs.debridRoute(prefs)) }
     var connections by remember { mutableStateOf(Prefs.connections(prefs)) }
+    var maxDownloads by remember { mutableStateOf(Prefs.maxDownloads(prefs)) }
+    // A download hit a full disk: waiting jobs are held until "resume".
+    var queueHeld by remember { mutableStateOf(false) }
     var removeAfter by remember { mutableStateOf(Prefs.removeAfter(prefs)) }
     var accounts by remember { mutableStateOf(Accounts.load(activity)) }
     var settingsTab by remember { mutableStateOf(SettingsTab.APPEARANCE) }
@@ -163,6 +166,7 @@ private fun AppScreen(
         val live = engine ?: return
         app.takeNotices().lastOrNull()?.let { notice = it }
         jobs = live.jobs()
+        queueHeld = live.queueHeld()
         filesOpen?.let { id ->
             jobFiles = live.jobFiles(id)
             if (jobFiles == null) {
@@ -411,6 +415,12 @@ private fun AppScreen(
                     Prefs.saveConnections(prefs, it)
                     engine?.setConnections(Prefs.connectionsArg(it))
                 },
+                maxDownloads = maxDownloads,
+                onMaxDownloads = {
+                    maxDownloads = it
+                    Prefs.saveMaxDownloads(prefs, it)
+                    engine?.setMaxDownloads(Prefs.maxDownloadsArg(it))
+                },
                 removeAfter = removeAfter,
                 onRemoveAfter = {
                     removeAfter = it
@@ -535,6 +545,12 @@ private fun AppScreen(
             ) { Text("START", fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false) }
         }
         Text("Download/torrenter", color = palette.dim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        if (queueHeld) {
+            QueueHeldLine(palette = palette, buttons = buttons) {
+                engine?.resumeQueue()
+                refresh()
+            }
+        }
         if (jobs.isEmpty()) {
             Text("no jobs yet — paste a magnet or HTTP URL", color = palette.dim, fontFamily = FontFamily.Monospace)
         } else {
@@ -722,6 +738,35 @@ private fun JobCard(
                     Text("files", fontFamily = FontFamily.Monospace)
                 }
             }
+        }
+    }
+}
+
+/** Above the job list while a full disk holds the queue. */
+@androidx.compose.runtime.Composable
+private fun QueueHeldLine(
+    palette: Palette,
+    buttons: androidx.compose.material3.ButtonColors,
+    onResume: () -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, palette.dim, RoundedCornerShape(2.dp))
+                .background(palette.fg.copy(alpha = 0.07f))
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "queue held: disk full · free some space",
+            color = palette.fail,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        Button(onClick = onResume, colors = buttons, shape = RoundedCornerShape(2.dp)) {
+            Text("resume", fontFamily = FontFamily.Monospace)
         }
     }
 }

@@ -166,7 +166,20 @@ async fn run_http(url: &str, dir: Option<PathBuf>) -> Result<()> {
     let dest = dest_for_run(dir)?;
     println!("download: {}", dest.display());
     let parts = effective_connections(&load_config());
-    start_url_download_in(url, DownloadLayout::in_dir(dest).with_part_count(parts)).await
+    plain_disk_full(
+        start_url_download_in(url, DownloadLayout::in_dir(dest).with_part_count(parts)).await,
+    )
+}
+
+/// The same "disk full" text the apps show, not the raw OS error.
+fn plain_disk_full(result: Result<()>) -> Result<()> {
+    result.map_err(|error| {
+        if torrenter::progress::is_disk_full(&error) {
+            anyhow::anyhow!(torrenter::progress::DISK_FULL)
+        } else {
+            error
+        }
+    })
 }
 
 async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -> Result<()> {
@@ -188,10 +201,10 @@ async fn run_magnet(uri: &str, dir: Option<PathBuf>, via: Option<AccountInfo>) -
     };
     let dest = dest_for_run(dir)?;
     println!("download: {}", dest.display());
-    match via {
+    plain_disk_full(match via {
         Some(account) => run_debrid_download(&magnet, dest, &account).await,
         None => start_download(&magnet, torrent, load_config().seed, dest).await,
-    }
+    })
 }
 
 /// A pasted or dragged-in path: surrounding quotes are removed, and on macOS

@@ -116,6 +116,9 @@ struct DebridServicesOut {
 struct JobsOut {
     jobs: Vec<JobToolView>,
     notices: Vec<String>,
+    /// A download hit a full disk: waiting jobs do not start until
+    /// `resume_queue`, a restart or a new job.
+    queue_held: bool,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -260,6 +263,7 @@ impl Mcp {
         let jobs_path = torrenter::jobs::jobs_path().unwrap_or_else(|_| dest.join("jobs.json"));
         let session = Session::open_leech(dest, jobs_path);
         session.set_connections(config.connections);
+        session.set_max_downloads(config.max_downloads);
         session.set_debrid_remove_after(config.debrid_remove_after);
         let notices = Arc::new(Mutex::new(Vec::new()));
         match session.hydrate() {
@@ -372,7 +376,16 @@ impl Mcp {
                     .collect()
             },
             notices: take_notices(&self.notices),
+            queue_held: self.session.queue_held(),
         })
+    }
+
+    #[tool(
+        description = "Start waiting jobs again after a full disk held the queue (queue_held in jobs). If the disk is still full, the next download fails and holds it again"
+    )]
+    fn resume_queue(&self) -> String {
+        self.session.resume_queue();
+        "ok".into()
     }
 
     #[tool(description = "Pause or resume a job")]

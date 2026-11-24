@@ -17,7 +17,8 @@ use super::{
 use crate::http::{download_job_file, range_client, DownloadLayout, LinkRejected};
 use crate::jobs::PersistedFile;
 use crate::progress::{
-    is_stopped, until_stop, wait_while_paused, DownloadStopped, JobSnapshot, ProgressHandle,
+    is_disk_full, is_stopped, until_stop, wait_while_paused, DownloadStopped, JobSnapshot,
+    ProgressHandle, DISK_FULL,
 };
 use crate::torrent::{claim_magnet_sub_folder, magnet_folder_lock, magnet_info_hash_hex};
 use crate::validate::is_valid_magnet_url;
@@ -88,10 +89,16 @@ pub async fn start_debrid_reported(run: DebridRun, snapshot: Arc<JobSnapshot>) -
             Ok(())
         }
         Err(error) => {
-            let mut text = redact(&format!("{error:#}"), Some(&key));
-            if let Some(hint) = hint.filter(|_| crate::debrid::worth_reporting(&error)) {
-                text = format!("{text} ({hint})");
-            }
+            // A full disk is not the provider's problem: no report hint.
+            let text = if is_disk_full(&error) {
+                DISK_FULL.to_string()
+            } else {
+                let mut text = redact(&format!("{error:#}"), Some(&key));
+                if let Some(hint) = hint.filter(|_| crate::debrid::worth_reporting(&error)) {
+                    text = format!("{text} ({hint})");
+                }
+                text
+            };
             // Recorded here too, so the job is saved as failed (and not
             // restarted on the next launch) even before the session drains it.
             snapshot.set_error(text.clone());

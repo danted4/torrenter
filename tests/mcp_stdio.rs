@@ -147,6 +147,7 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
         "debrid_services",
         "list_files",
         "set_files",
+        "resume_queue",
     ] {
         assert!(names.contains(&name), "missing {name} in {names:?}");
     }
@@ -154,6 +155,7 @@ async fn mcp_initialize_lists_tools_and_rejects_bad_urls() {
     let jobs = call_tool(&mut stdin, &mut stdout, 3, "jobs", json!({})).await;
     let payload: Value = serde_json::from_str(&tool_text(&jobs)).unwrap();
     assert_eq!(payload["jobs"], json!([]));
+    assert_eq!(payload["queue_held"], json!(false));
 
     let bad_magnet = call_tool(
         &mut stdin,

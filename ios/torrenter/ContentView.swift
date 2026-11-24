@@ -139,6 +139,20 @@ struct ContentView: View {
                 .toggleStyle(MiniSwitch(palette: colors))
                 .fixedSize()
             }
+            if owner.queueHeld {
+                HStack(spacing: 8) {
+                    Text("queue held: disk full · free some space")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(colors.fail)
+                    Spacer(minLength: 8)
+                    Button("resume") { owner.resumeQueue() }
+                        .buttonStyle(MonoButton(palette: colors))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(colors.fg.opacity(0.07))
+                .overlay(Rectangle().stroke(colors.dim, lineWidth: 1))
+            }
             JobsSection(
                 list: owner.jobList,
                 owner: owner,

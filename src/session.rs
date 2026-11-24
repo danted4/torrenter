@@ -16,7 +16,8 @@ use crate::http::{
 };
 use crate::jobs::{self, JobKind, LoadJobs, PersistedJob, RestoreAction};
 use crate::paths::plain_path;
-use crate::progress::{is_stopped, until_stop, JobSnapshot};
+use crate::progress::{acquire_slot, is_disk_full, is_stopped, JobSnapshot, DISK_FULL};
+use crate::slots::{clamp_max_downloads, Slots};
 use crate::torrent::{
     magnet_display_name, magnet_info_hash_hex, magnet_payload_present, start_download_reported,
     OnMetadata,
@@ -24,7 +25,8 @@ use crate::torrent::{
 use crate::torrent_file;
 use crate::validate::{is_valid_download_url, is_valid_magnet_url};
 
-pub const MAX_ACTIVE_DOWNLOADS: usize = 4;
+/// Downloads at once when the setting is unset.
+pub const MAX_ACTIVE_DOWNLOADS: usize = crate::slots::DEFAULT_MAX_DOWNLOADS;
 const PERSIST_EVERY: Duration = Duration::from_secs(2);
 
 fn mutex_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -56,6 +58,9 @@ pub struct Job {
     pub private_torrent: bool,
     /// Fields a newer build wrote on this record, written back on every save.
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Place in line for a download slot: given when the job is added, kept
+    /// by restart and reopen (they replace the row in place). Not saved.
+    pub rank: u64,
 }
 
 #[derive(Clone)]
@@ -173,6 +178,8 @@ enum EngineCmd {
         torrent_store: PathBuf,
         /// Run only from that copy (a private torrent).
         private_torrent: bool,
+        /// Place in line for a download slot ([`Job::rank`]).
+        rank: u64,
     },
     Probe(Vec<ProbeSpec>),
     DeleteRemote {
@@ -231,6 +238,8 @@ struct Inner {
     /// Records of kinds this build does not know, written back untouched.
     foreign: Vec<serde_json::Value>,
     next_id: u64,
+    /// Next [`Job::rank`].
+    next_rank: u64,
     persist_at: Instant,
     saved_fingerprint: String,
     /// Connections setting for new HTTP and debrid jobs.
@@ -248,6 +257,8 @@ pub struct Session {
     inner: Arc<Mutex<Inner>>,
     engine: Sender<EngineCmd>,
     events: Mutex<Receiver<EngineEvent>>,
+    /// Download slots, shared with the engine thread.
+    slots: Arc<Slots>,
 }
 
 impl Session {
@@ -263,8 +274,12 @@ impl Session {
     fn open_inner(dest: PathBuf, jobs_path: PathBuf, seed: bool, leech_only: bool) -> Self {
         let (engine_tx, engine_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        thread::spawn(move || engine_loop(engine_rx, event_tx));
-        Self::with_channels(dest, jobs_path, seed, leech_only, engine_tx, event_rx)
+        let slots = Slots::new(MAX_ACTIVE_DOWNLOADS);
+        let engine_slots = Arc::clone(&slots);
+        thread::spawn(move || engine_loop(engine_rx, event_tx, engine_slots));
+        Self::with_channels(
+            dest, jobs_path, seed, leech_only, engine_tx, event_rx, slots,
+        )
     }
 
     fn with_channels(
@@ -274,6 +289,7 @@ impl Session {
         leech_only: bool,
         engine_tx: Sender<EngineCmd>,
         event_rx: Receiver<EngineEvent>,
+        slots: Arc<Slots>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -284,6 +300,7 @@ impl Session {
                 jobs: Vec::new(),
                 foreign: Vec::new(),
                 next_id: 1,
+                next_rank: 1,
                 persist_at: Instant::now(),
                 saved_fingerprint: String::new(),
                 part_count: PART_COUNT,
@@ -294,6 +311,7 @@ impl Session {
             })),
             engine: engine_tx,
             events: Mutex::new(event_rx),
+            slots,
         }
     }
 
@@ -327,6 +345,31 @@ impl Session {
 
     pub fn connections(&self) -> usize {
         mutex_lock(&self.inner).part_count
+    }
+
+    /// Downloads at once (`None` = 4, else 1–8). Applies live: raising it
+    /// starts waiting jobs, lowering it never interrupts a running one.
+    pub fn set_max_downloads(&self, max: Option<u8>) {
+        self.slots.set_cap(
+            max.map(|max| usize::from(clamp_max_downloads(max)))
+                .unwrap_or(MAX_ACTIVE_DOWNLOADS),
+        );
+    }
+
+    pub fn max_downloads(&self) -> usize {
+        self.slots.cap()
+    }
+
+    /// A download hit a full disk: waiting jobs do not start until something
+    /// tries to start one (resume, restart, add, un-pause, ticking a file).
+    pub fn queue_held(&self) -> bool {
+        self.slots.held()
+    }
+
+    /// Lifts a disk-full hold. If the disk is still full the next write
+    /// sets it again.
+    pub fn resume_queue(&self) {
+        self.slots.lift();
     }
 
     pub fn set_debrid_remove_after(&self, enabled: bool) {
@@ -421,6 +464,8 @@ impl Session {
                                 ..DebridState::default()
                             })),
                         });
+                    let rank = inner.next_rank;
+                    inner.next_rank += 1;
                     inner.jobs.push(Job {
                         id: record.id,
                         kind,
@@ -439,6 +484,7 @@ impl Session {
                         debrid,
                         private_torrent: record.private_torrent,
                         extra: record.extra,
+                        rank,
                     });
                 }
                 // Rewrite now when a folder was cleaned, so jobs.json holds the
@@ -650,6 +696,7 @@ impl Session {
             debrid,
             private_torrent: torrent.is_some_and(|(imported, _)| imported.private),
             extra: Default::default(),
+            rank: inner.next_rank,
         };
         if let (JobKind::Magnet, Some((_, bytes))) = (kind, torrent) {
             if let Ok(list) = torrent_file::files(bytes) {
@@ -664,6 +711,9 @@ impl Session {
             }
         };
         inner.next_id += 1;
+        inner.next_rank += 1;
+        // Adding a job is a try to start one: lift a disk-full hold.
+        self.slots.lift();
         let _ = self.engine.send(cmd);
         inner.jobs.push(job);
         persist_inner(&mut inner, true);
@@ -733,6 +783,8 @@ impl Session {
     ) -> Result<u64, String> {
         let old = inner.jobs[index].clone();
         let source = old.source.clone();
+        // Restart and reopen try to start a job: lift a disk-full hold.
+        self.slots.lift();
         if old.private_torrent && matches!(route, Route::Via(_)) {
             return Err(PRIVATE_NO_DEBRID.into());
         }
@@ -829,6 +881,7 @@ impl Session {
             debrid,
             private_torrent: old.private_torrent,
             extra: old.extra.clone(),
+            rank: old.rank,
         };
         let cmd = match launch(inner, &job) {
             Ok(cmd) => cmd,
@@ -884,6 +937,10 @@ impl Session {
                 return Ok(job.id);
             }
             let adds = adds_files(files.only(), only.as_ref());
+            if adds {
+                // More to download: a try to start, like resume.
+                self.slots.lift();
+            }
             files.set_only(only);
             files.generation += 1;
             // Checked under the files lock: the engine finishes a job only
@@ -945,6 +1002,10 @@ impl Session {
     pub fn toggle_pause(&self, id: u64) {
         let inner = mutex_lock(&self.inner);
         if let Some(job) = inner.jobs.iter().find(|job| job.id == id) {
+            if job.snapshot.is_paused() {
+                // Resuming is a try to start: lift a disk-full hold.
+                self.slots.lift();
+            }
             job.snapshot.toggle_pause();
         }
         drop(inner);
@@ -1039,11 +1100,14 @@ impl Session {
         f(&mut mutex_lock(&self.inner).jobs)
     }
 
+    /// Something is downloading or due to (phones keep their background
+    /// service up for it). A queue held for a full disk with nothing holding
+    /// a slot is idle: only seeding jobs still count.
     pub fn any_active(&self) -> bool {
-        mutex_lock(&self.inner)
-            .jobs
-            .iter()
-            .any(|job| job.snapshot.is_active())
+        let idle_hold = self.slots.held() && self.slots.active() == 0;
+        mutex_lock(&self.inner).jobs.iter().any(|job| {
+            job.snapshot.is_active() && (!idle_hold || job.snapshot.status() == "seeding")
+        })
     }
 }
 
@@ -1387,6 +1451,7 @@ fn launch(inner: &Inner, job: &Job) -> Result<EngineCmd, String> {
         debrid,
         torrent_store: torrent_file::store_dir(&inner.jobs_path),
         private_torrent: job.private_torrent,
+        rank: job.rank,
     })
 }
 
@@ -1430,16 +1495,15 @@ fn persist_inner(inner: &mut Inner, force: bool) {
     }
 }
 
-fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
+fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>, slots: Arc<Slots>) {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
-    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_ACTIVE_DOWNLOADS));
     let _keep_alive = thread::spawn(move || {
         runtime.block_on(std::future::pending::<()>());
     });
     while let Ok(cmd) = rx.recv() {
         let tx = tx.clone();
-        let limiter = Arc::clone(&limiter);
+        let slots = Arc::clone(&slots);
         handle.spawn(async move {
             match cmd {
                 EngineCmd::Download {
@@ -1453,6 +1517,7 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     debrid,
                     torrent_store,
                     private_torrent,
+                    rank,
                 } => {
                     if snapshot.should_stop() {
                         snapshot.mark_stopped();
@@ -1461,17 +1526,10 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                     if !snapshot.is_paused() {
                         snapshot.set_status("queued");
                     }
-                    let permit = tokio::select! {
-                        permit = limiter.acquire_owned() => permit.ok(),
-                        _ = until_stop(Some(snapshot.as_ref())) => {
-                            snapshot.mark_stopped();
-                            return;
-                        }
-                    };
-                    let Some(_permit) = permit else {
-                        return;
-                    };
-                    if snapshot.should_stop() {
+                    // A paused job waits outside the line and takes no slot.
+                    snapshot.attach_slot(slots, rank);
+                    if acquire_slot(&snapshot).await.is_err() {
+                        snapshot.detach_slot();
                         snapshot.mark_stopped();
                         return;
                     }
@@ -1491,7 +1549,7 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                                 base: launch.base,
                                 stall_timeout: crate::debrid::run::STALL_TIMEOUT,
                             };
-                            start_debrid_reported(run, snapshot).await
+                            start_debrid_reported(run, Arc::clone(&snapshot)).await
                         }
                         (JobKind::Debrid, None) => {
                             Err(anyhow::anyhow!("debrid job without a provider"))
@@ -1506,7 +1564,7 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                                     start_download_reported(
                                         &source,
                                         torrent,
-                                        snapshot,
+                                        Arc::clone(&snapshot),
                                         seed,
                                         dest,
                                         Some(on_metadata),
@@ -1520,16 +1578,33 @@ fn engine_loop(rx: Receiver<EngineCmd>, tx: Sender<EngineEvent>) {
                             }
                         }
                         (JobKind::Http, _) => {
-                            start_url_download_reported(&source, snapshot, dest, part_count).await
+                            start_url_download_reported(
+                                &source,
+                                Arc::clone(&snapshot),
+                                dest,
+                                part_count,
+                            )
+                            .await
                         }
                     };
-                    if let Err(error) = result {
-                        if !is_stopped(&error) {
+                    match result {
+                        Err(error) if is_disk_full(&error) => {
+                            // Hold before the slot is given back, so no
+                            // waiting job starts into the full disk.
+                            snapshot.hold_queue_and_detach();
+                            let _ = tx.send(EngineEvent::DownloadFailed {
+                                id,
+                                error: DISK_FULL.to_string(),
+                            });
+                        }
+                        Err(error) if !is_stopped(&error) => {
+                            snapshot.detach_slot();
                             let _ = tx.send(EngineEvent::DownloadFailed {
                                 id,
                                 error: format!("{error:#}"),
                             });
                         }
+                        _ => snapshot.detach_slot(),
                     }
                 }
                 EngineCmd::DeleteRemote {
@@ -1604,6 +1679,7 @@ mod tests {
             debrid: None,
             private_torrent: false,
             extra: Default::default(),
+            rank: 0,
         }
     }
 
@@ -2334,8 +2410,86 @@ mod tests {
             false,
             engine_tx,
             event_rx,
+            Slots::new(MAX_ACTIVE_DOWNLOADS),
         );
         (session, engine_rx, event_tx)
+    }
+
+    /// (id, rank) of each download sent to the engine.
+    fn launched_ranks(rx: &Receiver<EngineCmd>) -> Vec<(u64, u64)> {
+        rx.try_iter()
+            .filter_map(|cmd| match cmd {
+                EngineCmd::Download { id, rank, .. } => Some((id, rank)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn restart_keeps_the_job_s_place_in_line() {
+        let dir = tempdir().unwrap();
+        let (session, rx, _tx) = detached(dir.path());
+        let a = session
+            .queue(JobKind::Http, "https://example.com/a.bin")
+            .unwrap();
+        let b = session
+            .queue(JobKind::Http, "https://example.com/b.bin")
+            .unwrap();
+        let first = launched_ranks(&rx);
+        assert_eq!(first.len(), 2);
+        assert_eq!((first[0].0, first[1].0), (a, b));
+        assert!(first[0].1 < first[1].1, "added first, first in line");
+        session.job(a).unwrap().snapshot.set_error("boom");
+        let again = session.restart(a, false, dir.path().join("dl")).unwrap();
+        assert_ne!(again, a, "restart takes a new id");
+        assert_eq!(launched_ranks(&rx), vec![(again, first[0].1)]);
+    }
+
+    #[test]
+    fn a_held_queue_is_idle_and_every_start_lifts_it() {
+        let dir = tempdir().unwrap();
+        let (session, _rx, _tx) = detached(dir.path());
+        let a = session
+            .queue(JobKind::Http, "https://example.com/a.bin")
+            .unwrap();
+        assert!(session.any_active());
+        session.slots.hold();
+        assert!(session.queue_held());
+        assert!(!session.any_active(), "held with nothing running");
+        session.resume_queue();
+        assert!(!session.queue_held());
+
+        session.slots.hold();
+        session
+            .queue(JobKind::Http, "https://example.com/b.bin")
+            .unwrap();
+        assert!(!session.queue_held(), "adding a job lifts it");
+
+        session.toggle_pause(a);
+        session.slots.hold();
+        session.toggle_pause(a);
+        assert!(!session.queue_held(), "resuming a paused job lifts it");
+
+        session.slots.hold();
+        session.toggle_pause(a);
+        assert!(session.queue_held(), "pausing does not");
+
+        session.job(a).unwrap().snapshot.set_error(DISK_FULL);
+        session.restart(a, false, dir.path().join("dl")).unwrap();
+        assert!(!session.queue_held(), "restart lifts it");
+    }
+
+    #[test]
+    fn downloads_at_once_clamps_and_defaults_to_four() {
+        let dir = tempdir().unwrap();
+        let (session, _rx, _tx) = detached(dir.path());
+        assert_eq!(session.max_downloads(), 4);
+        session.set_max_downloads(Some(0));
+        assert_eq!(session.max_downloads(), 1);
+        session.set_max_downloads(Some(20));
+        assert_eq!(session.max_downloads(), 8);
+        session.set_max_downloads(None);
+        assert_eq!(session.max_downloads(), 4);
     }
 
     fn season_pack() -> Vec<u8> {
@@ -2460,14 +2614,20 @@ mod tests {
         let (session, rx, _tx) = restored_pack(dir.path(), &season_pack(), "done");
         assert!(session.jobs()[0].snapshot.is_done());
         // Unticking on a done job only stores it: nothing to download.
+        session.slots.hold();
         assert_eq!(session.set_files(5, &[0]), Ok(5));
+        assert!(session.queue_held(), "an untick is no try to start");
+        session.resume_queue();
         assert!(session.jobs()[0].snapshot.is_done());
         assert_eq!(downloads(&rx), 0);
         assert_eq!(session.set_files(5, &[]), Ok(5));
         assert!(session.jobs()[0].snapshot.is_done());
         assert_eq!(downloads(&rx), 0);
-        // Ticking a file starts it again under the same id and date.
+        // Ticking a file starts it again under the same id and date (and,
+        // as a try to start, lifts a disk-full hold; unticking did not).
+        session.slots.hold();
         assert_eq!(session.set_files(5, &[3]), Ok(5));
+        assert!(!session.queue_held());
         let job = session.jobs()[0].clone();
         assert_eq!((job.id, job.added.as_str()), (5, "2026-11-01"));
         assert!(job.snapshot.is_active());

@@ -604,6 +604,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
     func queueDebrid(source: String, account: String) throws  -> UInt64
     
     /**
+     * A download hit a full disk and waiting jobs are held.
+     */
+    func queueHeld()  -> Bool
+    
+    /**
      * Queue a `.torrent` file's bytes (from the system picker or "Open
      * with"): from peers, or through a debrid account (its id).
      */
@@ -631,6 +636,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
      */
     func restartRoute(id: UInt64, account: String?, seed: Bool, dest: String, removeFromService: Bool) throws  -> UInt64
     
+    /**
+     * Lift a disk-full hold (it comes back if the disk is still full).
+     */
+    func resumeQueue() 
+    
     func seed()  -> Bool
     
     /**
@@ -652,6 +662,11 @@ public protocol EngineProtocol: AnyObject, Sendable {
      * again under it).
      */
     func setJobFiles(id: UInt64, ids: [UInt32]) throws  -> UInt64
+    
+    /**
+     * Downloads at once (`None` = 4; 1–8). Applies live.
+     */
+    func setMaxDownloads(max: UInt8?) 
     
     func setSeed(seed: Bool) 
     
@@ -829,6 +844,16 @@ open func queueDebrid(source: String, account: String)throws  -> UInt64  {
 }
     
     /**
+     * A download hit a full disk and waiting jobs are held.
+     */
+open func queueHeld() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_torrenter_fn_method_engine_queue_held(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
      * Queue a `.torrent` file's bytes (from the system picker or "Open
      * with"): from peers, or through a debrid account (its id).
      */
@@ -898,6 +923,15 @@ open func restartRoute(id: UInt64, account: String?, seed: Bool, dest: String, r
 })
 }
     
+    /**
+     * Lift a disk-full hold (it comes back if the disk is still full).
+     */
+open func resumeQueue()  {try! rustCall() {
+    uniffi_torrenter_fn_method_engine_resume_queue(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
 open func seed() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_torrenter_fn_method_engine_seed(self.uniffiClonePointer(),$0
@@ -947,6 +981,16 @@ open func setJobFiles(id: UInt64, ids: [UInt32])throws  -> UInt64  {
         FfiConverterSequenceUInt32.lower(ids),$0
     )
 })
+}
+    
+    /**
+     * Downloads at once (`None` = 4; 1–8). Applies live.
+     */
+open func setMaxDownloads(max: UInt8?)  {try! rustCall() {
+    uniffi_torrenter_fn_method_engine_set_max_downloads(self.uniffiClonePointer(),
+        FfiConverterOptionUInt8.lower(max),$0
+    )
+}
 }
     
 open func setSeed(seed: Bool)  {try! rustCall() {
@@ -2256,6 +2300,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_queue_held() != 1601) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_queue_torrent_file() != 60120) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2274,6 +2321,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_torrenter_checksum_method_engine_restart_route() != 37013) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_torrenter_checksum_method_engine_resume_queue() != 10913) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_torrenter_checksum_method_engine_seed() != 40595) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2287,6 +2337,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_job_files() != 49589) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_torrenter_checksum_method_engine_set_max_downloads() != 20051) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_torrenter_checksum_method_engine_set_seed() != 25898) {

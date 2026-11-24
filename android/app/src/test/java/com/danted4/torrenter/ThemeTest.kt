@@ -19,4 +19,11 @@ class ThemeTest {
         assertNotEquals(palette(ThemeId.Ice).fg, palette(ThemeId.Scarlet).fg)
         assertNotEquals(palette(ThemeId.Violet).fg, palette(ThemeId.Phosphor).fg)
     }
+
+    @Test
+    fun downloadsAtOnceStayInRange() {
+        assertEquals(1, Prefs.maxDownloadsArg(0).toInt())
+        assertEquals(4, Prefs.maxDownloadsArg(4).toInt())
+        assertEquals(8, Prefs.maxDownloadsArg(99).toInt())
+    }
 }

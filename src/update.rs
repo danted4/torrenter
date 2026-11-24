@@ -66,6 +66,9 @@ pub struct AppConfig {
     /// HTTP parts per download for new jobs; `None` is Auto (= `PART_COUNT`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connections: Option<u8>,
+    /// Downloads at once; `None` is the default (4). Clamped to 1–8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_downloads: Option<u8>,
     /// Remembered debrid route for magnet jobs (`torbox`, …); `None` is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debrid_route: Option<String>,
@@ -91,6 +94,7 @@ impl Default for AppConfig {
             cached_asset_url: None,
             cached_checksums_url: None,
             connections: None,
+            max_downloads: None,
             debrid_route: None,
             debrid_remove_after: false,
             extra: BTreeMap::new(),
@@ -872,6 +876,23 @@ fn clamp_connections(parts: u8) -> u8 {
     parts.clamp(1, MAX_CONNECTIONS)
 }
 
+/// `None` (or 4) goes back to the default and leaves the key out.
+pub fn set_max_downloads(max: Option<u8>) -> Result<AppConfig> {
+    edit_config(|config| {
+        config.max_downloads = max
+            .map(crate::slots::clamp_max_downloads)
+            .filter(|&max| usize::from(max) != crate::slots::DEFAULT_MAX_DOWNLOADS)
+    })
+}
+
+/// Downloads at once: the setting, or the default (4).
+pub fn effective_max_downloads(config: &AppConfig) -> usize {
+    config
+        .max_downloads
+        .map(|max| usize::from(crate::slots::clamp_max_downloads(max)))
+        .unwrap_or(crate::slots::DEFAULT_MAX_DOWNLOADS)
+}
+
 pub fn set_debrid_route(service: Option<&str>) -> Result<AppConfig> {
     let service = service.map(|id| id.trim().to_ascii_lowercase());
     edit_config(|config| config.debrid_route = service.filter(|id| !id.is_empty()))
@@ -946,6 +967,22 @@ mod tests {
         assert_eq!(effective_connections(&config), usize::from(MAX_CONNECTIONS));
         let text = serde_json::to_string(&AppConfig::default()).unwrap();
         assert!(!text.contains("connections") && !text.contains("debrid_route"));
+    }
+
+    #[test]
+    fn max_downloads_default_to_four_and_clamp() {
+        let mut config = AppConfig::default();
+        assert_eq!(effective_max_downloads(&config), 4);
+        config.max_downloads = Some(0);
+        assert_eq!(effective_max_downloads(&config), 1);
+        config.max_downloads = Some(99);
+        assert_eq!(effective_max_downloads(&config), 8);
+        let text = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(!text.contains("max_downloads"));
+        config.max_downloads = Some(6);
+        let text = serde_json::to_string(&config).unwrap();
+        let back: AppConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.max_downloads, Some(6));
     }
 
     #[test]

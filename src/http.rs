@@ -1152,9 +1152,13 @@ async fn merge_parts(
     .await;
     // Same as `stream_into_file`: never return with a merge write still in flight.
     let flushed = output.flush().await;
-    copied?;
-    flushed?;
     drop(output);
+    if let Err(error) = copied.and(flushed.map_err(anyhow::Error::from)) {
+        // The parts are intact; a half-written copy only holds disk space
+        // (and a disk-full failure most of all). The next merge starts over.
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(error);
+    }
     let _ = fs::remove_file(&output_path).await;
     fs::rename(&tmp_path, &output_path)
         .await
@@ -1171,6 +1175,29 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     const RANGE_HEADER: &str = r"(?i)range:\s*bytes=(\d+)-(\d+)";
+
+    #[tokio::test]
+    async fn a_failed_merge_leaves_no_temp_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DownloadLayout::in_dir(dir.path().to_path_buf()).with_part_count(2);
+        let key = "merge-test";
+        std::fs::create_dir_all(part_path(&layout, key, 0).parent().unwrap()).unwrap();
+        // Part 0 is whole; part 1 is missing, so the copy fails half way.
+        std::fs::write(part_path(&layout, key, 0), [7u8; 5]).unwrap();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let result = merge_parts(
+            &layout,
+            key,
+            "film.bin",
+            &ProgressHandle::hidden(),
+            &downloaded,
+            10,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!dir.path().join(".film.bin.merge.tmp").exists());
+        assert!(part_path(&layout, key, 0).exists(), "parts are kept");
+    }
 
     #[derive(Clone)]
     struct ServerConfig {
