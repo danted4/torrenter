@@ -13,7 +13,7 @@ use librqbit::{
 
 use crate::progress::{
     check_stop, is_stopped, output_lock, watch_cli_controls, JobSnapshot, ProgressHandle,
-    CONNECTING_TO_PEERS, FETCHING_METADATA,
+    CONNECTING_TO_PEERS, FETCHING_METADATA, QUEUED,
 };
 use crate::validate::is_valid_magnet_url;
 
@@ -437,17 +437,40 @@ async fn run_torrent(
         Some(bytes) => AddTorrent::from_bytes(bytes),
         None => AddTorrent::from_url(magnet_uri),
     };
-    let handle = session
-        .add_torrent(
-            add,
-            Some(AddTorrentOptions {
-                overwrite: true,
-                sub_folder: Some(sub_folder),
-                only_files,
-                ..Default::default()
-            }),
-        )
-        .await
+    let adding = session.add_torrent(
+        add,
+        Some(AddTorrentOptions {
+            overwrite: true,
+            sub_folder: Some(sub_folder),
+            only_files,
+            ..Default::default()
+        }),
+    );
+    tokio::pin!(adding);
+    // A magnet waits here for its metadata. Meanwhile a pause gives the
+    // download slot back, a resume takes its turn for one again (librqbit
+    // keeps fetching either way; the tick below pauses it until it has one)
+    // and a stop ends it.
+    let added = loop {
+        tokio::select! {
+            added = &mut adding => break added,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if let Some(snapshot) = progress.snapshot() {
+                    if snapshot.should_stop() {
+                        snapshot.mark_stopped();
+                        progress.finish_and_clear();
+                        return Ok(());
+                    }
+                    if snapshot.is_paused() {
+                        snapshot.release_slot();
+                    } else {
+                        snapshot.poll_slot();
+                    }
+                }
+            }
+        }
+    };
+    let handle = added
         .context("failed to add magnet")?
         .into_handle()
         .context("torrent was added in list-only mode")?;
@@ -530,14 +553,27 @@ async fn run_torrent(
                     progress.set_title(name);
                 }
                 let want_pause = progress.is_paused();
-                if want_pause != engine_paused {
-                    if want_pause {
-                        session.pause(&handle).await.context("failed to pause torrent")?;
-                    } else {
-                        session.unpause(&handle).await.context("failed to resume torrent")?;
+                // Paused or seeding: no download slot. Downloading again
+                // (resumed, or a file ticked while seeding): wait for one,
+                // with librqbit paused meanwhile.
+                let slot_ok = match progress.snapshot() {
+                    Some(snapshot) if want_pause || download_done => {
+                        snapshot.release_slot();
+                        true
                     }
-                    engine_paused = want_pause;
+                    Some(snapshot) => snapshot.poll_slot(),
+                    None => true,
+                };
+                let run = !want_pause && slot_ok;
+                if run == engine_paused {
+                    if run {
+                        session.unpause(&handle).await.context("failed to resume torrent")?;
+                    } else {
+                        session.pause(&handle).await.context("failed to pause torrent")?;
+                    }
+                    engine_paused = !run;
                 }
+                let waiting_for_slot = !want_pause && !slot_ok;
                 let stats = handle.stats();
                 if let Some(error) = stats.error {
                     progress.finish_and_clear();
@@ -620,7 +656,9 @@ async fn run_torrent(
                         progress.set_status("downloading");
                     }
                 }
-                if !want_pause {
+                if waiting_for_slot {
+                    progress.set_status(QUEUED);
+                } else if !want_pause {
                     let position = if download_done {
                         total
                     } else {

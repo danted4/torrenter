@@ -48,6 +48,7 @@ class TorrenterApp : Application() {
             }
             val prefs = getSharedPreferences(Prefs.NAME, MODE_PRIVATE)
             created.setConnections(Prefs.connectionsArg(Prefs.connections(prefs)))
+            created.setMaxDownloads(Prefs.maxDownloadsArg(Prefs.maxDownloads(prefs)))
             created.setDebridRemoveAfter(Prefs.removeAfter(prefs))
             created.hydrate()
             engine = created

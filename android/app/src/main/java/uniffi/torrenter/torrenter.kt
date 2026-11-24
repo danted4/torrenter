@@ -774,6 +774,12 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -819,6 +825,8 @@ fun uniffi_torrenter_checksum_method_engine_queue(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_queue_debrid(
 ): Short
+fun uniffi_torrenter_checksum_method_engine_queue_held(
+): Short
 fun uniffi_torrenter_checksum_method_engine_queue_torrent_file(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_remove(
@@ -831,6 +839,8 @@ fun uniffi_torrenter_checksum_method_engine_restart(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_restart_route(
 ): Short
+fun uniffi_torrenter_checksum_method_engine_resume_queue(
+): Short
 fun uniffi_torrenter_checksum_method_engine_seed(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_connections(
@@ -840,6 +850,8 @@ fun uniffi_torrenter_checksum_method_engine_set_debrid_account(
 fun uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_job_files(
+): Short
+fun uniffi_torrenter_checksum_method_engine_set_max_downloads(
 ): Short
 fun uniffi_torrenter_checksum_method_engine_set_seed(
 ): Short
@@ -928,6 +940,8 @@ fun uniffi_torrenter_fn_method_engine_queue(`ptr`: Pointer,`kind`: RustBuffer.By
 ): Long
 fun uniffi_torrenter_fn_method_engine_queue_debrid(`ptr`: Pointer,`source`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+fun uniffi_torrenter_fn_method_engine_queue_held(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
 fun uniffi_torrenter_fn_method_engine_queue_torrent_file(`ptr`: Pointer,`bytes`: RustBuffer.ByValue,`account`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 fun uniffi_torrenter_fn_method_engine_remove(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -940,6 +954,8 @@ fun uniffi_torrenter_fn_method_engine_restart(`ptr`: Pointer,`id`: Long,`seed`: 
 ): Long
 fun uniffi_torrenter_fn_method_engine_restart_route(`ptr`: Pointer,`id`: Long,`account`: RustBuffer.ByValue,`seed`: Byte,`dest`: RustBuffer.ByValue,`removeFromService`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+fun uniffi_torrenter_fn_method_engine_resume_queue(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 fun uniffi_torrenter_fn_method_engine_seed(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
 fun uniffi_torrenter_fn_method_engine_set_connections(`ptr`: Pointer,`parts`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -950,6 +966,8 @@ fun uniffi_torrenter_fn_method_engine_set_debrid_remove_after(`ptr`: Pointer,`en
 ): Unit
 fun uniffi_torrenter_fn_method_engine_set_job_files(`ptr`: Pointer,`id`: Long,`ids`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
+fun uniffi_torrenter_fn_method_engine_set_max_downloads(`ptr`: Pointer,`max`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 fun uniffi_torrenter_fn_method_engine_set_seed(`ptr`: Pointer,`seed`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_torrenter_fn_method_engine_stop(`ptr`: Pointer,`id`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1133,6 +1151,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_queue_debrid() != 13218.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_queue_held() != 1601.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_queue_torrent_file() != 60120.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1151,6 +1172,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_torrenter_checksum_method_engine_restart_route() != 37013.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_torrenter_checksum_method_engine_resume_queue() != 10913.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_torrenter_checksum_method_engine_seed() != 40595.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1164,6 +1188,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_job_files() != 49589.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_torrenter_checksum_method_engine_set_max_downloads() != 20051.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_torrenter_checksum_method_engine_set_seed() != 25898.toShort()) {
@@ -1675,6 +1702,11 @@ public interface EngineInterface {
     fun `queueDebrid`(`source`: kotlin.String, `account`: kotlin.String): kotlin.ULong
     
     /**
+     * A download hit a full disk and waiting jobs are held.
+     */
+    fun `queueHeld`(): kotlin.Boolean
+    
+    /**
      * Queue a `.torrent` file's bytes (from the system picker or "Open
      * with"): from peers, or through a debrid account (its id).
      */
@@ -1702,6 +1734,11 @@ public interface EngineInterface {
      */
     fun `restartRoute`(`id`: kotlin.ULong, `account`: kotlin.String?, `seed`: kotlin.Boolean, `dest`: kotlin.String, `removeFromService`: kotlin.Boolean): kotlin.ULong
     
+    /**
+     * Lift a disk-full hold (it comes back if the disk is still full).
+     */
+    fun `resumeQueue`()
+    
     fun `seed`(): kotlin.Boolean
     
     /**
@@ -1723,6 +1760,11 @@ public interface EngineInterface {
      * again under it).
      */
     fun `setJobFiles`(`id`: kotlin.ULong, `ids`: List<kotlin.UInt>): kotlin.ULong
+    
+    /**
+     * Downloads at once (`None` = 4; 1–8). Applies live.
+     */
+    fun `setMaxDownloads`(`max`: kotlin.UByte?)
     
     fun `setSeed`(`seed`: kotlin.Boolean)
     
@@ -1977,6 +2019,21 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
 
     
     /**
+     * A download hit a full disk and waiting jobs are held.
+     */override fun `queueHeld`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_queue_held(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
      * Queue a `.torrent` file's bytes (from the system picker or "Open
      * with"): from peers, or through a debrid account (its id).
      */
@@ -2064,6 +2121,20 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     }
     
 
+    
+    /**
+     * Lift a disk-full hold (it comes back if the disk is still full).
+     */override fun `resumeQueue`()
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_resume_queue(
+        it, _status)
+}
+    }
+    
+    
+
     override fun `seed`(): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithPointer {
@@ -2133,6 +2204,20 @@ open class Engine: Disposable, AutoCloseable, EngineInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Downloads at once (`None` = 4; 1–8). Applies live.
+     */override fun `setMaxDownloads`(`max`: kotlin.UByte?)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_torrenter_fn_method_engine_set_max_downloads(
+        it, FfiConverterOptionalUByte.lower(`max`),_status)
+}
+    }
+    
     
 
     override fun `setSeed`(`seed`: kotlin.Boolean)

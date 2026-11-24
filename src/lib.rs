@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod paths;
 pub mod progress;
 pub mod session;
+pub mod slots;
 pub mod torrent;
 pub mod torrent_file;
 pub mod update;

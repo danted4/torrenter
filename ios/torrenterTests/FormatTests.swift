@@ -103,4 +103,10 @@ final class FormatTests: XCTestCase {
         XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "fetching metadata")))
         XCTAssertNil(jobBarFraction(job(kind: .magnet, status: "connecting to peers")))
     }
+
+    func testDownloadsAtOnceStayInRange() {
+        XCTAssertEqual(Prefs.clampMaxDownloads(0), 1)
+        XCTAssertEqual(Prefs.clampMaxDownloads(4), 4)
+        XCTAssertEqual(Prefs.clampMaxDownloads(99), 8)
+    }
 }

@@ -96,6 +96,7 @@ object Prefs {
 
     const val DEBRID_ROUTE = "debridRoute"
     const val CONNECTIONS = "connections"
+    const val MAX_DOWNLOADS = "maxDownloads"
     const val REMOVE_AFTER = "debridRemoveAfter"
 
     /** Remembered debrid service for magnet jobs; null is off. */
@@ -128,6 +129,18 @@ object Prefs {
     }
 
     fun connectionsArg(parts: Int): UByte? = if (parts > 0) parts.coerceAtMost(16).toUByte() else null
+
+    /** Downloads at once, 1–8; 4 by default. */
+    fun maxDownloads(prefs: SharedPreferences): Int = maxDownloadsArg(prefs.getInt(MAX_DOWNLOADS, 4)).toInt()
+
+    fun saveMaxDownloads(
+        prefs: SharedPreferences,
+        max: Int,
+    ) {
+        prefs.edit().putInt(MAX_DOWNLOADS, max).apply()
+    }
+
+    fun maxDownloadsArg(max: Int): UByte = max.coerceIn(1, 8).toUByte()
 
     fun saveSeed(
         prefs: SharedPreferences,

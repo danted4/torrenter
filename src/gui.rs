@@ -294,6 +294,8 @@ struct GuiApp {
     debrid_route: Option<String>,
     debrid_remove_after: bool,
     connections: Option<u8>,
+    /// Downloads at once (1–8).
+    max_downloads: usize,
     /// Settings page: the category shown in the content pane.
     settings_tab: SettingsTab,
     /// Settings page: the add-account form, while open.
@@ -438,6 +440,7 @@ impl GuiApp {
         let jobs_path = jobs::jobs_path().unwrap_or_else(|_| dest.join("jobs.json"));
         let session = Session::open(dest.clone(), jobs_path, seed);
         session.set_connections(config.connections);
+        session.set_max_downloads(config.max_downloads);
         session.set_debrid_remove_after(config.debrid_remove_after);
         let debrid_route = config.debrid_route.clone().filter(|id| !id.is_empty());
         let (account_tx, account_rx) = mpsc::channel();
@@ -474,6 +477,7 @@ impl GuiApp {
             debrid_route,
             debrid_remove_after: config.debrid_remove_after,
             connections: config.connections,
+            max_downloads: update::effective_max_downloads(&config),
             settings_tab: SettingsTab::default(),
             add_form: None,
             account_notes: HashMap::new(),
@@ -1332,6 +1336,9 @@ impl eframe::App for GuiApp {
                         ui.add_space(8.0);
                     }
                 }
+                if self.session.queue_held() {
+                    queue_held_line(ui, palette, &self.session);
+                }
                 if self.session.is_empty() {
                     ui.centered_and_justified(|ui| {
                         glass_label(
@@ -1370,6 +1377,7 @@ impl eframe::App for GuiApp {
                 let mut as_torrent = None;
                 let mut open_files = None;
                 let mut persist_now = false;
+                let mut lift_hold = false;
                 let row_fill = self.surface(palette.row);
                 let row_alt_fill = self.surface(palette.row_alt);
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1476,6 +1484,8 @@ impl eframe::App for GuiApp {
                                                     .button(ink(pause_label, 12.0, accent))
                                                     .clicked()
                                                 {
+                                                    // Resuming is a try to start.
+                                                    lift_hold |= job.snapshot.is_paused();
                                                     job.snapshot.toggle_pause();
                                                     persist_now = true;
                                                 }
@@ -1662,6 +1672,9 @@ impl eframe::App for GuiApp {
                         }
                     }
                     persist_now = true;
+                }
+                if lift_hold {
+                    self.session.resume_queue();
                 }
                 if persist_now {
                     self.persist_jobs(true);
@@ -2029,6 +2042,27 @@ impl GuiApp {
             fill,
             palette,
             (
+                "downloads at once",
+                "how many jobs download together; the rest wait in list order. Paused and seeding jobs do not count",
+            ),
+            240.0,
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                // right-to-left: listed in reverse so they read 1 → 8
+                for max in (1..=crate::slots::MAX_DOWNLOADS_CAP).rev() {
+                    let on = self.max_downloads == usize::from(max);
+                    if route_chip(ui, &max.to_string(), on, palette).clicked() && !on {
+                        self.set_max_downloads(max);
+                    }
+                }
+            },
+        );
+        setting_card(
+            ui,
+            fill,
+            palette,
+            (
                 "remove from debrid account after download",
                 "once every file has arrived; only torrents torrenter added",
             ),
@@ -2126,6 +2160,12 @@ impl GuiApp {
             11.0,
             palette.dim,
         );
+    }
+
+    fn set_max_downloads(&mut self, max: u8) {
+        self.max_downloads = usize::from(max);
+        self.session.set_max_downloads(Some(max));
+        let _ = update::set_max_downloads(Some(max));
     }
 
     fn set_connections(&mut self, parts: Option<u8>) {
@@ -3821,6 +3861,32 @@ fn glass_pair(
     response
 }
 
+/// Above the job list while a full disk holds the queue: waiting jobs start
+/// again on **resume** (or any restart, add or un-pause).
+fn queue_held_line(ui: &mut egui::Ui, palette: Theme, session: &Session) {
+    let fill = Color32::from_rgba_unmultiplied(palette.fg.r(), palette.fg.g(), palette.fg.b(), 18);
+    egui::Frame::NONE
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, palette.dim))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                glass_label(
+                    ui,
+                    "queue held: disk full  ·  free some space",
+                    13.0,
+                    palette.fail,
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(ink("resume", 12.0, palette.fg)).clicked() {
+                        session.resume_queue();
+                    }
+                });
+            });
+        });
+    ui.add_space(8.0);
+}
+
 /// The search field above a list (jobs, or a job's files): label, a bordered
 /// field that lights up on hover or focus, Esc clears it.
 fn search_row(ui: &mut egui::Ui, palette: Theme, query: &mut String, id_salt: &str, hint: &str) {
@@ -4337,6 +4403,7 @@ mod tests {
             debrid: None,
             private_torrent: false,
             extra: Default::default(),
+            rank: 0,
         }
     }
 

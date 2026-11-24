@@ -79,6 +79,8 @@ fun SettingsScreen(
     notes: Map<String, String>,
     connections: Int,
     onConnections: (Int) -> Unit,
+    maxDownloads: Int,
+    onMaxDownloads: (Int) -> Unit,
     removeAfter: Boolean,
     onRemoveAfter: (Boolean) -> Unit,
     onAddAccount: (service: String, name: String, key: String) -> Boolean,
@@ -118,6 +120,21 @@ fun SettingsScreen(
                             Chip("auto", connections == 0, palette) { onConnections(0) }
                             listOf(1, 2, 4, 8, 16).forEach { parts ->
                                 Chip("$parts", connections == parts, palette) { onConnections(parts) }
+                            }
+                        }
+                    }
+                    Tile(
+                        "downloads at once",
+                        "how many jobs download together; the rest wait in list order. Paused and seeding jobs do not count",
+                        palette,
+                        stacked = true,
+                    ) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            (1..8).forEach { max ->
+                                Chip("$max", maxDownloads == max, palette) { onMaxDownloads(max) }
                             }
                         }
                     }

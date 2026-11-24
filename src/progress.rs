@@ -7,6 +7,8 @@ use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::slots::{SlotTicket, Slots};
+
 #[derive(Debug)]
 pub struct DownloadStopped;
 
@@ -221,6 +223,9 @@ pub struct JobSnapshot {
     error: Mutex<Option<String>>,
     /// Lock order: `files` before `status`.
     files: Mutex<FileState>,
+    /// The job's place in the download-slot queue while its engine task
+    /// runs (`None` for the CLI and the updater, which never wait).
+    slot: Mutex<Option<SlotTicket>>,
 }
 
 impl Default for JobSnapshot {
@@ -240,6 +245,7 @@ impl Default for JobSnapshot {
             title: Mutex::new(String::new()),
             error: Mutex::new(None),
             files: Mutex::new(FileState::default()),
+            slot: Mutex::new(None),
         }
     }
 }
@@ -360,6 +366,48 @@ impl JobSnapshot {
     pub fn file_counts(&self) -> (u32, u32) {
         self.files().counts()
     }
+
+    /// Gives the job a place in the slot queue (it holds no slot yet).
+    pub fn attach_slot(&self, slots: Arc<Slots>, rank: u64) {
+        *mutex_lock(&self.slot) = Some(SlotTicket::new(slots, rank));
+    }
+
+    /// Leaves the queue for good, giving back any slot held.
+    pub fn detach_slot(&self) {
+        let ticket = mutex_lock(&self.slot).take();
+        drop(ticket);
+    }
+
+    /// Paused or seeding: give the slot to the next waiting job.
+    pub fn release_slot(&self) {
+        if let Some(ticket) = mutex_lock(&self.slot).as_mut() {
+            ticket.release();
+        }
+    }
+
+    /// True when the job may download now: it holds a slot (taking one if it
+    /// is its turn) or it has no place in a queue at all.
+    pub fn poll_slot(&self) -> bool {
+        let paused = self.is_paused();
+        match mutex_lock(&self.slot).as_mut() {
+            Some(ticket) => ticket.poll(paused),
+            None => true,
+        }
+    }
+
+    fn slots(&self) -> Option<Arc<Slots>> {
+        mutex_lock(&self.slot)
+            .as_ref()
+            .map(|ticket| Arc::clone(ticket.slots()))
+    }
+
+    /// Disk full: holds the queue. Call it while the job still holds its
+    /// slot, so no waiting job starts before the hold is in place.
+    pub fn hold_queue(&self) {
+        if let Some(slots) = self.slots() {
+            slots.hold();
+        }
+    }
 }
 
 pub fn is_stopped(error: &anyhow::Error) -> bool {
@@ -385,6 +433,8 @@ pub fn abort_if_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
     Ok(())
 }
 
+/// Waits out a pause, giving the job's download slot back meanwhile and
+/// taking one again (in list order) before returning.
 pub async fn wait_while_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
     let Some(snapshot) = snapshot else {
         return Ok(());
@@ -394,10 +444,111 @@ pub async fn wait_while_paused(snapshot: Option<&JobSnapshot>) -> Result<()> {
             anyhow::bail!(DownloadStopped);
         }
         if snapshot.is_paused() {
+            snapshot.release_slot();
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
-        return Ok(());
+        return acquire_slot(snapshot).await;
+    }
+}
+
+/// Waits for a download slot. Shows "queued" only while actually waiting
+/// and puts the previous status back once the slot is taken; paused time is
+/// spent outside the line. Fails with [`DownloadStopped`] on stop.
+pub async fn acquire_slot(snapshot: &JobSnapshot) -> Result<()> {
+    let mut before: Option<String> = None;
+    let taken = |before: Option<String>| {
+        if let Some(previous) = before {
+            if snapshot.status() == QUEUED {
+                snapshot.set_status(previous);
+            }
+        }
+    };
+    loop {
+        if snapshot.should_stop() {
+            anyhow::bail!(DownloadStopped);
+        }
+        // Cheap path first: this runs per merge chunk through honor_control.
+        if snapshot.poll_slot() {
+            taken(before);
+            return Ok(());
+        }
+        // Armed, then checked again, so a slot freed in between wakes us.
+        let slots = snapshot.slots();
+        let wake = slots.as_ref().map(|slots| slots.notified());
+        if snapshot.poll_slot() {
+            taken(before);
+            return Ok(());
+        }
+        if !snapshot.is_paused() {
+            let status = snapshot.status();
+            if status != QUEUED {
+                before.get_or_insert(status);
+                snapshot.set_status(QUEUED);
+            }
+        }
+        let tick = tokio::time::sleep(Duration::from_millis(100));
+        match wake {
+            Some(wake) => {
+                tokio::select! {
+                    _ = wake => {}
+                    _ = tick => {}
+                }
+            }
+            None => tick.await,
+        }
+    }
+}
+
+/// A job waiting for a download slot.
+pub const QUEUED: &str = "queued";
+
+/// Text shown for a job that failed because the disk filled up.
+pub const DISK_FULL: &str = "disk full: free some space, then restart";
+
+/// The download failed because the disk (or the user's quota) is full.
+/// librqbit hands its write errors over as text, so that is matched too.
+pub fn is_disk_full(error: &anyhow::Error) -> bool {
+    let io_full = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(io_error_is_disk_full)
+    });
+    io_full || text_is_disk_full(&format!("{error:#}"))
+}
+
+/// The text of a failed job says it ran out of disk space.
+pub fn text_is_disk_full(text: &str) -> bool {
+    if text.contains(DISK_FULL) {
+        return true;
+    }
+    // The OS's own wording and error number only (librqbit passes write
+    // errors on as text): the same numbers mean other things elsewhere
+    // (Linux errno 112 is "host is down").
+    let text = text.to_ascii_lowercase();
+    #[cfg(not(windows))]
+    let needles = ["no space left on device", "(os error 28)"];
+    #[cfg(windows)]
+    let needles = [
+        "not enough space on the disk",
+        "(os error 112)",
+        "(os error 39)",
+    ];
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn io_error_is_disk_full(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::StorageFull {
+        return true;
+    }
+    match error.raw_os_error() {
+        // ENOSPC everywhere but Windows (macOS, Linux, Android, iOS).
+        #[cfg(not(windows))]
+        Some(28) => true,
+        // ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL.
+        #[cfg(windows)]
+        Some(39 | 112) => true,
+        _ => false,
     }
 }
 
@@ -764,6 +915,108 @@ mod tests {
     }
 
     use super::*;
+    use crate::slots::Slots;
+
+    #[test]
+    fn other_errors_with_the_same_numbers_are_not_disk_full() {
+        // Linux errno 112 is EHOSTDOWN; Windows error 28 is unrelated too.
+        #[cfg(not(windows))]
+        let other = "error sending request: Host is down (os error 112)";
+        #[cfg(windows)]
+        let other = "The printer is out of paper. (os error 28)";
+        assert!(!is_disk_full(&anyhow::anyhow!(other)));
+    }
+
+    #[test]
+    fn disk_full_is_recognised_from_io_errors_and_librqbit_text() {
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert!(is_disk_full(
+            &anyhow::Error::from(full).context("writing part 2")
+        ));
+        #[cfg(not(windows))]
+        let raw = std::io::Error::from_raw_os_error(28);
+        #[cfg(windows)]
+        let raw = std::io::Error::from_raw_os_error(112);
+        assert!(is_disk_full(&anyhow::Error::from(raw)));
+        // librqbit hands write errors over as text.
+        #[cfg(not(windows))]
+        let text =
+            "fatal error: error writing chunk to disk: No space left on device (os error 28)";
+        #[cfg(windows)]
+        let text = "fatal error: error writing chunk to disk: There is not enough space on the disk. (os error 112)";
+        assert!(is_disk_full(&anyhow::anyhow!(text)));
+        assert!(is_disk_full(&anyhow::anyhow!(DISK_FULL)));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_disk_full(&anyhow::Error::from(denied)));
+        assert!(!is_disk_full(&anyhow::anyhow!("connection reset by peer")));
+    }
+
+    #[tokio::test]
+    async fn a_pause_gives_the_slot_to_the_next_job_and_resume_waits_its_turn() {
+        let slots = Slots::new(1);
+        let running = Arc::new(JobSnapshot::default());
+        running.attach_slot(Arc::clone(&slots), 1);
+        running.set_status("downloading");
+        acquire_slot(&running).await.unwrap();
+        let next = Arc::new(JobSnapshot::default());
+        next.attach_slot(Arc::clone(&slots), 2);
+        assert!(!next.poll_slot(), "cap 1 is taken");
+
+        running.toggle_pause();
+        let waiter = Arc::clone(&running);
+        let paused = tokio::spawn(async move { wait_while_paused(Some(&waiter)).await });
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(next.poll_slot(), "the paused job gave its slot back");
+
+        running.toggle_pause();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(!paused.is_finished(), "resumed, but the slot is taken");
+        assert_eq!(running.status(), QUEUED);
+        next.detach_slot();
+        tokio::time::timeout(Duration::from_secs(2), paused)
+            .await
+            .expect("takes the freed slot")
+            .unwrap()
+            .unwrap();
+        assert_eq!(running.status(), "downloading");
+        assert_eq!(slots.active(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_waiting_for_a_slot_ends_the_wait() {
+        let slots = Slots::new(1);
+        let first = JobSnapshot::default();
+        first.attach_slot(Arc::clone(&slots), 1);
+        assert!(first.poll_slot());
+        let second = Arc::new(JobSnapshot::default());
+        second.attach_slot(Arc::clone(&slots), 2);
+        let waiter = Arc::clone(&second);
+        let wait = tokio::spawn(async move { acquire_slot(&waiter).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        second.request_stop();
+        let result = tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err_and(|error| is_stopped(&error)));
+    }
+
+    #[test]
+    fn a_disk_full_hold_lands_before_the_slot_is_given_back() {
+        let slots = Slots::new(1);
+        let failing = JobSnapshot::default();
+        failing.attach_slot(Arc::clone(&slots), 1);
+        assert!(failing.poll_slot());
+        let waiting = JobSnapshot::default();
+        waiting.attach_slot(Arc::clone(&slots), 2);
+        assert!(!waiting.poll_slot());
+        failing.hold_queue();
+        failing.detach_slot();
+        assert!(slots.held());
+        assert!(!waiting.poll_slot(), "held: the freed slot is not taken");
+        slots.lift();
+        assert!(waiting.poll_slot());
+    }
 
     #[test]
     fn formats_zero_and_known_sizes() {

@@ -101,6 +101,19 @@ struct SettingsView: View {
                 }
             }
             tile(
+                "downloads at once",
+                "how many jobs download together; the rest wait in list order. Paused and seeding jobs do not count",
+                stacked: true
+            ) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(1...8, id: \.self) { max in
+                            chip("\(max)", on: owner.maxDownloads == max) { owner.maxDownloads = max }
+                        }
+                    }
+                }
+            }
+            tile(
                 "remove from debrid account after download",
                 "once every file has arrived; only torrents torrenter added"
             ) {

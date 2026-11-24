@@ -367,6 +367,21 @@ impl Engine {
         self.session.set_debrid_remove_after(enabled);
     }
 
+    /// Downloads at once (`None` = 4; 1–8). Applies live.
+    pub fn set_max_downloads(&self, max: Option<u8>) {
+        self.session.set_max_downloads(max);
+    }
+
+    /// A download hit a full disk and waiting jobs are held.
+    pub fn queue_held(&self) -> bool {
+        self.session.queue_held()
+    }
+
+    /// Lift a disk-full hold (it comes back if the disk is still full).
+    pub fn resume_queue(&self) {
+        self.session.resume_queue();
+    }
+
     /// Clearing this job should ask "also remove it from the service?".
     pub fn clear_asks_about_remote(&self, id: u64) -> bool {
         self.session.clear_asks_about_remote(id)
@@ -504,6 +519,7 @@ mod tests {
             debrid: None,
             private_torrent: false,
             extra: Default::default(),
+            rank: 0,
         }
     }
 

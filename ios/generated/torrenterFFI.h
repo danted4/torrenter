@@ -326,6 +326,11 @@ uint64_t uniffi_torrenter_fn_method_engine_queue(void*_Nonnull ptr, RustBuffer k
 uint64_t uniffi_torrenter_fn_method_engine_queue_debrid(void*_Nonnull ptr, RustBuffer source, RustBuffer account, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_HELD
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_HELD
+int8_t uniffi_torrenter_fn_method_engine_queue_held(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_TORRENT_FILE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_QUEUE_TORRENT_FILE
 uint64_t uniffi_torrenter_fn_method_engine_queue_torrent_file(void*_Nonnull ptr, RustBuffer bytes, RustBuffer account, RustCallStatus *_Nonnull out_status
@@ -356,6 +361,11 @@ uint64_t uniffi_torrenter_fn_method_engine_restart(void*_Nonnull ptr, uint64_t i
 uint64_t uniffi_torrenter_fn_method_engine_restart_route(void*_Nonnull ptr, uint64_t id, RustBuffer account, int8_t seed, RustBuffer dest, int8_t remove_from_service, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESUME_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_RESUME_QUEUE
+void uniffi_torrenter_fn_method_engine_resume_queue(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SEED
 int8_t uniffi_torrenter_fn_method_engine_seed(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -379,6 +389,11 @@ void uniffi_torrenter_fn_method_engine_set_debrid_remove_after(void*_Nonnull ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_JOB_FILES
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_JOB_FILES
 uint64_t uniffi_torrenter_fn_method_engine_set_job_files(void*_Nonnull ptr, uint64_t id, RustBuffer ids, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_MAX_DOWNLOADS
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_MAX_DOWNLOADS
+void uniffi_torrenter_fn_method_engine_set_max_downloads(void*_Nonnull ptr, RustBuffer max, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_FN_METHOD_ENGINE_SET_SEED
@@ -783,6 +798,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_queue_debrid(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_HELD
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_HELD
+uint16_t uniffi_torrenter_checksum_method_engine_queue_held(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_TORRENT_FILE
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_QUEUE_TORRENT_FILE
 uint16_t uniffi_torrenter_checksum_method_engine_queue_torrent_file(void
@@ -819,6 +840,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_restart_route(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_RESUME_QUEUE
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_RESUME_QUEUE
+uint16_t uniffi_torrenter_checksum_method_engine_resume_queue(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SEED
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SEED
 uint16_t uniffi_torrenter_checksum_method_engine_seed(void
@@ -846,6 +873,12 @@ uint16_t uniffi_torrenter_checksum_method_engine_set_debrid_remove_after(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_JOB_FILES
 #define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_JOB_FILES
 uint16_t uniffi_torrenter_checksum_method_engine_set_job_files(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_MAX_DOWNLOADS
+#define UNIFFI_FFIDEF_UNIFFI_TORRENTER_CHECKSUM_METHOD_ENGINE_SET_MAX_DOWNLOADS
+uint16_t uniffi_torrenter_checksum_method_engine_set_max_downloads(void
     
 );
 #endif

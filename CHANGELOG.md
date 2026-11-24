@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [3.10.1] - 2026-11-24
+
+### Added
+
+- **Downloads at once** setting (settings → downloads, 1–8, default 4) on desktop, Android and iOS (`max_downloads` in `config.json`; MCP reads it). It applies at once: raising it starts waiting jobs, lowering it never interrupts a running download.
+- A full disk now fails the job with **disk full: free some space, then restart** (not the raw OS error) and holds the queue: waiting jobs stay queued and a **queue held** line with **resume** appears above the list. Resume, restart, adding a job, resuming a paused job or ticking a file lifts it. MCP: `queue_held` in `jobs`, and `resume_queue`.
+
+### Changed
+
+- Paused jobs and seeding share jobs no longer take one of the download places: pausing lets the next queued job start, and resuming waits as **queued** if all places are taken. Waiting jobs start in list order, so a restarted or resumed job keeps its place.
+- On a phone, a queue held for a full disk with nothing downloading counts as idle (the Android notification and iOS keep alive stop).
+
+### Fixed
+
+- An HTTP download whose final merge fails no longer leaves its half-written `.merge.tmp` copy behind.
+- A magnet stopped or paused while it is still fetching metadata lets go of its download place at once (a stopped one kept waiting for the metadata in the background).
+
 ## [3.10.0] - 2026-11-21
 
 ### Added
